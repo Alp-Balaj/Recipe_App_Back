@@ -1,0 +1,173 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{BDE0ACA8-D98C-F564-62EC-8E2696471482}|RecipeApp.Infrastructure\\RecipeApp.Infrastructure.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.infrastructure\\presistence\\applicationdbcontextfactory.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{BDE0ACA8-D98C-F564-62EC-8E2696471482}|RecipeApp.Infrastructure\\RecipeApp.Infrastructure.csproj|solutionrelative:recipeapp.infrastructure\\presistence\\applicationdbcontextfactory.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{BDE0ACA8-D98C-F564-62EC-8E2696471482}|RecipeApp.Infrastructure\\RecipeApp.Infrastructure.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.infrastructure\\presistence\\applicationdbcontext.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{BDE0ACA8-D98C-F564-62EC-8E2696471482}|RecipeApp.Infrastructure\\RecipeApp.Infrastructure.csproj|solutionrelative:recipeapp.infrastructure\\presistence\\applicationdbcontext.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.domain\\entities\\userinteractions\\chatmessage.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|solutionrelative:recipeapp.domain\\entities\\userinteractions\\chatmessage.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.domain\\entities\\userinteractions\\shoppinglistitem.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|solutionrelative:recipeapp.domain\\entities\\userinteractions\\shoppinglistitem.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.domain\\entities\\userinteractions\\mealplanentry.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|solutionrelative:recipeapp.domain\\entities\\userinteractions\\mealplanentry.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.domain\\entities\\userinteractions\\mealplan.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|solutionrelative:recipeapp.domain\\entities\\userinteractions\\mealplan.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.domain\\entities\\userinteractions\\userfollow.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|solutionrelative:recipeapp.domain\\entities\\userinteractions\\userfollow.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.domain\\entities\\recipe.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|solutionrelative:recipeapp.domain\\entities\\recipe.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|c:\\users\\alp\\documents\\projekt\\recipeapp\\recipe_app_back\\recipeapp.domain\\entities\\user.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6C905533-663B-E19B-2703-0E767F3E5471}|RecipeApp.Domain\\RecipeApp.Domain.csproj|solutionrelative:recipeapp.domain\\entities\\user.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 2,
+          "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{aa2115a1-9712-457b-9047-dbb71ca2cdd2}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:128:0:{116d2292-e37d-41cd-a077-ebacac4c8cc4}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "ApplicationDbContextFactory.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Infrastructure\\Presistence\\ApplicationDbContextFactory.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Infrastructure\\Presistence\\ApplicationDbContextFactory.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Infrastructure\\Presistence\\ApplicationDbContextFactory.cs",
+              "RelativeToolTip": "RecipeApp.Infrastructure\\Presistence\\ApplicationDbContextFactory.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABIAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T12:29:15.327Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "ChatMessage.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\ChatMessage.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Domain\\Entities\\UserInteractions\\ChatMessage.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\ChatMessage.cs",
+              "RelativeToolTip": "RecipeApp.Domain\\Entities\\UserInteractions\\ChatMessage.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAA8AAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T12:04:59.526Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "ShoppingListItem.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\ShoppingListItem.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Domain\\Entities\\UserInteractions\\ShoppingListItem.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\ShoppingListItem.cs",
+              "RelativeToolTip": "RecipeApp.Domain\\Entities\\UserInteractions\\ShoppingListItem.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABAAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T12:04:02.214Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "MealPlanEntry.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\MealPlanEntry.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Domain\\Entities\\UserInteractions\\MealPlanEntry.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\MealPlanEntry.cs",
+              "RelativeToolTip": "RecipeApp.Domain\\Entities\\UserInteractions\\MealPlanEntry.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAA8AAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T12:01:31.771Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 5,
+              "Title": "MealPlan.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\MealPlan.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Domain\\Entities\\UserInteractions\\MealPlan.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\MealPlan.cs",
+              "RelativeToolTip": "RecipeApp.Domain\\Entities\\UserInteractions\\MealPlan.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAwAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T12:01:15.198Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 6,
+              "Title": "UserFollow.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\UserFollow.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Domain\\Entities\\UserInteractions\\UserFollow.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\UserInteractions\\UserFollow.cs",
+              "RelativeToolTip": "RecipeApp.Domain\\Entities\\UserInteractions\\UserFollow.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAsAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T12:01:01.355Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "ApplicationDbContext.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Infrastructure\\Presistence\\ApplicationDbContext.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Infrastructure\\Presistence\\ApplicationDbContext.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Infrastructure\\Presistence\\ApplicationDbContext.cs",
+              "RelativeToolTip": "RecipeApp.Infrastructure\\Presistence\\ApplicationDbContext.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAACsAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T11:59:12.784Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 7,
+              "Title": "Recipe.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\Recipe.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Domain\\Entities\\Recipe.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\Recipe.cs",
+              "RelativeToolTip": "RecipeApp.Domain\\Entities\\Recipe.cs",
+              "ViewState": "AgIAAAcAAAAAAAAAAAAAABIAAAAwAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T11:43:39.236Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 8,
+              "Title": "User.cs",
+              "DocumentMoniker": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\User.cs",
+              "RelativeDocumentMoniker": "RecipeApp.Domain\\Entities\\User.cs",
+              "ToolTip": "C:\\Users\\Alp\\Documents\\Projekt\\RecipeApp\\Recipe_App_Back\\RecipeApp.Domain\\Entities\\User.cs",
+              "RelativeToolTip": "RecipeApp.Domain\\Entities\\User.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAgAAAAuAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-06-22T08:47:46.968Z"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
