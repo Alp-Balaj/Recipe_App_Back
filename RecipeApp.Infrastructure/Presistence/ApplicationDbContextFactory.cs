@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.Extensions.Configuration;
+using Npgsql;
 
 namespace RecipeApp.Infrastructure.Persistence;
 
@@ -16,8 +17,11 @@ public class ApplicationDbContextFactory : IDesignTimeDbContextFactory<Applicati
 
         var connectionString = configuration.GetConnectionString("DefaultConnection");
 
+        var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
+        dataSourceBuilder.EnableDynamicJson();
+
         var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
-        optionsBuilder.UseNpgsql(connectionString);
+        optionsBuilder.UseNpgsql(dataSourceBuilder.Build());
 
         return new ApplicationDbContext(optionsBuilder.Options);
     }

@@ -1,5 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using RecipeApp.API.Filters;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
 
@@ -17,7 +18,8 @@ public static class AuthEndpoints
             return result.Succeeded
                 ? Results.Ok(result.Response)
                 : Results.Conflict(new { error = result.Error });
-        });
+        })
+        .AddEndpointFilter<ValidationFilter<RegisterRequest>>();
 
         group.MapPost("/login", async (LoginRequest request, IAuthService authService) =>
         {

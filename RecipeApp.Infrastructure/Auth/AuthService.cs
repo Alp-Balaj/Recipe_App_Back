@@ -41,7 +41,7 @@ public class AuthService : IAuthService
         _db.Users.Add(user);
         await _db.SaveChangesAsync(cancellationToken);
 
-        return AuthResult.Success(BuildResponse(user));
+        return AuthResult.Success(ToAuthResponse(user));
     }
 
     public async Task<AuthResult> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default)
@@ -55,10 +55,13 @@ public class AuthService : IAuthService
             return AuthResult.Failure("Invalid username/email or password.");
         }
 
-        return AuthResult.Success(BuildResponse(user));
+        return AuthResult.Success(ToAuthResponse(user));
     }
 
-    private AuthResponse BuildResponse(User user)
+    // Manual entity->DTO mapping (per 02-01/02-04): a private method colocated with the
+    // service, named To<Dto>(entity). Promote to a shared static extension method only if
+    // a second service needs the same mapping.
+    private AuthResponse ToAuthResponse(User user)
     {
         var (token, expiresAtUtc) = _jwtTokenService.GenerateToken(user);
         return new AuthResponse(token, expiresAtUtc, user.Id, user.Username);
