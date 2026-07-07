@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "vault": {
+    "name": "brian-the-brain",
+    "plansDir": "7 - Dev Folder/1. Projects/RecipeApp/Plans"
+  },
+  "commands": {
+    "build": ["dotnet", "build", "RecipeApp.slnx"],
+    "test": ["dotnet", "test", "RecipeApp.slnx"]
+  },
+  "gateTimeoutSeconds": 600,
+  "maxParseRetries": 2,
+  "maxCheckpointAttempts": 3,
+  "roles": {
+    "planner": {
+      "allowedTools": [
+        "Read(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)",
+        "Write(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)",
+        "Edit(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)"
+      ],
+      "maxTurns": 30,
+      "timeoutSeconds": 900,
+      "maxBudgetUsd": 2
+    },
+    "implementer": {
+      "allowedTools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Write(**)",
+        "Edit(**)",
+        "Bash(dotnet build*)",
+        "Bash(dotnet test*)",
+        "Bash(git status*)",
+        "Bash(git diff*)",
+        "Bash(git log*)"
+      ],
+      "maxTurns": 60,
+      "timeoutSeconds": 1800,
+      "maxBudgetUsd": 5
+    },
+    "reconciler": {
+      "allowedTools": [
+        "Read(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)",
+        "Write(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)",
+        "Edit(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)"
+      ],
+      "maxTurns": 15,
+      "timeoutSeconds": 600,
+      "maxBudgetUsd": 2
+    },
+    "verifier": {
+      "allowedTools": [
+        "Read(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)",
+        "Write(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)",
+        "Edit(7 - Dev Folder/1. Projects/RecipeApp/Plans/**)"
+      ],
+      "maxTurns": 15,
+      "timeoutSeconds": 600,
+      "maxBudgetUsd": 2
+    }
+  }
+}
