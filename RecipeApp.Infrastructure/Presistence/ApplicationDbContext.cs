@@ -26,6 +26,14 @@ public class ApplicationDbContext : DbContext
             .Property(u => u.DietaryRestrictions)
             .HasColumnType("jsonb");
 
+        builder.Entity<User>()
+            .HasIndex(u => u.Username)
+            .IsUnique();
+
+        builder.Entity<User>()
+            .HasIndex(u => u.Email)
+            .IsUnique();
+
         builder.Entity<Recipe>()
             .Property(r => r.Ingredients)
             .HasColumnType("jsonb");
