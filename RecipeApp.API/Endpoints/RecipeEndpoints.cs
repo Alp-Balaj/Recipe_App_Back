@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using RecipeApp.API.Filters;
+using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
 
@@ -19,5 +20,16 @@ public static class RecipeEndpoints
             return Results.Created($"/recipes/{response.Id}", response);
         })
         .AddEndpointFilter<ValidationFilter<CreateRecipeRequest>>();
+
+        group.MapGet("/{id:guid}", async (Guid id, IRecipeService recipeService, ClaimsPrincipal user) =>
+        {
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var result = await recipeService.GetRecipeByIdAsync(id, userId);
+            return result.Outcome switch
+            {
+                RecipeOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        });
     }
 }

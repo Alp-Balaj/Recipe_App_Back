@@ -71,6 +71,117 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    [Fact]
+    public async Task GetRecipeById_PublicRecipe_ReturnsOkForAnotherUser()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var created = await CreateRecipeAsync(ownerClient, ValidCreateRecipeRequest());
+
+        var otherClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+
+        var response = await otherClient.GetAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options);
+        Assert.NotNull(body);
+        Assert.Equal(created.Id, body!.Id);
+        Assert.Equal(created.Title, body.Title);
+        Assert.Equal(owner.UserId, body.CreatedByUserId);
+        Assert.Equal(created.Ingredients.Count, body.Ingredients.Count);
+        Assert.Equal(created.Steps.Count, body.Steps.Count);
+        Assert.Equal(created.Tags, body.Tags);
+    }
+
+    [Theory]
+    [InlineData(RecipeVisibility.Private)]
+    [InlineData(RecipeVisibility.FriendsOnly)]
+    public async Task GetRecipeById_NonPublicRecipe_ReturnsOkForOwner(RecipeVisibility visibility)
+    {
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var created = await CreateRecipeAsync(client, ValidCreateRecipeRequest() with { Visibility = visibility });
+
+        var response = await client.GetAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options);
+        Assert.NotNull(body);
+        Assert.Equal(created.Id, body!.Id);
+        Assert.Equal(visibility, body.Visibility);
+        Assert.Equal(auth.UserId, body.CreatedByUserId);
+    }
+
+    // 404 — not 403 — so the response doesn't confirm the private recipe exists.
+    [Theory]
+    [InlineData(RecipeVisibility.Private)]
+    [InlineData(RecipeVisibility.FriendsOnly)]
+    public async Task GetRecipeById_AnotherUsersNonPublicRecipe_ReturnsNotFound(RecipeVisibility visibility)
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var created = await CreateRecipeAsync(ownerClient, ValidCreateRecipeRequest() with { Visibility = visibility });
+
+        var otherClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+
+        var response = await otherClient.GetAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetRecipeById_NonexistentId_ReturnsNotFound()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var response = await client.GetAsync($"/recipes/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetRecipeById_SoftDeletedRecipe_ReturnsNotFound()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var created = await CreateRecipeAsync(client, ValidCreateRecipeRequest());
+
+        // No DELETE endpoint until checkpoint 05 — soft-delete the row directly.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var stored = await db.Recipes.SingleAsync(r => r.Id == created.Id);
+            stored.IsDeleted = true;
+            stored.DeletedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        var response = await client.GetAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetRecipeById_WithoutToken_ReturnsUnauthorized()
+    {
+        var client = factory.CreateClient();
+
+        var response = await client.GetAsync($"/recipes/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    private static async Task<RecipeResponse> CreateRecipeAsync(HttpClient client, CreateRecipeRequest request)
+    {
+        var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options)
+            ?? throw new InvalidOperationException("POST /recipes returned an empty body.");
+    }
+
     private static CreateRecipeRequest ValidCreateRecipeRequest() => new(
         Title: "Integration Test Flatbread",
         Description: "A minimal flatbread used to exercise POST /recipes end to end.",

@@ -1,6 +1,9 @@
+using Microsoft.EntityFrameworkCore;
+using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Entities;
+using RecipeApp.Domain.Enums;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.Recipes;
@@ -22,6 +25,26 @@ public class RecipeService : IRecipeService
         await _db.SaveChangesAsync(cancellationToken);
 
         return ToRecipeResponse(recipe);
+    }
+
+    public async Task<RecipeResult<RecipeResponse>> GetRecipeByIdAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        // Soft-deleted rows are already excluded by the global query filter (r => !r.IsDeleted).
+        var recipe = await _db.Recipes.SingleOrDefaultAsync(r => r.Id == id, cancellationToken);
+        if (recipe is null)
+        {
+            return RecipeResult<RecipeResponse>.NotFound();
+        }
+
+        // Visibility rule 2 (recipe-management plan): a non-public recipe not owned by the
+        // caller is reported as NotFound — never Forbidden — so 404s don't leak that a
+        // private recipe exists. FriendsOnly is owner-only until social-features adds follows.
+        if (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId)
+        {
+            return RecipeResult<RecipeResponse>.NotFound();
+        }
+
+        return RecipeResult<RecipeResponse>.Success(ToRecipeResponse(recipe));
     }
 
     // Manual DTO->entity mapping (per 02-01/02-04): a private method colocated with the
