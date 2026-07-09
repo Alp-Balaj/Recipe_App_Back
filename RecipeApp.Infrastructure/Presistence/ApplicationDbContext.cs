@@ -54,6 +54,17 @@ public class ApplicationDbContext : DbContext
             .Property(r => r.Visibility)
             .HasConversion<string>();
 
+        builder.Entity<Recipe>()
+            .Property(r => r.IsDeleted)
+            .HasDefaultValue(false);
+
+        builder.Entity<Recipe>()
+            .HasQueryFilter(r => !r.IsDeleted);
+
+        builder.Entity<Recipe>()
+            .HasIndex(r => new { r.CreatedAt, r.Id })
+            .IsDescending();
+
         builder.Entity<UserFollow>()
             .HasKey(uf => new { uf.FollowerId, uf.FollowingId });
 

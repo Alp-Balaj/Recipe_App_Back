@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using RecipeApp.Infrastructure.Persistence;
 using Testcontainers.PostgreSql;
 
@@ -27,8 +28,15 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
                 services.Remove(dbContextOptionsDescriptor);
             }
 
+            // Same dynamic-JSON opt-in as Program.cs/ApplicationDbContextFactory: the jsonb
+            // List<> columns (Recipe.Ingredients/Steps/Tags) throw NotSupportedException at
+            // SaveChangesAsync without it. A plain UseNpgsql(connectionString) is not enough.
+            var dataSourceBuilder = new NpgsqlDataSourceBuilder(_dbContainer.GetConnectionString());
+            dataSourceBuilder.EnableDynamicJson();
+            var dataSource = dataSourceBuilder.Build();
+
             services.AddDbContext<ApplicationDbContext>(options =>
-                options.UseNpgsql(_dbContainer.GetConnectionString()));
+                options.UseNpgsql(dataSource));
         });
     }
 

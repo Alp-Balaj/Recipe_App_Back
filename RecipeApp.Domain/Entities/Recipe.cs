@@ -22,6 +22,10 @@ public class Recipe
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
 
+    // Soft delete (excluded from queries via global query filter in ApplicationDbContext)
+    public bool IsDeleted { get; set; }
+    public DateTime? DeletedAt { get; set; }
+
     // Structured data (stored as jsonb)
     public List<RecipeIngredient> Ingredients { get; set; } = [];
     public List<RecipeStep> Steps { get; set; } = [];
