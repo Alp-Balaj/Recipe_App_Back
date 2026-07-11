@@ -86,11 +86,26 @@ public static class RecipeEndpoints
         {
             var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
             var result = await recipeService.GetRecipeByIdAsync(id, userId);
+            // GET detail never returns 403 — everything non-Success collapses to 404 so
+            // the response can't confirm a private recipe exists.
             return result.Outcome switch
             {
                 RecipeOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
         });
+
+        group.MapPut("/{id:guid}", async (Guid id, UpdateRecipeRequest request, IRecipeService recipeService, ClaimsPrincipal user) =>
+        {
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var result = await recipeService.UpdateRecipeAsync(id, request, userId);
+            return result.Outcome switch
+            {
+                RecipeOutcome.Success => Results.Ok(result.Value),
+                RecipeOutcome.Forbidden => Results.Forbid(),
+                _ => Results.NotFound(),
+            };
+        })
+        .AddEndpointFilter<ValidationFilter<UpdateRecipeRequest>>();
     }
 }

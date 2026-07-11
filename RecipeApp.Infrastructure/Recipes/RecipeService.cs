@@ -106,6 +106,51 @@ public class RecipeService : IRecipeService
         return new RecipeListResponse(rows.Select(ToRecipeResponse).ToList(), nextCursor);
     }
 
+    public async Task<RecipeResult<RecipeResponse>> UpdateRecipeAsync(Guid id, UpdateRecipeRequest request, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        // Soft-deleted rows are already excluded by the global query filter (r => !r.IsDeleted).
+        var recipe = await _db.Recipes.SingleOrDefaultAsync(r => r.Id == id, cancellationToken);
+        if (recipe is null)
+        {
+            return RecipeResult<RecipeResponse>.NotFound();
+        }
+
+        // Visibility rule 2 (recipe-management plan): a non-public recipe not owned by the
+        // caller is NotFound — never Forbidden — so 403s don't leak that a private recipe
+        // exists. Only a recipe the caller can see but doesn't own is Forbidden.
+        if (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId)
+        {
+            return RecipeResult<RecipeResponse>.NotFound();
+        }
+
+        if (recipe.CreatedByUserId != currentUserId)
+        {
+            return RecipeResult<RecipeResponse>.Forbidden();
+        }
+
+        // Full replace: every request field overwrites the row, and the jsonb collections
+        // (Ingredients/Steps/Tags) are swapped wholesale — no merge semantics.
+        // Id, CreatedAt, CreatedByUserId, IsDeleted/DeletedAt are never touched.
+        recipe.Title = request.Title;
+        recipe.Description = request.Description;
+        recipe.PrepTimeMinutes = request.PrepTimeMinutes;
+        recipe.CookTimeMinutes = request.CookTimeMinutes;
+        recipe.Servings = request.Servings;
+        recipe.Difficulty = request.Difficulty;
+        recipe.CuisineType = request.CuisineType;
+        recipe.CaloriesPerServing = request.CaloriesPerServing;
+        recipe.ImageUrl = request.ImageUrl;
+        recipe.Visibility = request.Visibility;
+        recipe.Ingredients = request.Ingredients;
+        recipe.Steps = request.Steps;
+        recipe.Tags = request.Tags;
+        recipe.UpdatedAt = DateTime.UtcNow;
+
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return RecipeResult<RecipeResponse>.Success(ToRecipeResponse(recipe));
+    }
+
     // Manual DTO->entity mapping (per 02-01/02-04): a private method colocated with the
     // service, named To<Entity>(dto). CreatedByUserId is passed in explicitly from the
     // authenticated user's JWT claims, never taken from the request body.
