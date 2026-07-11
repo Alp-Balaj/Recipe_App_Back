@@ -47,6 +47,65 @@ public class RecipeService : IRecipeService
         return RecipeResult<RecipeResponse>.Success(ToRecipeResponse(recipe));
     }
 
+    public async Task<RecipeListResponse> GetRecipesAsync(RecipeListQuery query, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        // Visibility rule 1 (recipe-management plan): the visibility predicate is the FIRST
+        // predicate composed onto the query, before any user-supplied filter, so no filter
+        // combination can widen what the caller may see. FriendsOnly is owner-only until
+        // social-features adds follows. Soft-deleted rows are excluded by the global filter.
+        var recipes = _db.Recipes
+            .Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId);
+
+        if (!string.IsNullOrEmpty(query.Cuisine))
+        {
+            // Case-insensitive exact match (Decisions §3) — lower() equality, not ILIKE,
+            // so % and _ in user input can't act as wildcards.
+            var cuisine = query.Cuisine.ToLowerInvariant();
+            recipes = recipes.Where(r => r.CuisineType != null && r.CuisineType.ToLower() == cuisine);
+        }
+
+        if (query.Difficulty is not null)
+        {
+            recipes = recipes.Where(r => r.Difficulty == query.Difficulty);
+        }
+
+        // Match-ALL tags (Decisions §3): each Contains translates to jsonb containment
+        // ("Tags" @> to_jsonb(@tag)), AND-composed across the requested tags.
+        foreach (var tag in query.Tags)
+        {
+            recipes = recipes.Where(r => r.Tags.Contains(tag));
+        }
+
+        if (query.Cursor is not null)
+        {
+            var cursorCreatedAt = query.Cursor.CreatedAt;
+            var cursorId = query.Cursor.Id;
+            // Explicit two-branch keyset predicate — EF Core can't translate a row-value
+            // (a, b) < (c, d) comparison from LINQ. CompareTo becomes uuid < in SQL.
+            recipes = recipes.Where(r =>
+                r.CreatedAt < cursorCreatedAt
+                || (r.CreatedAt == cursorCreatedAt && r.Id.CompareTo(cursorId) < 0));
+        }
+
+        // limit + 1: the extra row only signals that a further page exists; it is trimmed
+        // from the response, and the last returned item becomes the next cursor.
+        var rows = await recipes
+            .OrderByDescending(r => r.CreatedAt)
+            .ThenByDescending(r => r.Id)
+            .Take(query.Limit + 1)
+            .ToListAsync(cancellationToken);
+
+        string? nextCursor = null;
+        if (rows.Count > query.Limit)
+        {
+            rows.RemoveAt(query.Limit);
+            var last = rows[^1];
+            nextCursor = new RecipeListCursor(last.CreatedAt, last.Id).Encode();
+        }
+
+        return new RecipeListResponse(rows.Select(ToRecipeResponse).ToList(), nextCursor);
+    }
+
     // Manual DTO->entity mapping (per 02-01/02-04): a private method colocated with the
     // service, named To<Entity>(dto). CreatedByUserId is passed in explicitly from the
     // authenticated user's JWT claims, never taken from the request body.
