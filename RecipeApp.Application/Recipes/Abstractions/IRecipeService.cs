@@ -11,4 +11,8 @@ public interface IRecipeService
     Task<RecipeListResponse> GetRecipesAsync(RecipeListQuery query, Guid currentUserId, CancellationToken cancellationToken = default);
 
     Task<RecipeResult<RecipeResponse>> UpdateRecipeAsync(Guid id, UpdateRecipeRequest request, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    // Soft delete restricted to the owner. RecipeResult<bool> carries no meaningful payload
+    // (the endpoint maps Success to 204 No Content); bool is a throwaway T for the generic.
+    Task<RecipeResult<bool>> DeleteRecipeAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default);
 }

@@ -151,6 +151,40 @@ public class RecipeService : IRecipeService
         return RecipeResult<RecipeResponse>.Success(ToRecipeResponse(recipe));
     }
 
+    public async Task<RecipeResult<bool>> DeleteRecipeAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        // Soft-deleted rows are already excluded by the global query filter (r => !r.IsDeleted),
+        // so a repeat DELETE of the same recipe naturally falls through to NotFound.
+        var recipe = await _db.Recipes.SingleOrDefaultAsync(r => r.Id == id, cancellationToken);
+        if (recipe is null)
+        {
+            return RecipeResult<bool>.NotFound();
+        }
+
+        // Visibility rule 2 (recipe-management plan): a non-public recipe not owned by the
+        // caller is NotFound — never Forbidden — so 403s don't leak that a private recipe
+        // exists. Only a recipe the caller can see but doesn't own is Forbidden.
+        if (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId)
+        {
+            return RecipeResult<bool>.NotFound();
+        }
+
+        if (recipe.CreatedByUserId != currentUserId)
+        {
+            return RecipeResult<bool>.Forbidden();
+        }
+
+        // Soft delete: flip the flag and stamp DeletedAt, then save — no SQL DELETE is ever
+        // issued, so the implicit cascades on Like/Comment/SavedRecipe/MealPlanEntry never
+        // fire and interaction history survives. The global query filter hides the row from
+        // every later read.
+        recipe.IsDeleted = true;
+        recipe.DeletedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return RecipeResult<bool>.Success(true);
+    }
+
     // Manual DTO->entity mapping (per 02-01/02-04): a private method colocated with the
     // service, named To<Entity>(dto). CreatedByUserId is passed in explicitly from the
     // authenticated user's JWT claims, never taken from the request body.

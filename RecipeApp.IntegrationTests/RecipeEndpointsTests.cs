@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.Recipes.Dtos;
+using RecipeApp.Domain.Entities.RecipeInteractions;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -321,6 +322,176 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         var response = await client.PutAsJsonAsync($"/recipes/{Guid.NewGuid()}", ValidUpdateRecipeRequest(), TestJson.Options);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DeleteRecipe_AsOwner_ReturnsNoContentAndSoftDeletesRowInPostgres()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var created = await CreateRecipeAsync(client, ValidCreateRecipeRequest());
+
+        var response = await client.DeleteAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        // The row must STILL EXIST in Postgres — soft delete, not a SQL DELETE. Read it back
+        // through IgnoreQueryFilters() (the global r => !r.IsDeleted filter would otherwise
+        // hide it) in a fresh DbContext scope, not via the endpoint's response.
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var stored = await db.Recipes.IgnoreQueryFilters().SingleAsync(r => r.Id == created.Id);
+
+        Assert.True(stored.IsDeleted);
+        Assert.NotNull(stored.DeletedAt);
+    }
+
+    [Fact]
+    public async Task DeleteRecipe_AsOwner_RemovesFromDetailAndList()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var created = await CreateRecipeAsync(client, ValidCreateRecipeRequest());
+
+        // Before deletion the owner sees it in both detail and the list.
+        Assert.Contains(created.Id, await GetAllRecipeIdsAsync(client));
+
+        var deleteResponse = await client.DeleteAsync($"/recipes/{created.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, deleteResponse.StatusCode);
+
+        // After deletion: 404 on detail and absent from the list — even for the owner.
+        var detailResponse = await client.GetAsync($"/recipes/{created.Id}");
+        Assert.Equal(HttpStatusCode.NotFound, detailResponse.StatusCode);
+        Assert.DoesNotContain(created.Id, await GetAllRecipeIdsAsync(client));
+    }
+
+    [Fact]
+    public async Task DeleteRecipe_PreservesInteractionRows_NoCascadeFires()
+    {
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var created = await CreateRecipeAsync(client, ValidCreateRecipeRequest());
+
+        // Seed a Like, a Comment, and a SavedRecipe referencing the recipe directly via
+        // DbContext (no interaction endpoints exist yet). The interacting user is the owner —
+        // a registered user, so the FK to Users is satisfied.
+        Guid commentId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Likes.Add(new Like { UserId = auth.UserId, RecipeId = created.Id });
+            var comment = new Comment { Id = Guid.NewGuid(), Content = "Delicious!", UserId = auth.UserId, RecipeId = created.Id };
+            commentId = comment.Id;
+            db.Comments.Add(comment);
+            db.SavedRecipes.Add(new SavedRecipe { UserId = auth.UserId, RecipeId = created.Id });
+            await db.SaveChangesAsync();
+        }
+
+        var deleteResponse = await client.DeleteAsync($"/recipes/{created.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, deleteResponse.StatusCode);
+
+        // No SQL DELETE fired against the recipe, so the implicit cascades never ran — every
+        // interaction row still exists. (These DbSets carry no query filter of their own.)
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            Assert.True(await db.Likes.AnyAsync(l => l.UserId == auth.UserId && l.RecipeId == created.Id));
+            Assert.True(await db.Comments.AnyAsync(c => c.Id == commentId));
+            Assert.True(await db.SavedRecipes.AnyAsync(s => s.UserId == auth.UserId && s.RecipeId == created.Id));
+        }
+    }
+
+    [Fact]
+    public async Task DeleteRecipe_Repeated_ReturnsNotFound()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var created = await CreateRecipeAsync(client, ValidCreateRecipeRequest());
+
+        var first = await client.DeleteAsync($"/recipes/{created.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, first.StatusCode);
+
+        // The row is now behind the global query filter, so the second DELETE can't find it.
+        var second = await client.DeleteAsync($"/recipes/{created.Id}");
+        Assert.Equal(HttpStatusCode.NotFound, second.StatusCode);
+    }
+
+    // Visible-but-not-owned is a 403; the recipe's existence is already public knowledge.
+    [Fact]
+    public async Task DeleteRecipe_AnotherUsersPublicRecipe_ReturnsForbidden()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var created = await CreateRecipeAsync(ownerClient, ValidCreateRecipeRequest());
+
+        var otherClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+
+        var response = await otherClient.DeleteAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    // 404 — not 403 — so the response doesn't confirm the private recipe exists.
+    [Theory]
+    [InlineData(RecipeVisibility.Private)]
+    [InlineData(RecipeVisibility.FriendsOnly)]
+    public async Task DeleteRecipe_AnotherUsersNonPublicRecipe_ReturnsNotFound(RecipeVisibility visibility)
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var created = await CreateRecipeAsync(ownerClient, ValidCreateRecipeRequest() with { Visibility = visibility });
+
+        var otherClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+
+        var response = await otherClient.DeleteAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DeleteRecipe_NonexistentId_ReturnsNotFound()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var response = await client.DeleteAsync($"/recipes/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DeleteRecipe_WithoutToken_ReturnsUnauthorized()
+    {
+        var client = factory.CreateClient();
+
+        var response = await client.DeleteAsync($"/recipes/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    // Walks every page of GET /recipes for the caller (cursor-followed), returning all
+    // visible recipe ids. Used to prove presence-then-absence around a delete without
+    // depending on how many recipes other tests in this shared-DB class have created.
+    private static async Task<List<Guid>> GetAllRecipeIdsAsync(HttpClient client)
+    {
+        var ids = new List<Guid>();
+        string? cursor = null;
+        do
+        {
+            var url = cursor is null
+                ? "/recipes?limit=50"
+                : $"/recipes?limit=50&cursor={Uri.EscapeDataString(cursor)}";
+            var response = await client.GetAsync(url);
+            response.EnsureSuccessStatusCode();
+            var page = await response.Content.ReadFromJsonAsync<RecipeListResponse>(TestJson.Options)
+                ?? throw new InvalidOperationException("GET /recipes returned an empty body.");
+            ids.AddRange(page.Items.Select(i => i.Id));
+            cursor = page.NextCursor;
+        }
+        while (cursor is not null);
+        return ids;
     }
 
     private static async Task<RecipeResponse> CreateRecipeAsync(HttpClient client, CreateRecipeRequest request)

@@ -107,5 +107,19 @@ public static class RecipeEndpoints
             };
         })
         .AddEndpointFilter<ValidationFilter<UpdateRecipeRequest>>();
+
+        group.MapDelete("/{id:guid}", async (Guid id, IRecipeService recipeService, ClaimsPrincipal user) =>
+        {
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var result = await recipeService.DeleteRecipeAsync(id, userId);
+            // Soft delete: 204 on success (no body). Same 403-vs-404 owner/visibility split
+            // as PUT; a repeat DELETE lands in NotFound once the row is behind the filter.
+            return result.Outcome switch
+            {
+                RecipeOutcome.Success => Results.NoContent(),
+                RecipeOutcome.Forbidden => Results.Forbid(),
+                _ => Results.NotFound(),
+            };
+        });
     }
 }
