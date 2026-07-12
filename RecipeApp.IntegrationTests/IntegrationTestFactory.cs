@@ -19,6 +19,15 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        // Program.cs fails fast when these are missing. They moved out of appsettings.json
+        // into user-secrets (audit fix 1), which don't exist in CI — so the tests must be
+        // self-contained and inject both here. The host builds lazily on first Services
+        // access (after the container has started), so GetConnectionString() is safe; the
+        // resulting DbContext registration is replaced below anyway. The signing key is a
+        // fixed test-only value (>= 32 bytes for HS256), deliberately NOT a secret.
+        builder.UseSetting("ConnectionStrings:DefaultConnection", _dbContainer.GetConnectionString());
+        builder.UseSetting("Jwt:Key", "integration-tests-signing-key-not-a-secret-0123456789abcdef");
+
         builder.ConfigureServices(services =>
         {
             var dbContextOptionsDescriptor = services.SingleOrDefault(

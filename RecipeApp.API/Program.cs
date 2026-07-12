@@ -23,7 +23,12 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
 
-var npgsqlDataSourceBuilder = new NpgsqlDataSourceBuilder(builder.Configuration.GetConnectionString("DefaultConnection"));
+// Secrets live outside the repo (audit fix 1): user-secrets in local dev, env vars elsewhere.
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException(
+        "ConnectionStrings:DefaultConnection not configured — set via user-secrets or ConnectionStrings__DefaultConnection env var.");
+
+var npgsqlDataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
 npgsqlDataSourceBuilder.EnableDynamicJson();
 var npgsqlDataSource = npgsqlDataSourceBuilder.Build();
 
@@ -39,6 +44,12 @@ builder.Services.AddScoped<IRecipeService, RecipeService>();
 
 var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>()
     ?? throw new InvalidOperationException("Missing 'Jwt' configuration section.");
+
+if (string.IsNullOrWhiteSpace(jwtSettings.Key))
+{
+    throw new InvalidOperationException(
+        "Jwt:Key not configured — set via user-secrets or Jwt__Key env var.");
+}
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
