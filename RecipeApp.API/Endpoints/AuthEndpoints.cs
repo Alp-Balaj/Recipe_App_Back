@@ -10,20 +10,23 @@ public static class AuthEndpoints
 {
     public static void MapAuthEndpoints(this WebApplication app)
     {
-        var group = app.MapGroup("/auth").AllowAnonymous();
+        // IP-partitioned rate limit (audit 4.5) on the anonymous auth surface — brute-force
+        // protection for /register and /login. /auth/me below is mapped on `app`, not this
+        // group, so it stays unlimited (and auth-required via the fallback policy).
+        var group = app.MapGroup("/auth").AllowAnonymous().RequireRateLimiting(RateLimitPolicies.Auth);
 
-        group.MapPost("/register", async (RegisterRequest request, IAuthService authService) =>
+        group.MapPost("/register", async (RegisterRequest request, IAuthService authService, CancellationToken cancellationToken) =>
         {
-            var result = await authService.RegisterAsync(request);
+            var result = await authService.RegisterAsync(request, cancellationToken);
             return result.Succeeded
                 ? Results.Ok(result.Response)
                 : Results.Conflict(new { error = result.Error });
         })
         .AddEndpointFilter<ValidationFilter<RegisterRequest>>();
 
-        group.MapPost("/login", async (LoginRequest request, IAuthService authService) =>
+        group.MapPost("/login", async (LoginRequest request, IAuthService authService, CancellationToken cancellationToken) =>
         {
-            var result = await authService.LoginAsync(request);
+            var result = await authService.LoginAsync(request, cancellationToken);
             return result.Succeeded
                 ? Results.Ok(result.Response)
                 : Results.Unauthorized();

@@ -28,6 +28,12 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         builder.UseSetting("ConnectionStrings:DefaultConnection", _dbContainer.GetConnectionString());
         builder.UseSetting("Jwt:Key", "integration-tests-signing-key-not-a-secret-0123456789abcdef");
 
+        // Every TestServer request has a null RemoteIpAddress, so they all fall into the one
+        // "unknown" rate-limit partition. The suite makes far more than the production 10/min
+        // of auth calls per host, so raise the /auth permit limit out of the way here — the
+        // 429 behaviour is verified live, not under the shared TestServer (audit 4.5 note).
+        builder.UseSetting("RateLimiting:AuthPermitLimit", "1000000");
+
         builder.ConfigureServices(services =>
         {
             var dbContextOptionsDescriptor = services.SingleOrDefault(

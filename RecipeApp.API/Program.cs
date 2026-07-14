@@ -1,11 +1,14 @@
 using System.Text;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
+using RecipeApp.API;
 using RecipeApp.API.Endpoints;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Common;
@@ -47,6 +50,33 @@ builder.Services.AddScoped<IRecipeService, RecipeService>();
 // cp03 wires the /chat endpoints; the Anthropic:ApiKey check is deferred to resolution time.
 builder.Services.AddChatAssistant(builder.Configuration);
 
+// Structured error responses: RFC-7807 ProblemDetails everywhere, with a global handler
+// (GlobalExceptionHandler) that logs unhandled exceptions and returns a 500 ProblemDetails
+// without leaking a stack trace. Wired into the pipeline via app.UseExceptionHandler() below.
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+
+// Rate limiting (audit 4.5): brute-force protection for the anonymous /auth/* endpoints.
+// The "auth" policy is IP-partitioned, PermitLimit requests per Window (default 10/min),
+// no queue, and rejects overflow with 429. See RateLimitPolicies for the convention
+// chat-ai reuses. The permit limit is configurable (RateLimiting:AuthPermitLimit) so
+// integration tests — which all share the null "unknown" partition under the TestServer —
+// can raise it out of the way; production runs on the default.
+var authPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:AuthPermitLimit") ?? 10;
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy(RateLimitPolicies.Auth, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = authPermitLimit,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+});
+
 var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>()
     ?? throw new InvalidOperationException("Missing 'Jwt' configuration section.");
 
@@ -80,6 +110,10 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 
+// Global exception handler first, so it wraps auth and every endpoint. Logs the exception
+// and returns a ProblemDetails 500 with no stack trace (safe in Production).
+app.UseExceptionHandler();
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
@@ -90,37 +124,17 @@ app.UseHttpsRedirection();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapAuthEndpoints();
 app.MapRecipeEndpoints();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
-
+// Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
+// fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok" }))
+.AllowAnonymous()
 .WithName("GetHealth");
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
 
 public partial class Program { }

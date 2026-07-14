@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Auth;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
@@ -12,12 +13,14 @@ public class AuthService : IAuthService
     private readonly ApplicationDbContext _db;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenService _jwtTokenService;
+    private readonly ILogger<AuthService> _logger;
 
-    public AuthService(ApplicationDbContext db, IPasswordHasher passwordHasher, IJwtTokenService jwtTokenService)
+    public AuthService(ApplicationDbContext db, IPasswordHasher passwordHasher, IJwtTokenService jwtTokenService, ILogger<AuthService> logger)
     {
         _db = db;
         _passwordHasher = passwordHasher;
         _jwtTokenService = jwtTokenService;
+        _logger = logger;
     }
 
     public async Task<AuthResult> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken = default)
@@ -27,6 +30,7 @@ public class AuthService : IAuthService
 
         if (alreadyExists)
         {
+            _logger.LogInformation("Registration rejected: username or email already taken.");
             return AuthResult.Failure("Username or email is already taken.");
         }
 
@@ -41,6 +45,7 @@ public class AuthService : IAuthService
         _db.Users.Add(user);
         await _db.SaveChangesAsync(cancellationToken);
 
+        _logger.LogInformation("Registered new user {UserId}.", user.Id);
         return AuthResult.Success(ToAuthResponse(user));
     }
 
@@ -52,9 +57,11 @@ public class AuthService : IAuthService
 
         if (user is null || !_passwordHasher.VerifyPassword(user, user.PasswordHash, request.Password))
         {
+            _logger.LogWarning("Failed login attempt.");
             return AuthResult.Failure("Invalid username/email or password.");
         }
 
+        _logger.LogInformation("User {UserId} logged in.", user.Id);
         return AuthResult.Success(ToAuthResponse(user));
     }
 

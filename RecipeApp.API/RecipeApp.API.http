@@ -1,6 +1,30 @@
 @RecipeApp.API_HostAddress = http://localhost:5109
 
-GET {{RecipeApp.API_HostAddress}}/weatherforecast/
+### Liveness probe — anonymous, returns 200 without a bearer.
+GET {{RecipeApp.API_HostAddress}}/api/health
 Accept: application/json
+
+### Register a new user (anonymous, rate-limited: 10/min per IP).
+POST {{RecipeApp.API_HostAddress}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "demo_user",
+  "email": "demo_user@example.com",
+  "password": "Password123!"
+}
+
+### Log in (anonymous, rate-limited: 10/min per IP). Copy the returned token below.
+POST {{RecipeApp.API_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "usernameOrEmail": "demo_user",
+  "password": "Password123!"
+}
+
+### Current user — requires a bearer token from /auth/login.
+GET {{RecipeApp.API_HostAddress}}/auth/me
+Authorization: Bearer <paste-token-here>
 
 ###

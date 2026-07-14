@@ -19,10 +19,10 @@ public static class RecipeEndpoints
     {
         var group = app.MapGroup("/recipes");
 
-        group.MapPost("/", async (CreateRecipeRequest request, IRecipeService recipeService, ClaimsPrincipal user) =>
+        group.MapPost("/", async (CreateRecipeRequest request, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            var response = await recipeService.CreateRecipeAsync(request, userId);
+            var response = await recipeService.CreateRecipeAsync(request, userId, cancellationToken);
             return Results.Created($"/recipes/{response.Id}", response);
         })
         .AddEndpointFilter<ValidationFilter<CreateRecipeRequest>>();
@@ -34,7 +34,8 @@ public static class RecipeEndpoints
             string? cursor,
             int? limit,
             IRecipeService recipeService,
-            ClaimsPrincipal user) =>
+            ClaimsPrincipal user,
+            CancellationToken cancellationToken) =>
         {
             var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
@@ -78,14 +79,14 @@ public static class RecipeEndpoints
             effectiveLimit = Math.Min(effectiveLimit, MaxPageSize);
 
             var query = new RecipeListQuery(cuisine, difficultyFilter, tags ?? [], decodedCursor, effectiveLimit);
-            var response = await recipeService.GetRecipesAsync(query, userId);
+            var response = await recipeService.GetRecipesAsync(query, userId, cancellationToken);
             return Results.Ok(response);
         });
 
-        group.MapGet("/{id:guid}", async (Guid id, IRecipeService recipeService, ClaimsPrincipal user) =>
+        group.MapGet("/{id:guid}", async (Guid id, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            var result = await recipeService.GetRecipeByIdAsync(id, userId);
+            var result = await recipeService.GetRecipeByIdAsync(id, userId, cancellationToken);
             // GET detail never returns 403 — everything non-Success collapses to 404 so
             // the response can't confirm a private recipe exists.
             return result.Outcome switch
@@ -95,10 +96,10 @@ public static class RecipeEndpoints
             };
         });
 
-        group.MapPut("/{id:guid}", async (Guid id, UpdateRecipeRequest request, IRecipeService recipeService, ClaimsPrincipal user) =>
+        group.MapPut("/{id:guid}", async (Guid id, UpdateRecipeRequest request, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            var result = await recipeService.UpdateRecipeAsync(id, request, userId);
+            var result = await recipeService.UpdateRecipeAsync(id, request, userId, cancellationToken);
             return result.Outcome switch
             {
                 RecipeOutcome.Success => Results.Ok(result.Value),
@@ -108,10 +109,10 @@ public static class RecipeEndpoints
         })
         .AddEndpointFilter<ValidationFilter<UpdateRecipeRequest>>();
 
-        group.MapDelete("/{id:guid}", async (Guid id, IRecipeService recipeService, ClaimsPrincipal user) =>
+        group.MapDelete("/{id:guid}", async (Guid id, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            var result = await recipeService.DeleteRecipeAsync(id, userId);
+            var result = await recipeService.DeleteRecipeAsync(id, userId, cancellationToken);
             // Soft delete: 204 on success (no body). Same 403-vs-404 owner/visibility split
             // as PUT; a repeat DELETE lands in NotFound once the row is behind the filter.
             return result.Outcome switch

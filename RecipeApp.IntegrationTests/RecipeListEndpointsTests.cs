@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.Recipes.Dtos;
+using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -241,6 +242,73 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
         var response = await client.GetAsync("/recipes");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    // Keyset tie-break coverage (audit 4.5): the tie branch in RecipeService
+    // (r.CreatedAt == cursor.CreatedAt && r.Id.CompareTo(cursor.Id) < 0) only fires when two
+    // rows share an exact CreatedAt. HTTP POSTs get distinct microsecond timestamps and never
+    // collide, so the rows are seeded DIRECTLY via a DbContext scope with one identical
+    // CreatedAt value (already at microsecond precision, so the DB round-trip stays equal —
+    // Decisions/postgres-microsecond-timestamp-precision.md).
+    [Fact]
+    public async Task ListRecipes_RowsWithIdenticalCreatedAt_PaginateOrderedByIdDescWithoutSkips()
+    {
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var marker = UniqueTag();
+
+        // Microsecond-precise (no sub-microsecond ticks), so every row stores the exact same
+        // instant and the keyset predicate must fall through to the Id tie-break.
+        var sharedCreatedAt = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        var seededIds = new List<Guid>();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            for (var i = 0; i < 5; i++)
+            {
+                var recipe = new Recipe
+                {
+                    Id = Guid.NewGuid(),
+                    Title = $"Tie {i}",
+                    Description = "Seeded with an identical CreatedAt to exercise the keyset tie-break.",
+                    PrepTimeMinutes = 1,
+                    CookTimeMinutes = 1,
+                    Servings = 1,
+                    Difficulty = DifficultyLevel.Easy,
+                    Visibility = RecipeVisibility.Public,
+                    CreatedAt = sharedCreatedAt,
+                    CreatedByUserId = auth.UserId,
+                    Ingredients = [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = "cup" }],
+                    Steps = [new RecipeStep { StepNumber = 1, Description = "Combine." }],
+                    Tags = [marker],
+                };
+                db.Recipes.Add(recipe);
+                seededIds.Add(recipe.Id);
+            }
+            await db.SaveChangesAsync();
+        }
+
+        // limit=2 forces at least three pages, so the cursor crosses the equal-CreatedAt
+        // boundary twice — exactly where a missing tie-break would skip or duplicate a row.
+        var walkedIds = (await WalkAllPagesAsync(client, $"/recipes?tags={marker}&limit=2"))
+            .SelectMany(p => p.Items)
+            .Select(r => r.Id)
+            .ToList();
+
+        // No skips, no duplicates: the walk yields exactly the seeded set.
+        Assert.Equal(seededIds.OrderBy(id => id).ToList(), walkedIds.OrderBy(id => id).ToList());
+
+        // With CreatedAt tied, the sole ordering key is Id DESC. Postgres orders uuid by its
+        // 16 bytes, which equals ordinal comparison of the canonical lowercase hex ("N"), so
+        // the returned sequence must be strictly descending under that comparison.
+        for (var i = 1; i < walkedIds.Count; i++)
+        {
+            var previous = walkedIds[i - 1].ToString("N");
+            var current = walkedIds[i].ToString("N");
+            Assert.True(
+                string.CompareOrdinal(previous, current) > 0,
+                $"Expected Id DESC across the tie: {previous} should sort after {current}.");
+        }
     }
 
     private static string UniqueTag() => $"list-{Guid.NewGuid():N}";

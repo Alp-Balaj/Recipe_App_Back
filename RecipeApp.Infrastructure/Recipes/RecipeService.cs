@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
@@ -11,10 +12,12 @@ namespace RecipeApp.Infrastructure.Recipes;
 public class RecipeService : IRecipeService
 {
     private readonly ApplicationDbContext _db;
+    private readonly ILogger<RecipeService> _logger;
 
-    public RecipeService(ApplicationDbContext db)
+    public RecipeService(ApplicationDbContext db, ILogger<RecipeService> logger)
     {
         _db = db;
+        _logger = logger;
     }
 
     public async Task<RecipeResponse> CreateRecipeAsync(CreateRecipeRequest request, Guid createdByUserId, CancellationToken cancellationToken = default)
@@ -24,6 +27,7 @@ public class RecipeService : IRecipeService
         _db.Recipes.Add(recipe);
         await _db.SaveChangesAsync(cancellationToken);
 
+        _logger.LogInformation("User {UserId} created recipe {RecipeId}.", createdByUserId, recipe.Id);
         return ToRecipeResponse(recipe);
     }
 
@@ -125,6 +129,7 @@ public class RecipeService : IRecipeService
 
         if (recipe.CreatedByUserId != currentUserId)
         {
+            _logger.LogWarning("User {UserId} forbidden from updating recipe {RecipeId}.", currentUserId, id);
             return RecipeResult<RecipeResponse>.Forbidden();
         }
 
@@ -171,6 +176,7 @@ public class RecipeService : IRecipeService
 
         if (recipe.CreatedByUserId != currentUserId)
         {
+            _logger.LogWarning("User {UserId} forbidden from deleting recipe {RecipeId}.", currentUserId, id);
             return RecipeResult<bool>.Forbidden();
         }
 
