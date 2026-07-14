@@ -13,6 +13,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<Comment> Comments => Set<Comment>();
     public DbSet<Like> Likes => Set<Like>();
     public DbSet<SavedRecipe> SavedRecipes => Set<SavedRecipe>();
+    public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -83,5 +84,14 @@ public class ApplicationDbContext : DbContext
         builder.Entity<MealPlanEntry>()
             .Property(m => m.MealType)
             .HasConversion<string>();
+
+        builder.Entity<ChatMessage>()
+            .Property(m => m.SuggestedRecipeIds)
+            .HasColumnType("jsonb");
+
+        // Backs keyset paging of a user's history (CreatedAt DESC, Id DESC within a user)
+        builder.Entity<ChatMessage>()
+            .HasIndex(m => new { m.UserId, m.CreatedAt, m.Id })
+            .IsDescending(false, true, true);
     }
 }
