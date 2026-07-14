@@ -9,6 +9,10 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <!-- First reference to Infrastructure from this test project pulls EF Core transitively at
+         its 10.0.4 floor, mismatching Infrastructure's 10.0.9 (CS1705). Pin to 10.0.9 to match
+         (Decisions/dotnet-test-project-ef-core-pinning.md). -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.9" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
@@ -21,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\RecipeApp.Application\RecipeApp.Application.csproj" />
     <ProjectReference Include="..\RecipeApp.Domain\RecipeApp.Domain.csproj" />
+    <ProjectReference Include="..\RecipeApp.Infrastructure\RecipeApp.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

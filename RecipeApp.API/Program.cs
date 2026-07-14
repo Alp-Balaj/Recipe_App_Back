@@ -11,6 +11,7 @@ using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Common;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Infrastructure.Auth;
+using RecipeApp.Infrastructure.Chat;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
 
@@ -41,6 +42,10 @@ builder.Services.AddScoped<IPasswordHasher, PasswordHasher>();
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
+
+// chat-ai cp02: registers IChatAssistantService (Claude-backed). Nothing consumes it until
+// cp03 wires the /chat endpoints; the Anthropic:ApiKey check is deferred to resolution time.
+builder.Services.AddChatAssistant(builder.Configuration);
 
 var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>()
     ?? throw new InvalidOperationException("Missing 'Jwt' configuration section.");
