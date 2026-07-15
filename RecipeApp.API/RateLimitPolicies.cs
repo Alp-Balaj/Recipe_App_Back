@@ -11,4 +11,8 @@ namespace RecipeApp.API;
 public static class RateLimitPolicies
 {
     public const string Auth = "auth";
+
+    // chat-ai cp3: the /chat/conversations lane. Its own budget (RateLimiting:ChatPermitLimit)
+    // keeps money-gated LLM traffic isolated from the auth brute-force limit.
+    public const string Chat = "chat";
 }

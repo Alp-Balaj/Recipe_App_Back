@@ -2,7 +2,9 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
+using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Infrastructure.Persistence;
 using Testcontainers.PostgreSql;
 
@@ -33,6 +35,10 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         // of auth calls per host, so raise the /auth permit limit out of the way here — the
         // 429 behaviour is verified live, not under the shared TestServer (audit 4.5 note).
         builder.UseSetting("RateLimiting:AuthPermitLimit", "1000000");
+        // Same reasoning for the chat lane (chat-ai cp03): all TestServer requests collapse into
+        // the one "unknown" rate-limit partition, so raise the chat budget out of the way and
+        // verify the real 429 live instead.
+        builder.UseSetting("RateLimiting:ChatPermitLimit", "1000000");
 
         builder.ConfigureServices(services =>
         {
@@ -42,6 +48,13 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             {
                 services.Remove(dbContextOptionsDescriptor);
             }
+
+            // Replace the Claude-backed IChatAssistantService with a deterministic fake so CI
+            // never needs an Anthropic key or makes a real (paid) API call. The real ChatService
+            // (IChatService) under test resolves this fake. (This also means the factory-lambda
+            // AnthropicMessageCaller registration is never invoked, so no key check fires.)
+            services.RemoveAll<IChatAssistantService>();
+            services.AddScoped<IChatAssistantService, FakeChatAssistantService>();
 
             // Same dynamic-JSON opt-in as Program.cs/ApplicationDbContextFactory: the jsonb
             // List<> columns (Recipe.Ingredients/Steps/Tags) throw NotSupportedException at

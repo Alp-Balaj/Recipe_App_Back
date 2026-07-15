@@ -28,7 +28,7 @@ public class RecipeService : IRecipeService
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User {UserId} created recipe {RecipeId}.", createdByUserId, recipe.Id);
-        return ToRecipeResponse(recipe);
+        return RecipeMapper.ToResponse(recipe);
     }
 
     public async Task<RecipeResult<RecipeResponse>> GetRecipeByIdAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default)
@@ -48,7 +48,7 @@ public class RecipeService : IRecipeService
             return RecipeResult<RecipeResponse>.NotFound();
         }
 
-        return RecipeResult<RecipeResponse>.Success(ToRecipeResponse(recipe));
+        return RecipeResult<RecipeResponse>.Success(RecipeMapper.ToResponse(recipe));
     }
 
     public async Task<RecipeListResponse> GetRecipesAsync(RecipeListQuery query, Guid currentUserId, CancellationToken cancellationToken = default)
@@ -107,7 +107,7 @@ public class RecipeService : IRecipeService
             nextCursor = new RecipeListCursor(last.CreatedAt, last.Id).Encode();
         }
 
-        return new RecipeListResponse(rows.Select(ToRecipeResponse).ToList(), nextCursor);
+        return new RecipeListResponse(rows.Select(RecipeMapper.ToResponse).ToList(), nextCursor);
     }
 
     public async Task<RecipeResult<RecipeResponse>> UpdateRecipeAsync(Guid id, UpdateRecipeRequest request, Guid currentUserId, CancellationToken cancellationToken = default)
@@ -153,7 +153,7 @@ public class RecipeService : IRecipeService
 
         await _db.SaveChangesAsync(cancellationToken);
 
-        return RecipeResult<RecipeResponse>.Success(ToRecipeResponse(recipe));
+        return RecipeResult<RecipeResponse>.Success(RecipeMapper.ToResponse(recipe));
     }
 
     public async Task<RecipeResult<bool>> DeleteRecipeAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default)
@@ -214,30 +214,5 @@ public class RecipeService : IRecipeService
             Tags = request.Tags,
             CreatedByUserId = createdByUserId,
         };
-    }
-
-    // Manual entity->DTO mapping (per 02-01/02-04): a private method colocated with the
-    // service, named To<Dto>(entity).
-    private static RecipeResponse ToRecipeResponse(Recipe recipe)
-    {
-        return new RecipeResponse(
-            recipe.Id,
-            recipe.Title,
-            recipe.Description,
-            recipe.PrepTimeMinutes,
-            recipe.CookTimeMinutes,
-            recipe.TotalTimeMinutes,
-            recipe.Servings,
-            recipe.Difficulty,
-            recipe.CuisineType,
-            recipe.CaloriesPerServing,
-            recipe.ImageUrl,
-            recipe.Visibility,
-            recipe.CreatedAt,
-            recipe.UpdatedAt,
-            recipe.Ingredients,
-            recipe.Steps,
-            recipe.Tags,
-            recipe.CreatedByUserId);
     }
 }

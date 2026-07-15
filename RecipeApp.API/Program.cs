@@ -63,6 +63,10 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 // integration tests — which all share the null "unknown" partition under the TestServer —
 // can raise it out of the way; production runs on the default.
 var authPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:AuthPermitLimit") ?? 10;
+// chat-ai cp3: chat costs real money per call, so the /chat lane gets its own (tighter, tunable)
+// budget rather than reusing auth's. Same IP-partitioned fixed-window shape (see RateLimitPolicies
+// / Decisions/rate-limiter-policy-convention).
+var chatPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:ChatPermitLimit") ?? 20;
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -72,6 +76,15 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = authPermitLimit,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+    options.AddPolicy(RateLimitPolicies.Chat, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = chatPermitLimit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));
@@ -128,6 +141,7 @@ app.UseRateLimiter();
 
 app.MapAuthEndpoints();
 app.MapRecipeEndpoints();
+app.MapChatEndpoints();
 
 // Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
 // fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.

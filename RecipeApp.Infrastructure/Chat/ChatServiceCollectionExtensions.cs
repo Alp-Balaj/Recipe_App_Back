@@ -31,6 +31,10 @@ public static class ChatServiceCollectionExtensions
 
         services.AddScoped<IChatAssistantService, ClaudeChatAssistantService>();
 
+        // chat-ai cp03: the endpoint-facing orchestrator. Depends on IChatAssistantService
+        // above (which is what actually resolves the Anthropic key, lazily via the factory).
+        services.AddScoped<IChatService, ChatService>();
+
         return services;
     }
 }

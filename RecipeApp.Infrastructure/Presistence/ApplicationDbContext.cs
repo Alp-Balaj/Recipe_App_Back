@@ -13,6 +13,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<Comment> Comments => Set<Comment>();
     public DbSet<Like> Likes => Set<Like>();
     public DbSet<SavedRecipe> SavedRecipes => Set<SavedRecipe>();
+    public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -89,9 +90,27 @@ public class ApplicationDbContext : DbContext
             .Property(m => m.SuggestedRecipeIds)
             .HasColumnType("jsonb");
 
-        // Backs keyset paging of a user's history (CreatedAt DESC, Id DESC within a user)
+        // Backs keyset paging of a conversation's messages (CreatedAt DESC, Id DESC within a
+        // conversation) — moved off UserId in chat-ai cp03 now that history pages per-conversation.
         builder.Entity<ChatMessage>()
-            .HasIndex(m => new { m.UserId, m.CreatedAt, m.Id })
+            .HasIndex(m => new { m.ConversationId, m.CreatedAt, m.Id })
+            .IsDescending(false, true, true);
+
+        // Conversations are soft-deleted like recipes: a DB default plus a global query filter
+        // that hides deleted rows from every read. (As with Recipe and its interaction
+        // dependents, ChatMessage keeps no filter of its own — messages are always read through
+        // their conversation, which is already filtered.)
+        builder.Entity<Conversation>()
+            .Property(c => c.IsDeleted)
+            .HasDefaultValue(false);
+
+        builder.Entity<Conversation>()
+            .HasQueryFilter(c => !c.IsDeleted);
+
+        // Backs the conversation list ordered by most-recent activity (UpdatedAt DESC, Id DESC
+        // within a user)
+        builder.Entity<Conversation>()
+            .HasIndex(c => new { c.UserId, c.UpdatedAt, c.Id })
             .IsDescending(false, true, true);
     }
 }
