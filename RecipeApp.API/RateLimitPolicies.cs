@@ -20,4 +20,9 @@ public static class RateLimitPolicies
     // feed). One shared budget (RateLimiting:SocialPermitLimit) — cheap DB-only actions, so
     // the default is looser than auth/chat; the point is spam protection, not cost.
     public const string Social = "social";
+
+    // social-feed cp4: POST /images. Its own budget (RateLimiting:ImagesPermitLimit) rather
+    // than riding "social" — uploads write multi-MB files to disk, so per-request cost is
+    // much higher than the social lane's DB taps and deserves a tighter, separate cap.
+    public const string Images = "images";
 }

@@ -485,3 +485,6 @@ CLAUDE.md
 
 # Orca run logs and state — ephemeral evidence, never committed (spec §5.3)
 .orca/
+
+# Uploaded images (social-feed cp04) — user content stored on local disk, never committed
+RecipeApp.API/uploads/

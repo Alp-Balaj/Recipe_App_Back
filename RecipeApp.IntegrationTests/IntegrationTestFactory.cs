@@ -19,6 +19,12 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         .WithPassword("postgres")
         .Build();
 
+    // social-feed cp4: each factory gets its own throwaway image-storage root so uploads
+    // never land in the repo tree (the production default is <ContentRoot>/uploads/images).
+    // Deleted recursively in DisposeAsync.
+    private readonly string _imageStorageRoot = Path.Combine(
+        Path.GetTempPath(), $"recipeapp-tests-images-{Guid.NewGuid():N}");
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         // Program.cs fails fast when these are missing. They moved out of appsettings.json
@@ -41,6 +47,12 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         builder.UseSetting("RateLimiting:ChatPermitLimit", "1000000");
         // And the social lane (social-feed cp1) for the same reason.
         builder.UseSetting("RateLimiting:SocialPermitLimit", "1000000");
+        // And the images lane (social-feed cp4) — the real 20/min 429 is verified live.
+        builder.UseSetting("RateLimiting:ImagesPermitLimit", "1000000");
+
+        // social-feed cp4: point IImageStorage (and the /images static-file mount) at the
+        // per-factory temp root above instead of the repo tree.
+        builder.UseSetting("ImageStorage:RootPath", _imageStorageRoot);
 
         builder.ConfigureServices(services =>
         {
@@ -83,5 +95,10 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
     {
         await _dbContainer.DisposeAsync();
         await base.DisposeAsync();
+
+        if (Directory.Exists(_imageStorageRoot))
+        {
+            Directory.Delete(_imageStorageRoot, recursive: true);
+        }
     }
 }

@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 using RecipeApp.API;
@@ -16,6 +17,7 @@ using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Social.Abstractions;
 using RecipeApp.Infrastructure.Auth;
 using RecipeApp.Infrastructure.Chat;
+using RecipeApp.Infrastructure.Images;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
 using RecipeApp.Infrastructure.Social;
@@ -49,6 +51,15 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 
+// social-feed cp04 (decision I1): uploaded images live on local disk behind the
+// IImageStorage seam — S3/MinIO is later a one-class swap. The root is config-overridable
+// (ImageStorage:RootPath) so the integration tests point it at a temp directory; the
+// default sits under the content root (git-ignored uploads/). The same path backs the
+// public-read static-file mount on /images below.
+var imageRootPath = builder.Configuration["ImageStorage:RootPath"]
+    ?? Path.Combine(builder.Environment.ContentRootPath, "uploads", "images");
+builder.Services.AddLocalDiskImageStorage(imageRootPath);
+
 // chat-ai cp02: registers IChatAssistantService (Claude-backed). Nothing consumes it until
 // cp03 wires the /chat endpoints; the Anthropic:ApiKey check is deferred to resolution time.
 builder.Services.AddChatAssistant(builder.Configuration);
@@ -73,6 +84,9 @@ var chatPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:ChatPer
 // social-feed cp1: cheap DB-only actions across many endpoints (a feed scroll plus a few
 // like taps burns requests fast), so the budget is looser — spam protection, not cost.
 var socialPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:SocialPermitLimit") ?? 100;
+// social-feed cp4: image uploads write multi-MB files to disk, so the lane gets its own,
+// tighter budget than social's cheap DB taps (nobody legitimately uploads 20+ photos/min).
+var imagesPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:ImagesPermitLimit") ?? 20;
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -100,6 +114,15 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = socialPermitLimit,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+    options.AddPolicy(RateLimitPolicies.Images, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = imagesPermitLimit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));
@@ -150,6 +173,17 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+// social-feed cp04: serve stored images from the upload root at /images. Deliberately
+// PUBLIC-read (decision I1): the middleware sits outside endpoint routing, so the
+// RequireAuthenticatedUser fallback policy doesn't apply here — the access control is the
+// unguessable server-generated GUID filename. Content types resolve from the extension
+// (.jpg/.png/.webp), which ImageUploadRules pinned to the magic-byte-verified type.
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(imageRootPath),
+    RequestPath = "/images",
+});
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
@@ -158,6 +192,7 @@ app.MapAuthEndpoints();
 app.MapRecipeEndpoints();
 app.MapChatEndpoints();
 app.MapSocialEndpoints();
+app.MapImageEndpoints();
 
 // Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
 // fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.
