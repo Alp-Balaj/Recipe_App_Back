@@ -15,4 +15,9 @@ public static class RateLimitPolicies
     // chat-ai cp3: the /chat/conversations lane. Its own budget (RateLimiting:ChatPermitLimit)
     // keeps money-gated LLM traffic isolated from the auth brute-force limit.
     public const string Chat = "chat";
+
+    // social-feed cp1: every social endpoint (likes/saves/comments, follow graph, profiles,
+    // feed). One shared budget (RateLimiting:SocialPermitLimit) — cheap DB-only actions, so
+    // the default is looser than auth/chat; the point is spam protection, not cost.
+    public const string Social = "social";
 }

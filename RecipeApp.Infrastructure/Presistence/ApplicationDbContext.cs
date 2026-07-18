@@ -15,6 +15,10 @@ public class ApplicationDbContext : DbContext
     public DbSet<SavedRecipe> SavedRecipes => Set<SavedRecipe>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+    // social-feed cp1: promoted from nav-only so the follow graph and feed can be queried
+    // directly (renames the convention table UserFollow -> UserFollows, a safe RenameTable —
+    // see Decisions/dbset-promotion-renames-convention-tables).
+    public DbSet<UserFollow> UserFollows => Set<UserFollow>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -81,6 +85,26 @@ public class ApplicationDbContext : DbContext
             .WithMany(u => u.Followers)
             .HasForeignKey(uf => uf.FollowingId)
             .OnDelete(DeleteBehavior.Restrict);
+
+        // social-feed cp1/cp2: keyset indexes for the follower/following lists
+        // (FollowedAt DESC, other id DESC within a user, same shape as the recipe/chat ones).
+        builder.Entity<UserFollow>()
+            .HasIndex(uf => new { uf.FollowingId, uf.FollowedAt, uf.FollowerId })
+            .IsDescending(false, true, true);
+
+        builder.Entity<UserFollow>()
+            .HasIndex(uf => new { uf.FollowerId, uf.FollowedAt, uf.FollowingId })
+            .IsDescending(false, true, true);
+
+        // social-feed cp1: backs keyset paging of a recipe's comments (CreatedAt DESC, Id DESC).
+        builder.Entity<Comment>()
+            .HasIndex(c => new { c.RecipeId, c.CreatedAt, c.Id })
+            .IsDescending(false, true, true);
+
+        // social-feed cp1: backs the caller's saved-recipes list (SavedAt DESC, RecipeId DESC).
+        builder.Entity<SavedRecipe>()
+            .HasIndex(sr => new { sr.UserId, sr.SavedAt, sr.RecipeId })
+            .IsDescending(false, true, true);
 
         builder.Entity<MealPlanEntry>()
             .Property(m => m.MealType)

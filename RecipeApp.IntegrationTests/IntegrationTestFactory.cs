@@ -39,6 +39,8 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         // the one "unknown" rate-limit partition, so raise the chat budget out of the way and
         // verify the real 429 live instead.
         builder.UseSetting("RateLimiting:ChatPermitLimit", "1000000");
+        // And the social lane (social-feed cp1) for the same reason.
+        builder.UseSetting("RateLimiting:SocialPermitLimit", "1000000");
 
         builder.ConfigureServices(services =>
         {

@@ -13,10 +13,12 @@ using RecipeApp.API.Endpoints;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Common;
 using RecipeApp.Application.Recipes.Abstractions;
+using RecipeApp.Application.Social.Abstractions;
 using RecipeApp.Infrastructure.Auth;
 using RecipeApp.Infrastructure.Chat;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
+using RecipeApp.Infrastructure.Social;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -45,6 +47,7 @@ builder.Services.AddScoped<IPasswordHasher, PasswordHasher>();
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
+builder.Services.AddScoped<ISocialService, SocialService>();
 
 // chat-ai cp02: registers IChatAssistantService (Claude-backed). Nothing consumes it until
 // cp03 wires the /chat endpoints; the Anthropic:ApiKey check is deferred to resolution time.
@@ -67,6 +70,9 @@ var authPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:AuthPer
 // budget rather than reusing auth's. Same IP-partitioned fixed-window shape (see RateLimitPolicies
 // / Decisions/rate-limiter-policy-convention).
 var chatPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:ChatPermitLimit") ?? 20;
+// social-feed cp1: cheap DB-only actions across many endpoints (a feed scroll plus a few
+// like taps burns requests fast), so the budget is looser — spam protection, not cost.
+var socialPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:SocialPermitLimit") ?? 100;
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -85,6 +91,15 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = chatPermitLimit,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+    options.AddPolicy(RateLimitPolicies.Social, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = socialPermitLimit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));
@@ -142,6 +157,7 @@ app.UseRateLimiter();
 app.MapAuthEndpoints();
 app.MapRecipeEndpoints();
 app.MapChatEndpoints();
+app.MapSocialEndpoints();
 
 // Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
 // fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.
