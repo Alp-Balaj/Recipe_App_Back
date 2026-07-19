@@ -63,8 +63,8 @@ var imageRootPath = builder.Configuration["ImageStorage:RootPath"]
     ?? Path.Combine(builder.Environment.ContentRootPath, "uploads", "images");
 builder.Services.AddLocalDiskImageStorage(imageRootPath);
 
-// chat-ai cp02: registers IChatAssistantService (Claude-backed). Nothing consumes it until
-// cp03 wires the /chat endpoints; the Anthropic:ApiKey check is deferred to resolution time.
+// chat-ai cp02: registers IChatAssistantService (Gemini-backed). Nothing consumes it until
+// cp03 wires the /chat endpoints; the Gemini:ApiKey check is deferred to resolution time.
 builder.Services.AddChatAssistant(builder.Configuration);
 
 // Structured error responses: RFC-7807 ProblemDetails everywhere, with a global handler

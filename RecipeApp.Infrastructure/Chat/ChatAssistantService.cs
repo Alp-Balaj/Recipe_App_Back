@@ -4,11 +4,12 @@ using RecipeApp.Application.Chat.Abstractions;
 
 namespace RecipeApp.Infrastructure.Chat;
 
-// IChatAssistantService backed by the Claude API (chat-ai plan, checkpoint 02). This class
-// owns the grounding prompt, the structured-output parsing, and the defensive id filtering;
-// the actual SDK call sits behind IAnthropicMessageCaller so this logic is unit-testable
-// without the network.
-public class ClaudeChatAssistantService : IChatAssistantService
+// IChatAssistantService backed by the chat provider (Gemini today; chat-ai plan, checkpoint 02).
+// This class owns the grounding prompt, the structured-output parsing, and the defensive id
+// filtering; the actual network call sits behind IChatMessageCaller so this logic is
+// unit-testable without the network — and provider-agnostic, so swapping the caller changes
+// nothing here.
+public class ChatAssistantService : IChatAssistantService
 {
     // Include at most the last M history messages for continuity (Decisions §3 / kickoff).
     private const int MaxHistoryMessages = 20;
@@ -18,9 +19,9 @@ public class ClaudeChatAssistantService : IChatAssistantService
         PropertyNameCaseInsensitive = true,
     };
 
-    private readonly IAnthropicMessageCaller _caller;
+    private readonly IChatMessageCaller _caller;
 
-    public ClaudeChatAssistantService(IAnthropicMessageCaller caller)
+    public ChatAssistantService(IChatMessageCaller caller)
     {
         _caller = caller;
     }
@@ -71,12 +72,12 @@ public class ClaudeChatAssistantService : IChatAssistantService
         {
             // Structured output should make this impossible, but the boundary is untrusted:
             // fail clearly rather than surfacing a raw JsonException to the endpoint.
-            throw new InvalidOperationException("Claude assistant returned malformed JSON.", ex);
+            throw new InvalidOperationException("chat assistant returned malformed JSON.", ex);
         }
 
         if (parsed is null || parsed.Reply is null || parsed.SuggestedRecipeIds is null)
         {
-            throw new InvalidOperationException("Claude assistant response was missing required fields.");
+            throw new InvalidOperationException("chat assistant response was missing required fields.");
         }
 
         return parsed;

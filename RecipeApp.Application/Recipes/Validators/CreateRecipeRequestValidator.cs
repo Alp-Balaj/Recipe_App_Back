@@ -8,7 +8,9 @@ public class CreateRecipeRequestValidator : AbstractValidator<CreateRecipeReques
     public CreateRecipeRequestValidator()
     {
         RuleFor(x => x.Title).NotEmpty().MaximumLength(200);
-        RuleFor(x => x.Description).NotEmpty();
+        // Cap the free-text description: it is injected verbatim into the chat grounding prompt,
+        // so an unbounded value would inflate token cost. 2000 chars is ample for a real recipe.
+        RuleFor(x => x.Description).NotEmpty().MaximumLength(2000);
         RuleFor(x => x.PrepTimeMinutes).GreaterThanOrEqualTo(0);
         RuleFor(x => x.CookTimeMinutes).GreaterThanOrEqualTo(0);
         RuleFor(x => x.Servings).GreaterThan(0);

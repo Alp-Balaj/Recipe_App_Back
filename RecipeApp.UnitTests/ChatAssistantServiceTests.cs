@@ -4,16 +4,16 @@ using RecipeApp.Infrastructure.Chat;
 
 namespace RecipeApp.UnitTests;
 
-// Unit tests for ClaudeChatAssistantService's parsing + id-filtering logic, exercised through
-// a faked IAnthropicMessageCaller (no network). The fake returns whatever raw JSON the test
+// Unit tests for ChatAssistantService's parsing + id-filtering logic, exercised through
+// a faked IChatMessageCaller (no network). The fake returns whatever raw JSON the test
 // wants — valid, hallucinated, malformed — and captures the assembled system prompt so the
 // grounding block can be asserted.
-public class ClaudeChatAssistantServiceTests
+public class ChatAssistantServiceTests
 {
     private static readonly Guid RecipeA = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid RecipeB = Guid.Parse("22222222-2222-2222-2222-222222222222");
 
-    private sealed class FakeCaller : IAnthropicMessageCaller
+    private sealed class FakeCaller : IChatMessageCaller
     {
         private readonly string _json;
 
@@ -46,7 +46,7 @@ public class ClaudeChatAssistantServiceTests
         IReadOnlyList<string>? dietary = null,
         IReadOnlyList<ChatHistoryItem>? history = null)
     {
-        var service = new ClaudeChatAssistantService(new FakeCaller(json));
+        var service = new ChatAssistantService(new FakeCaller(json));
         return service.GetReplyAsync(
             "something warm, no meat",
             history ?? Array.Empty<ChatHistoryItem>(),
@@ -127,7 +127,7 @@ public class ClaudeChatAssistantServiceTests
     public async Task SystemPrompt_GroundsOnCandidatesAndDietaryRestrictions()
     {
         var caller = new FakeCaller($$"""{"reply":"ok","suggestedRecipeIds":["{{RecipeA}}"]}""");
-        var service = new ClaudeChatAssistantService(caller);
+        var service = new ChatAssistantService(caller);
 
         await service.GetReplyAsync(
             "warm and vegetarian",
@@ -150,7 +150,7 @@ public class ClaudeChatAssistantServiceTests
             .ToList();
 
         var caller = new FakeCaller("""{"reply":"ok","suggestedRecipeIds":[]}""");
-        var service = new ClaudeChatAssistantService(caller);
+        var service = new ChatAssistantService(caller);
 
         await service.GetReplyAsync("next", history, TwoCandidates(), Array.Empty<string>());
 

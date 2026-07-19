@@ -42,6 +42,15 @@ public class UpdateRecipeRequestValidatorTests
     }
 
     [Fact]
+    public void Validate_DescriptionOver2000Chars_FailsOnDescription()
+    {
+        var result = _validator.Validate(Valid() with { Description = new string('a', 2001) });
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName == nameof(UpdateRecipeRequest.Description));
+    }
+
+    [Fact]
     public void Validate_UndefinedVisibility_FailsOnVisibility()
     {
         var result = _validator.Validate(Valid() with { Visibility = (RecipeVisibility)99 });

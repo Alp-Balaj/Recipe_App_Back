@@ -65,10 +65,10 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
                 services.Remove(dbContextOptionsDescriptor);
             }
 
-            // Replace the Claude-backed IChatAssistantService with a deterministic fake so CI
-            // never needs an Anthropic key or makes a real (paid) API call. The real ChatService
+            // Replace the Gemini-backed IChatAssistantService with a deterministic fake so CI
+            // never needs a Gemini key or makes a real (paid) API call. The real ChatService
             // (IChatService) under test resolves this fake. (This also means the factory-lambda
-            // AnthropicMessageCaller registration is never invoked, so no key check fires.)
+            // GeminiMessageCaller registration is never invoked, so no key check fires.)
             services.RemoveAll<IChatAssistantService>();
             services.AddScoped<IChatAssistantService, FakeChatAssistantService>();
 

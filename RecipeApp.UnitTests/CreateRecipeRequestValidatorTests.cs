@@ -60,6 +60,15 @@ public class CreateRecipeRequestValidatorTests
     }
 
     [Fact]
+    public void Validate_DescriptionOver2000Chars_FailsOnDescription()
+    {
+        var result = _validator.Validate(Valid() with { Description = new string('a', 2001) });
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName == nameof(CreateRecipeRequest.Description));
+    }
+
+    [Fact]
     public void Validate_NegativePrepTime_FailsOnPrepTime()
     {
         var result = _validator.Validate(Valid() with { PrepTimeMinutes = -1 });
