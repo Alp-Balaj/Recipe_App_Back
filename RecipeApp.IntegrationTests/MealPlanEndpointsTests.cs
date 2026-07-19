@@ -113,6 +113,32 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // Carry-over from cp2 verification: entries whose Recipe is soft-deleted are silently
+    // omitted from the week view (chat-suggestion convention), not just filtered at the
+    // point of add. Soft-delete via the real DELETE /recipes/{id} endpoint, not direct DB
+    // manipulation, so this exercises the actual global query-filter path.
+    [Fact]
+    public async Task GetMealPlan_EntryWithSoftDeletedRecipe_IsOmittedButOthersRemain()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2026, 9, 21));
+        var keptRecipe = await CreateRecipeAsync(client);
+        var doomedRecipe = await CreateRecipeAsync(client);
+        await AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Breakfast, keptRecipe.Id);
+        await AddEntryAsync(client, plan.Id, DayOfWeek.Tuesday, MealType.Lunch, doomedRecipe.Id);
+
+        (await client.DeleteAsync($"/recipes/{doomedRecipe.Id}")).EnsureSuccessStatusCode();
+
+        var response = await client.GetAsync($"/meal-plans/{plan.Id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<MealPlanResponse>(TestJson.Options);
+        Assert.NotNull(body);
+        var entry = Assert.Single(body!.Entries);
+        Assert.Equal(keptRecipe.Id, entry.Recipe.Id);
+    }
+
     [Fact]
     public async Task GetMealPlan_Unknown_Returns404()
     {

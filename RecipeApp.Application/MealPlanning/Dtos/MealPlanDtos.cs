@@ -20,3 +20,24 @@ public record MealPlanResponse(
     DateTime WeekStartDate,
     DateTime CreatedAt,
     IReadOnlyList<MealPlanEntryResponse> Entries);
+
+// --- cp03: shopping list -------------------------------------------------------------
+// Wire contracts for the shopping-list endpoints. The per-user list is single (not
+// per-plan) — meal-planning-v1-semantics #3 — so MealPlanId on the response is pure
+// traceability, never a list key.
+
+public record AddShoppingListItemRequest(string Ingredient, string Quantity);
+
+// Explicit set (not a toggle) — meal-planning-v1-semantics #4 records the deviation from
+// the flat plan's "toggle" wording. PATCH is idempotent by construction.
+public record UpdateShoppingListItemRequest(bool IsPurchased);
+
+public record ShoppingListItemResponse(
+    Guid Id,
+    string Ingredient,
+    string Quantity,
+    bool IsPurchased,
+    DateTime CreatedAt,
+    Guid? MealPlanId);
+
+public record ShoppingListItemListResponse(IReadOnlyList<ShoppingListItemResponse> Items, string? NextCursor);

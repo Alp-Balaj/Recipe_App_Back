@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using RecipeApp.Application.Common;
 using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
@@ -157,6 +158,84 @@ public class MealPlanService : IMealPlanService
         // deleting the wrong row.
         var deleted = await _db.MealPlanEntries
             .Where(e => e.Id == entryId && e.MealPlanId == mealPlanId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        return deleted == 0
+            ? MealPlanResult<bool>.NotFound()
+            : MealPlanResult<bool>.Success(true);
+    }
+
+    // --- cp03: shopping list -------------------------------------------------------------
+
+    public async Task<ShoppingListItemListResponse> GetShoppingListAsync(KeysetCursor? cursor, int limit, Guid userId, CancellationToken cancellationToken = default)
+    {
+        // meal-planning-v1-semantics #3: single per-user list, ALL of the caller's items
+        // regardless of MealPlanId — the nullable FK is traceability, not a list partition.
+        var items = _db.ShoppingListItems.Where(s => s.UserId == userId);
+
+        if (cursor is not null)
+        {
+            var cursorCreatedAt = cursor.Timestamp;
+            var cursorId = cursor.Id;
+            items = items.Where(s =>
+                s.CreatedAt < cursorCreatedAt
+                || (s.CreatedAt == cursorCreatedAt && s.Id.CompareTo(cursorId) < 0));
+        }
+
+        var rows = await items
+            .OrderByDescending(s => s.CreatedAt)
+            .ThenByDescending(s => s.Id)
+            .Take(limit + 1)
+            .Select(s => new ShoppingListItemResponse(s.Id, s.Ingredient, s.Quantity, s.IsPurchased, s.CreatedAt, s.MealPlanId))
+            .ToListAsync(cancellationToken);
+
+        string? nextCursor = null;
+        if (rows.Count > limit)
+        {
+            rows.RemoveAt(limit);
+            var last = rows[^1];
+            nextCursor = new KeysetCursor(last.CreatedAt, last.Id).Encode();
+        }
+
+        return new ShoppingListItemListResponse(rows, nextCursor);
+    }
+
+    public async Task<ShoppingListItemResponse> AddShoppingListItemAsync(AddShoppingListItemRequest request, Guid userId, CancellationToken cancellationToken = default)
+    {
+        var item = new ShoppingListItem
+        {
+            Id = Guid.NewGuid(),
+            Ingredient = request.Ingredient,
+            Quantity = request.Quantity,
+            IsPurchased = false,
+            UserId = userId,
+            MealPlanId = null,
+        };
+        _db.ShoppingListItems.Add(item);
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return new ShoppingListItemResponse(item.Id, item.Ingredient, item.Quantity, item.IsPurchased, item.CreatedAt, item.MealPlanId);
+    }
+
+    public async Task<MealPlanResult<bool>> UpdateShoppingListItemAsync(Guid id, UpdateShoppingListItemRequest request, Guid userId, CancellationToken cancellationToken = default)
+    {
+        // Explicit set, not a toggle (meal-planning-v1-semantics #4 deviation) — an
+        // ExecuteUpdate targeting (id, userId) is naturally idempotent and also gives the
+        // 404-never-403 behavior for free: an unknown id or another user's item matches zero
+        // rows either way.
+        var updated = await _db.ShoppingListItems
+            .Where(s => s.Id == id && s.UserId == userId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(s => s.IsPurchased, request.IsPurchased), cancellationToken);
+
+        return updated == 0
+            ? MealPlanResult<bool>.NotFound()
+            : MealPlanResult<bool>.Success(true);
+    }
+
+    public async Task<MealPlanResult<bool>> DeleteShoppingListItemAsync(Guid id, Guid userId, CancellationToken cancellationToken = default)
+    {
+        var deleted = await _db.ShoppingListItems
+            .Where(s => s.Id == id && s.UserId == userId)
             .ExecuteDeleteAsync(cancellationToken);
 
         return deleted == 0
