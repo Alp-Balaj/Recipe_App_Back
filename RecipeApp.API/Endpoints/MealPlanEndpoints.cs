@@ -74,6 +74,18 @@ public static class MealPlanEndpoints
                 _ => Results.NotFound(),
             };
         });
+
+        // cp04: replace-per-plan generation (meal-planning-v1-semantics #5). 200 + the fresh
+        // items (a bare array, mirroring the week view's Entries shape — no paging here).
+        group.MapPost("/{id:guid}/generate-shopping-list", async (Guid id, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await mealPlans.GenerateShoppingListAsync(id, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                MealPlanOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        });
     }
 
     private static void MapShoppingListEndpoints(WebApplication app)

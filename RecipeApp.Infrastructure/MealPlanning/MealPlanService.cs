@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using RecipeApp.Application.Common;
@@ -242,4 +243,81 @@ public class MealPlanService : IMealPlanService
             ? MealPlanResult<bool>.NotFound()
             : MealPlanResult<bool>.Success(true);
     }
+
+    // --- cp04: generate shopping list -----------------------------------------------------
+
+    public async Task<MealPlanResult<IReadOnlyList<ShoppingListItemResponse>>> GenerateShoppingListAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default)
+    {
+        // Caller-scoped, never 403 — same rule as GetMealPlanByIdAsync
+        // (meal-planning-v1-semantics / 404-never-403).
+        var plan = await _db.MealPlans.SingleOrDefaultAsync(
+            mp => mp.Id == mealPlanId && mp.UserId == userId, cancellationToken);
+        if (plan is null)
+        {
+            return MealPlanResult<IReadOnlyList<ShoppingListItemResponse>>.NotFound();
+        }
+
+        // Same hydrate idiom as GetMealPlanByIdAsync: join against _db.Recipes (carries the
+        // global !IsDeleted filter) rather than an Include/navigation, so an entry whose
+        // recipe is soft-deleted silently drops out instead of erroring. Dedupe micro-decision
+        // (cp04, recorded in the session note): one row per DISTINCT recipe per ingredient —
+        // if the same recipe appears in multiple entries (e.g. breakfast Mon + Tue), buying
+        // for it twice is unambiguous noise, so distinct recipe ids are resolved first.
+        var recipeIds = await _db.MealPlanEntries
+            .Where(e => e.MealPlanId == mealPlanId)
+            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => r.Id)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        // Separate load for the full recipe rows (incl. the jsonb Ingredients column) — mirrors
+        // how the rest of the codebase loads a Recipe entity (e.g. RecipeService), rather than
+        // trying to select a jsonb column out of the join projection above.
+        var recipes = await _db.Recipes
+            .Where(r => recipeIds.Contains(r.Id))
+            .ToListAsync(cancellationToken);
+
+        // meal-planning-v1-semantics #1: no aggregation, no unit conversion. Quantity is the
+        // display string "{Quantity} {Unit}" trimmed, decimal rendered invariant-culture so the
+        // string is deterministic regardless of server locale.
+        var newItems = recipes
+            .OrderBy(r => r.Id)
+            .SelectMany(r => r.Ingredients.Select(i => new ShoppingListItem
+            {
+                Id = Guid.NewGuid(),
+                Ingredient = i.Name,
+                Quantity = FormatQuantity(i.Quantity, i.Unit),
+                IsPurchased = false,
+                UserId = userId,
+                MealPlanId = mealPlanId,
+            }))
+            .ToList();
+
+        // meal-planning-v1-semantics #5: replace-per-plan in one explicit transaction.
+        // ExecuteDeleteAsync executes immediately (it doesn't go through the change tracker),
+        // so without the transaction wrapper a failed insert would leave a half-state. Manual
+        // items (MealPlanId null) and other plans' rows are excluded by the WHERE clause and
+        // are never touched.
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+
+        await _db.ShoppingListItems
+            .Where(s => s.MealPlanId == mealPlanId && s.UserId == userId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        if (newItems.Count > 0)
+        {
+            _db.ShoppingListItems.AddRange(newItems);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+
+        var response = newItems
+            .Select(i => new ShoppingListItemResponse(i.Id, i.Ingredient, i.Quantity, i.IsPurchased, i.CreatedAt, i.MealPlanId))
+            .ToList();
+
+        return MealPlanResult<IReadOnlyList<ShoppingListItemResponse>>.Success(response);
+    }
+
+    private static string FormatQuantity(decimal quantity, string unit) =>
+        $"{quantity.ToString(CultureInfo.InvariantCulture)} {unit}".Trim();
 }

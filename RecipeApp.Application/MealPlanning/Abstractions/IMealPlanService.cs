@@ -55,4 +55,16 @@ public interface IMealPlanService
 
     /// <summary>Hard-deletes an item. NotFound for an unknown item or another user's item.</summary>
     Task<MealPlanResult<bool>> DeleteShoppingListItemAsync(Guid id, Guid userId, CancellationToken cancellationToken = default);
+
+    // --- cp04: generate shopping list -----------------------------------------------------
+
+    /// <summary>
+    /// Replaces the caller's generated shopping-list rows for this plan (meal-planning-v1-
+    /// semantics #5) with a fresh set derived from the plan's surviving entries — one row per
+    /// distinct recipe's ingredient (entries whose Recipe is soft-deleted are silently
+    /// skipped). NotFound for an unknown id or another user's plan (never Forbidden — no
+    /// visibility tier). A zero-entry plan still replaces (deletes any stale rows) and
+    /// returns Success with an empty list.
+    /// </summary>
+    Task<MealPlanResult<IReadOnlyList<ShoppingListItemResponse>>> GenerateShoppingListAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default);
 }
