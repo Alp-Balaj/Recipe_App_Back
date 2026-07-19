@@ -19,6 +19,13 @@ public class ApplicationDbContext : DbContext
     // directly (renames the convention table UserFollow -> UserFollows, a safe RenameTable —
     // see Decisions/dbset-promotion-renames-convention-tables).
     public DbSet<UserFollow> UserFollows => Set<UserFollow>();
+    // meal-planning cp1: promoted from nav-only so plans/entries/list items can be queried
+    // directly (renames MealPlan -> MealPlans, MealPlanEntry -> MealPlanEntries,
+    // ShoppingListItem -> ShoppingListItems, same safe RenameTable pattern as ChatMessage/
+    // UserFollow — see Decisions/dbset-promotion-renames-convention-tables).
+    public DbSet<MealPlan> MealPlans => Set<MealPlan>();
+    public DbSet<MealPlanEntry> MealPlanEntries => Set<MealPlanEntry>();
+    public DbSet<ShoppingListItem> ShoppingListItems => Set<ShoppingListItem>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -109,6 +116,24 @@ public class ApplicationDbContext : DbContext
         builder.Entity<MealPlanEntry>()
             .Property(m => m.MealType)
             .HasConversion<string>();
+
+        // meal-planning cp1: one plan per (user, week) — 409 on duplicate create is backed by
+        // this unique index (service pre-check is the primary path).
+        builder.Entity<MealPlan>()
+            .HasIndex(mp => new { mp.UserId, mp.WeekStartDate })
+            .IsUnique();
+
+        // meal-planning cp1: slot exclusivity — one entry per (plan, day, meal type); 409 on
+        // occupied slot is backed by this unique index.
+        builder.Entity<MealPlanEntry>()
+            .HasIndex(me => new { me.MealPlanId, me.DayOfWeek, me.MealType })
+            .IsUnique();
+
+        // meal-planning cp1: backs keyset paging of the caller's shopping list
+        // (CreatedAt DESC, Id DESC within a user).
+        builder.Entity<ShoppingListItem>()
+            .HasIndex(sli => new { sli.UserId, sli.CreatedAt, sli.Id })
+            .IsDescending(false, true, true);
 
         builder.Entity<ChatMessage>()
             .Property(m => m.SuggestedRecipeIds)
