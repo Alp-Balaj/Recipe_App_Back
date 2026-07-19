@@ -13,11 +13,13 @@ using RecipeApp.API;
 using RecipeApp.API.Endpoints;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Common;
+using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Social.Abstractions;
 using RecipeApp.Infrastructure.Auth;
 using RecipeApp.Infrastructure.Chat;
 using RecipeApp.Infrastructure.Images;
+using RecipeApp.Infrastructure.MealPlanning;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
 using RecipeApp.Infrastructure.Social;
@@ -50,6 +52,7 @@ builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
 builder.Services.AddScoped<ISocialService, SocialService>();
+builder.Services.AddScoped<IMealPlanService, MealPlanService>();
 
 // social-feed cp04 (decision I1): uploaded images live on local disk behind the
 // IImageStorage seam — S3/MinIO is later a one-class swap. The root is config-overridable
@@ -87,6 +90,9 @@ var socialPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:Socia
 // social-feed cp4: image uploads write multi-MB files to disk, so the lane gets its own,
 // tighter budget than social's cheap DB taps (nobody legitimately uploads 20+ photos/min).
 var imagesPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:ImagesPermitLimit") ?? 20;
+// meal-planning plan cp02: shared by the whole meal-plan/shopping-list family (cp02–04).
+// Cheap DB-only actions like social, so the default mirrors social's looser budget.
+var mealPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:MealPermitLimit") ?? 100;
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -123,6 +129,15 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = imagesPermitLimit,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+    options.AddPolicy(RateLimitPolicies.Meal, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = mealPermitLimit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));
@@ -193,6 +208,7 @@ app.MapRecipeEndpoints();
 app.MapChatEndpoints();
 app.MapSocialEndpoints();
 app.MapImageEndpoints();
+app.MapMealPlanEndpoints();
 
 // Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
 // fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.

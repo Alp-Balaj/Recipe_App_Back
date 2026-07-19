@@ -25,4 +25,8 @@ public static class RateLimitPolicies
     // than riding "social" — uploads write multi-MB files to disk, so per-request cost is
     // much higher than the social lane's DB taps and deserves a tighter, separate cap.
     public const string Images = "images";
+
+    // meal-planning plan (cp02–04): the whole meal-plan/shopping-list family shares this one
+    // lane. Cheap DB-only actions like Social, so the default budget mirrors Social's.
+    public const string Meal = "meal";
 }

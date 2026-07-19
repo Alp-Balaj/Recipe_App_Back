@@ -49,6 +49,8 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         builder.UseSetting("RateLimiting:SocialPermitLimit", "1000000");
         // And the images lane (social-feed cp4) — the real 20/min 429 is verified live.
         builder.UseSetting("RateLimiting:ImagesPermitLimit", "1000000");
+        // And the meal lane (meal-planning cp02) — shared by cp02–04, same reasoning.
+        builder.UseSetting("RateLimiting:MealPermitLimit", "1000000");
 
         // social-feed cp4: point IImageStorage (and the /images static-file mount) at the
         // per-factory temp root above instead of the repo tree.
