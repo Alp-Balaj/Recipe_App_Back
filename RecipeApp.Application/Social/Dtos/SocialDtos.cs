@@ -52,3 +52,15 @@ public record FeedListResponse(
     IReadOnlyList<FeedItemResponse> Items,
     string? NextCursor,
     string Source);
+
+// F1 resolution (decision I3 revisited for the SINGLE-recipe case, 2026-07-19): the feed's
+// social envelope, fetchable per recipe via GET /recipes/{id}/social — FeedItemResponse
+// minus the recipe itself. Exists so any surface (in particular the recipe's own author,
+// whose posts never appear in their own feed) can read live counts + caller-relative flags
+// without a feed-cache hit. GET /recipes list stays envelope-free (the I3 list decision holds).
+public record RecipeSocialResponse(
+    UserSummaryResponse Author,
+    int LikeCount,
+    int CommentCount,
+    bool LikedByMe,
+    bool SavedByMe);

@@ -40,6 +40,14 @@ public interface ISocialService
     /// <summary>Allowed for the comment's author OR the recipe's author (decision I6).</summary>
     Task<SocialResult<bool>> DeleteCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// The feed's social envelope for one recipe (F1 / I3-single-recipe revisit): author,
+    /// live counts, caller-relative flags. Visibility matches GET /recipes/{id} — a recipe
+    /// the caller can't see (or that is soft-deleted) is NotFound, never Forbidden (rule 2).
+    /// Works for the recipe's own author — the whole point of F1.
+    /// </summary>
+    Task<SocialResult<RecipeSocialResponse>> GetRecipeSocialAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
+
     // --- cp02: graph + profiles ---------------------------------------------------------
 
     /// <summary>Idempotent follow. NotFound for an unknown target. Self-follow is rejected at the endpoint (400).</summary>

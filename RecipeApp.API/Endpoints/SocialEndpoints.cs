@@ -68,6 +68,20 @@ public static class SocialEndpoints
         })
         .AddEndpointFilter<ValidationFilter<CommentRequest>>();
 
+        // F1 resolution (I3 revisited, single-recipe only): the feed's envelope for ONE
+        // recipe, so surfaces without a feed-cache hit — above all the recipe's own author,
+        // who never appears in their own feed — can read counts + caller-relative flags.
+        // Same visibility as GET /recipes/{id}: visible → 200, else 404 (rule 2, never 403).
+        group.MapGet("/social", async (Guid recipeId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.GetRecipeSocialAsync(recipeId, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                SocialOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        });
+
         group.MapGet("/comments", async (Guid recipeId, string? cursor, int? limit, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))

@@ -253,6 +253,27 @@ public class SocialService : ISocialService
         return SocialResult<bool>.Success(true);
     }
 
+    // F1 resolution (I3 revisited for the single-recipe case, 2026-07-19): the same
+    // envelope projection GetFeedAsync rides — correlated subqueries, one round trip,
+    // live counts — folded into the visibility check itself so a recipe the caller can't
+    // see (or a soft-deleted one, via the global filter) is a NotFound, never a Forbidden.
+    public async Task<SocialResult<RecipeSocialResponse>> GetRecipeSocialAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var envelope = await _db.Recipes
+            .Where(r => r.Id == recipeId && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId))
+            .Select(r => new RecipeSocialResponse(
+                new UserSummaryResponse(r.CreatedByUserId, r.CreatedByUser.Username, r.CreatedByUser.ProfileImageUrl),
+                r.Likes.Count(),
+                r.Comments.Count(),
+                r.Likes.Any(l => l.UserId == currentUserId),
+                r.SavedByUsers.Any(s => s.UserId == currentUserId)))
+            .SingleOrDefaultAsync(cancellationToken);
+
+        return envelope is null
+            ? SocialResult<RecipeSocialResponse>.NotFound()
+            : SocialResult<RecipeSocialResponse>.Success(envelope);
+    }
+
     // --- cp02: graph + profiles ---------------------------------------------------------
 
     public async Task<SocialResult<bool>> FollowUserAsync(Guid targetUserId, Guid currentUserId, CancellationToken cancellationToken = default)
