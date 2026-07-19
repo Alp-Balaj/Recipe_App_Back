@@ -142,6 +142,21 @@ public static class SocialEndpoints
             return Results.Ok(response);
         });
 
+        // Account settings — the caller edits their own profile. Identity comes from the
+        // token (no route param), so this literal "me" route sits with the others above the
+        // {id:guid} matchers. 409 when the requested username is already taken.
+        group.MapPut("/me", async (UpdateProfileRequest request, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.UpdateProfileAsync(request, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                SocialOutcome.Success => Results.Ok(result.Value),
+                SocialOutcome.Conflict => Results.Conflict(new { error = "That username is already taken." }),
+                _ => Results.NotFound(),
+            };
+        })
+        .AddEndpointFilter<ValidationFilter<UpdateProfileRequest>>();
+
         group.MapPost("/{id:guid}/follow", async (Guid id, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var userId = GetUserId(user);

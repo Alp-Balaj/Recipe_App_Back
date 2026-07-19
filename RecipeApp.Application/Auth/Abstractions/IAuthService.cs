@@ -7,4 +7,7 @@ public interface IAuthService
     Task<AuthResult> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken = default);
 
     Task<AuthResult> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Current identity read from the DB, or null when the user no longer exists.</summary>
+    Task<MeResponse?> GetMeAsync(Guid userId, CancellationToken cancellationToken = default);
 }

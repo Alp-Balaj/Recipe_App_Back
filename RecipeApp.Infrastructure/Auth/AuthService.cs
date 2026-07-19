@@ -65,6 +65,14 @@ public class AuthService : IAuthService
         return AuthResult.Success(ToAuthResponse(user));
     }
 
+    public async Task<MeResponse?> GetMeAsync(Guid userId, CancellationToken cancellationToken = default)
+    {
+        return await _db.Users
+            .Where(u => u.Id == userId)
+            .Select(u => new MeResponse(u.Id, u.Username))
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+
     // Manual entity->DTO mapping (per 02-01/02-04): a private method colocated with the
     // service, named To<Dto>(entity). Promote to a shared static extension method only if
     // a second service needs the same mapping.

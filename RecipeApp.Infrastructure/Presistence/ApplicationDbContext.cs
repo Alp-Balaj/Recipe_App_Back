@@ -47,6 +47,13 @@ public class ApplicationDbContext : DbContext
             .HasIndex(u => u.Email)
             .IsUnique();
 
+        // Enum stored as text (same idiom as Recipe.Visibility); default backfills
+        // the new column for existing rows to Public.
+        builder.Entity<User>()
+            .Property(u => u.DefaultRecipeVisibility)
+            .HasConversion<string>()
+            .HasDefaultValue(RecipeApp.Domain.Enums.RecipeVisibility.Public);
+
         builder.Entity<Recipe>()
             .Property(r => r.Ingredients)
             .HasColumnType("jsonb");

@@ -1,4 +1,5 @@
 using RecipeApp.Application.Recipes.Dtos;
+using RecipeApp.Domain.Enums;
 
 namespace RecipeApp.Application.Social.Dtos;
 
@@ -34,7 +35,16 @@ public record UserProfileResponse(
     int FollowerCount,
     int FollowingCount,
     int RecipeCount,
-    bool FollowedByMe);
+    bool FollowedByMe,
+    RecipeVisibility DefaultRecipeVisibility);
+
+// Body of PUT /users/me — the caller updating their own account (account settings /
+// Edit profile). Username must stay unique; Bio/ProfileImageUrl clear to null when empty.
+public record UpdateProfileRequest(
+    string Username,
+    string? Bio,
+    string? ProfileImageUrl,
+    RecipeVisibility DefaultRecipeVisibility);
 
 // The feed's social envelope around each recipe (social-feed plan, cp03). Counts are
 // live-computed correlated subqueries — no denormalized counters until measured slow.

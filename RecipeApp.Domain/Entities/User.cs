@@ -1,4 +1,5 @@
-﻿using RecipeApp.Domain.Entities.RecipeInteractions;
+﻿using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Entities.RecipeInteractions;
 
 namespace RecipeApp.Domain.Entities;
 
@@ -11,6 +12,9 @@ public class User
     public string? Bio { get; set; }
     public string? ProfileImageUrl { get; set; }
     public int CookingRank { get; set; } = 0;
+    // The visibility applied by default to recipes this user creates (edited from
+    // account settings — Edit profile). Stored as text, backfilled to Public.
+    public RecipeVisibility DefaultRecipeVisibility { get; set; } = RecipeVisibility.Public;
     public List<string> DietaryRestrictions { get; set; } = [];
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

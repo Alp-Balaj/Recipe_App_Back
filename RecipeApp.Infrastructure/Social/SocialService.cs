@@ -419,7 +419,52 @@ public class SocialService : ISocialService
             followerCount,
             followingCount,
             recipeCount,
-            followedByMe));
+            followedByMe,
+            user.DefaultRecipeVisibility));
+    }
+
+    public async Task<SocialResult<UserProfileResponse>> UpdateProfileAsync(UpdateProfileRequest request, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var user = await _db.Users.SingleOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+        if (user is null)
+        {
+            // The token authenticated a user that no longer exists — treat as not found.
+            return SocialResult<UserProfileResponse>.NotFound();
+        }
+
+        var newUsername = request.Username.Trim();
+
+        // Username uniqueness (case-sensitive, same as register), excluding the caller so a
+        // no-op save of the same name is allowed. The DB unique index is the race backstop.
+        if (newUsername != user.Username)
+        {
+            var taken = await _db.Users.AnyAsync(
+                u => u.Username == newUsername && u.Id != currentUserId, cancellationToken);
+            if (taken)
+            {
+                _logger.LogInformation("Profile update rejected: username already taken.");
+                return SocialResult<UserProfileResponse>.Conflict();
+            }
+        }
+
+        user.Username = newUsername;
+        // Empty strings clear the optional fields to null (mirrors register's null defaults).
+        user.Bio = string.IsNullOrWhiteSpace(request.Bio) ? null : request.Bio.Trim();
+        user.ProfileImageUrl = string.IsNullOrWhiteSpace(request.ProfileImageUrl) ? null : request.ProfileImageUrl.Trim();
+        user.DefaultRecipeVisibility = request.DefaultRecipeVisibility;
+
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+        {
+            // Lost a username race between the pre-check and save.
+            _db.ChangeTracker.Clear();
+            return SocialResult<UserProfileResponse>.Conflict();
+        }
+
+        return await GetUserProfileAsync(currentUserId, currentUserId, cancellationToken);
     }
 
     public async Task<SocialResult<RecipeListResponse>> GetUserRecipesAsync(Guid targetUserId, KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)

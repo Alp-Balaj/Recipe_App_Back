@@ -63,6 +63,13 @@ public interface ISocialService
     /// <summary>Public profile with counts. RecipeCount counts only recipes the caller can see.</summary>
     Task<SocialResult<UserProfileResponse>> GetUserProfileAsync(Guid targetUserId, Guid currentUserId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// The caller updates their own account (account settings / Edit profile): username,
+    /// bio, profile image, default recipe visibility. Conflict when the new username is
+    /// already taken by another user. Returns the refreshed profile on success.
+    /// </summary>
+    Task<SocialResult<UserProfileResponse>> UpdateProfileAsync(UpdateProfileRequest request, Guid currentUserId, CancellationToken cancellationToken = default);
+
     /// <summary>An author's recipes visible to the caller (rule 1 composed first), keyset-paged.</summary>
     Task<SocialResult<RecipeListResponse>> GetUserRecipesAsync(Guid targetUserId, KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default);
 

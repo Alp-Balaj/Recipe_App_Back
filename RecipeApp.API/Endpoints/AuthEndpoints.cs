@@ -32,11 +32,24 @@ public static class AuthEndpoints
                 : Results.Unauthorized();
         });
 
-        app.MapGet("/auth/me", (ClaimsPrincipal user) =>
+        app.MapGet("/auth/me", async (ClaimsPrincipal user, IAuthService authService, CancellationToken cancellationToken) =>
         {
-            var userId = user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
+            var sub = user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            // Read the live identity from the DB so a username changed via PUT /users/me is
+            // authoritative here (the JWT's unique_name claim stays stale until it expires).
+            // Fall back to the token claims if the id can't be parsed or the row is gone.
+            if (Guid.TryParse(sub, out var userId))
+            {
+                var me = await authService.GetMeAsync(userId, cancellationToken);
+                if (me is not null)
+                {
+                    return Results.Ok(me);
+                }
+            }
+
             var username = user.FindFirstValue(JwtRegisteredClaimNames.UniqueName) ?? user.FindFirstValue(ClaimTypes.Name);
-            return Results.Ok(new { userId, username });
+            return Results.Ok(new { userId = sub, username });
         });
     }
 }
