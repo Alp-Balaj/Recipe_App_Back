@@ -5,7 +5,7 @@ public enum RankEvent
     RecipeCreated,
     RecipeReceivedLike,
     RecipeReceivedComment,
-    CommentRecevedLike,
+    CommentReceivedLike,
     SavedByOtherUser,
     AiRecipeCookedAndRated
 }

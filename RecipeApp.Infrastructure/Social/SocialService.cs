@@ -10,6 +10,7 @@ using RecipeApp.Application.Social.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Entities.RecipeInteractions;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.Social;
@@ -29,7 +30,8 @@ public class SocialService : ISocialService
 
     public async Task<SocialResult<bool>> LikeRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        if (!await RecipeVisibleAsync(recipeId, currentUserId, cancellationToken))
+        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
+        if (authorId is null)
         {
             return SocialResult<bool>.NotFound();
         }
@@ -38,6 +40,10 @@ public class SocialService : ISocialService
         if (!alreadyLiked)
         {
             _db.Likes.Add(new Like { UserId = currentUserId, RecipeId = recipeId });
+            // Gamification: the author earns RecipeReceivedLike (+5) on the first like by
+            // someone else. The bump rides the same SaveChanges as the insert, so if this
+            // instance loses the concurrent-double-tap race the tracker clear reverts both.
+            await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeReceivedLike, cancellationToken);
             await SaveIgnoringDuplicateAsync(cancellationToken);
         }
 
@@ -46,23 +52,34 @@ public class SocialService : ISocialService
 
     public async Task<SocialResult<bool>> UnlikeRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        if (!await RecipeVisibleAsync(recipeId, currentUserId, cancellationToken))
+        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
+        if (authorId is null)
         {
             return SocialResult<bool>.NotFound();
         }
 
         // Interaction rows are hard rows (unlike recipes there is nothing to soft-delete);
         // ExecuteDelete is naturally idempotent — deleting a like that isn't there is a no-op.
-        await _db.Likes
+        var deleted = await _db.Likes
             .Where(l => l.UserId == currentUserId && l.RecipeId == recipeId)
             .ExecuteDeleteAsync(cancellationToken);
+
+        // Gamification (symmetric reversal): a real like->unlike transition subtracts the
+        // RecipeReceivedLike award from the author. A repeated/no-op unlike deleted nothing,
+        // so it never touches the rank.
+        if (deleted > 0)
+        {
+            await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeReceivedLike, cancellationToken);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
         return SocialResult<bool>.Success(true);
     }
 
     public async Task<SocialResult<bool>> SaveRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        if (!await RecipeVisibleAsync(recipeId, currentUserId, cancellationToken))
+        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
+        if (authorId is null)
         {
             return SocialResult<bool>.NotFound();
         }
@@ -71,6 +88,9 @@ public class SocialService : ISocialService
         if (!alreadySaved)
         {
             _db.SavedRecipes.Add(new SavedRecipe { UserId = currentUserId, RecipeId = recipeId });
+            // Gamification: SavedByOtherUser (+8) to the author on the first save by someone
+            // else — same-SaveChanges bump, reverted with the insert on a lost duplicate race.
+            await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.SavedByOtherUser, cancellationToken);
             await SaveIgnoringDuplicateAsync(cancellationToken);
         }
 
@@ -79,14 +99,23 @@ public class SocialService : ISocialService
 
     public async Task<SocialResult<bool>> UnsaveRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        if (!await RecipeVisibleAsync(recipeId, currentUserId, cancellationToken))
+        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
+        if (authorId is null)
         {
             return SocialResult<bool>.NotFound();
         }
 
-        await _db.SavedRecipes
+        var deleted = await _db.SavedRecipes
             .Where(s => s.UserId == currentUserId && s.RecipeId == recipeId)
             .ExecuteDeleteAsync(cancellationToken);
+
+        // Gamification (symmetric reversal): a real save->unsave transition subtracts the
+        // SavedByOtherUser award from the author; a no-op unsave leaves the rank untouched.
+        if (deleted > 0)
+        {
+            await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.SavedByOtherUser, cancellationToken);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
         return SocialResult<bool>.Success(true);
     }
@@ -129,7 +158,8 @@ public class SocialService : ISocialService
 
     public async Task<SocialResult<CommentResponse>> AddCommentAsync(Guid recipeId, string content, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        if (!await RecipeVisibleAsync(recipeId, currentUserId, cancellationToken))
+        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
+        if (authorId is null)
         {
             return SocialResult<CommentResponse>.NotFound();
         }
@@ -142,6 +172,10 @@ public class SocialService : ISocialService
             RecipeId = recipeId,
         };
         _db.Comments.Add(comment);
+        // Gamification: RecipeReceivedComment (+3) to the author when someone else comments.
+        // Comments aren't idempotent — each new comment by a non-author awards again (and its
+        // deletion reverses). Bump rides the same SaveChanges as the insert.
+        await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeReceivedComment, cancellationToken);
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User {UserId} commented on recipe {RecipeId}.", currentUserId, recipeId);
@@ -156,7 +190,7 @@ public class SocialService : ISocialService
 
     public async Task<SocialResult<CommentListResponse>> GetCommentsAsync(Guid recipeId, KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        if (!await RecipeVisibleAsync(recipeId, currentUserId, cancellationToken))
+        if (await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken) is null)
         {
             return SocialResult<CommentListResponse>.NotFound();
         }
@@ -248,6 +282,11 @@ public class SocialService : ISocialService
         }
 
         _db.Comments.Remove(comment);
+        // Gamification (symmetric reversal): removing a comment reverses the +3 the author
+        // earned for it. Passing the comment's author as the "acting user" makes the self-
+        // guard fire exactly when the award was skipped (author commenting on their own
+        // recipe), so a self-comment's deletion never docks the author.
+        await RevertAuthorAsync(recipe.CreatedByUserId, comment.UserId, RankEvent.RecipeReceivedComment, cancellationToken);
         await _db.SaveChangesAsync(cancellationToken);
 
         return SocialResult<bool>.Success(true);
@@ -584,13 +623,49 @@ public class SocialService : ISocialService
 
     // --- helpers ------------------------------------------------------------------------
 
-    // Visibility rule 2 as a single existence check: soft-deleted rows are excluded by the
-    // global query filter, and a non-public recipe not owned by the caller doesn't "exist"
-    // for interaction purposes — callers get NotFound, never Forbidden.
-    private Task<bool> RecipeVisibleAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken) =>
-        _db.Recipes.AnyAsync(
-            r => r.Id == recipeId && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId),
-            cancellationToken);
+    // Visibility rule 2 folded into the author lookup: returns the recipe's author id when
+    // the caller may interact with it (Public, or their own), else null. Soft-deleted rows
+    // are excluded by the global query filter, so a hidden/missing recipe reads as null —
+    // callers turn that into NotFound, never Forbidden. The author id is also what the
+    // gamification award/revert path needs, so this one query serves both.
+    private Task<Guid?> VisibleRecipeAuthorAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken) =>
+        _db.Recipes
+            .Where(r => r.Id == recipeId && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId))
+            .Select(r => (Guid?)r.CreatedByUserId)
+            .SingleOrDefaultAsync(cancellationToken);
+
+    // Gamification award: stage a rank increase on the recipe's author for a social event.
+    // Never awards an author for acting on their own recipe (authorId == actingUserId), and
+    // only stages the change — the caller's SaveChanges commits it alongside the interaction.
+    private async Task AwardAuthorAsync(Guid authorId, Guid actingUserId, RankEvent rankEvent, CancellationToken cancellationToken)
+    {
+        if (authorId == actingUserId)
+        {
+            return;
+        }
+
+        var author = await _db.Users.SingleOrDefaultAsync(u => u.Id == authorId, cancellationToken);
+        if (author is not null)
+        {
+            author.CookingRank = RankingService.NewRank(author.CookingRank, rankEvent);
+        }
+    }
+
+    // Symmetric to AwardAuthorAsync: stage the reversal of a previously-granted award. The
+    // same self-guard means an action that never awarded (own-recipe) is never docked.
+    private async Task RevertAuthorAsync(Guid authorId, Guid actingUserId, RankEvent rankEvent, CancellationToken cancellationToken)
+    {
+        if (authorId == actingUserId)
+        {
+            return;
+        }
+
+        var author = await _db.Users.SingleOrDefaultAsync(u => u.Id == authorId, cancellationToken);
+        if (author is not null)
+        {
+            author.CookingRank = RankingService.RevertRank(author.CookingRank, rankEvent);
+        }
+    }
 
     // Idempotency under races (plan decision): two concurrent likes/saves/follows both pass
     // the Any() check, and the loser's insert hits the composite-PK unique constraint. That

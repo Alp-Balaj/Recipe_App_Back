@@ -5,6 +5,7 @@ using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.Recipes;
@@ -23,8 +24,16 @@ public class RecipeService : IRecipeService
     public async Task<RecipeResponse> CreateRecipeAsync(CreateRecipeRequest request, Guid createdByUserId, CancellationToken cancellationToken = default)
     {
         var recipe = ToRecipe(request, createdByUserId);
-
         _db.Recipes.Add(recipe);
+
+        // Gamification: publishing a recipe awards the author RecipeCreated (+20). The rank
+        // bump rides the same SaveChanges as the insert so the two commit atomically.
+        var author = await _db.Users.SingleOrDefaultAsync(u => u.Id == createdByUserId, cancellationToken);
+        if (author is not null)
+        {
+            author.CookingRank = RankingService.NewRank(author.CookingRank, RankEvent.RecipeCreated);
+        }
+
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User {UserId} created recipe {RecipeId}.", createdByUserId, recipe.Id);
