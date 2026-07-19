@@ -7,7 +7,7 @@ namespace RecipeApp.Infrastructure.Chat;
 // Real IChatMessageCaller: the single, unfaked network boundary, talking to Gemini's
 // generateContent REST endpoint (v2 provider pivot — the repo's first raw-HttpClient
 // integration). Maps the seam's provider-neutral { reply, suggestedRecipeIds } contract onto
-// Gemini's request/response shape. The model is pinned via GeminiOptions (gemini-2.0-flash) and
+// Gemini's request/response shape. The model is pinned via GeminiOptions (gemini-3.5-flash) and
 // structured output is constrained with responseSchema; nothing above this seam knows any of it.
 public sealed class GeminiMessageCaller : IChatMessageCaller
 {
