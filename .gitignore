@@ -488,3 +488,6 @@ CLAUDE.md
 
 # Uploaded images (social-feed cp04) — user content stored on local disk, never committed
 RecipeApp.API/uploads/
+
+# Seeder credentials (tools/seed) — local demo passwords, never committed
+tools/seed/seed-credentials.json
