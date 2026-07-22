@@ -50,13 +50,23 @@ public class RegisterRequestValidatorTests
     }
 
     [Theory]
-    [InlineData("")]         // NotEmpty
-    [InlineData("short")]    // MinimumLength(8)
-    public void Validate_ShortPassword_FailsOnPassword(string password)
+    [InlineData("")]             // NotEmpty
+    [InlineData("short")]        // MinimumLength(8)
+    [InlineData("12345678")]     // no letter (publish cp1 policy)
+    [InlineData("password")]     // no digit (publish cp1 policy)
+    public void Validate_WeakPassword_FailsOnPassword(string password)
     {
         var result = _validator.Validate(Valid() with { Password = password });
 
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.PropertyName == nameof(RegisterRequest.Password));
+    }
+
+    [Theory]
+    [InlineData("abcdefg1")]     // bare letter+digit floor, no symbol required
+    [InlineData("Password123!")] // the suite's canonical password
+    public void Validate_LetterAndDigitPassword_IsValid(string password)
+    {
+        Assert.True(_validator.Validate(Valid() with { Password = password }).IsValid);
     }
 }

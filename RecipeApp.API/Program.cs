@@ -4,6 +4,7 @@ using System.Threading.RateLimiting;
 using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
@@ -54,14 +55,24 @@ builder.Services.AddScoped<IRecipeService, RecipeService>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();
 
-// social-feed cp04 (decision I1): uploaded images live on local disk behind the
-// IImageStorage seam — S3/MinIO is later a one-class swap. The root is config-overridable
-// (ImageStorage:RootPath) so the integration tests point it at a temp directory; the
-// default sits under the content root (git-ignored uploads/). The same path backs the
-// public-read static-file mount on /images below.
+// social-feed cp04 (decision I1): uploaded images live behind the IImageStorage seam.
+// Production (Railway is ephemeral-disk) sets ImageStorage:R2:* and stores in Cloudflare
+// R2, returning absolute public URLs; dev and the integration tests leave R2 unset and
+// keep local disk. The local root is config-overridable (ImageStorage:RootPath) so the
+// integration tests point it at a temp directory; the default sits under the content
+// root (git-ignored uploads/). The same path backs the public-read static-file mount on
+// /images below — R2 mode has no local files, so the mount only exists in disk mode.
+var useR2ImageStorage = !string.IsNullOrEmpty(builder.Configuration["ImageStorage:R2:Bucket"]);
 var imageRootPath = builder.Configuration["ImageStorage:RootPath"]
     ?? Path.Combine(builder.Environment.ContentRootPath, "uploads", "images");
-builder.Services.AddLocalDiskImageStorage(imageRootPath);
+if (useR2ImageStorage)
+{
+    builder.Services.AddR2ImageStorage(builder.Configuration);
+}
+else
+{
+    builder.Services.AddLocalDiskImageStorage(imageRootPath);
+}
 
 // chat-ai cp02: registers IChatAssistantService (Gemini-backed). Nothing consumes it until
 // cp03 wires the /chat endpoints; the Gemini:ApiKey check is deferred to resolution time.
@@ -176,9 +187,37 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 
+// Railway (publish cp1) terminates TLS at its edge and proxies over http, so trust the
+// edge's X-Forwarded-For/-Proto: without this every client shares the proxy's IP (one
+// global rate-limit bucket) and UseHttpsRedirection loops. Railway's edge IPs are dynamic,
+// so the loopback-only KnownIPNetworks/KnownProxies defaults are cleared and ForwardLimit=1
+// keeps only the nearest (edge-appended, unspoofable) entry.
+var forwardedHeadersOptions = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+    ForwardLimit = 1,
+};
+forwardedHeadersOptions.KnownIPNetworks.Clear();
+forwardedHeadersOptions.KnownProxies.Clear();
+app.UseForwardedHeaders(forwardedHeadersOptions);
+
 // Global exception handler first, so it wraps auth and every endpoint. Logs the exception
 // and returns a ProblemDetails 500 with no stack trace (safe in Production).
 app.UseExceptionHandler();
+
+// Single-origin serving (publish cp1): the SPA calls /api/* (frozen client.ts), the API
+// routes live at the root. In dev the Vite proxy strips the /api prefix; deployed, this
+// rewrite reproduces exactly that. Unconditional so dev, tests, and prod all share one
+// routing behavior ("/api/health" keeps answering via "/health", for example).
+app.Use((context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api", out var rest) && rest.HasValue)
+    {
+        context.Request.Path = rest;
+    }
+
+    return next(context);
+});
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
@@ -188,16 +227,33 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+// publish cp1: the built SPA ships in wwwroot (copied in by the Dockerfile). Static-file
+// middleware sits outside endpoint routing, so the auth fallback policy doesn't apply —
+// correct for public assets. In dev/tests wwwroot doesn't exist and this is a no-op.
+app.UseStaticFiles();
+
 // social-feed cp04: serve stored images from the upload root at /images. Deliberately
 // PUBLIC-read (decision I1): the middleware sits outside endpoint routing, so the
 // RequireAuthenticatedUser fallback policy doesn't apply here — the access control is the
 // unguessable server-generated GUID filename. Content types resolve from the extension
 // (.jpg/.png/.webp), which ImageUploadRules pinned to the magic-byte-verified type.
-app.UseStaticFiles(new StaticFileOptions
+// Disk mode only: in R2 mode nothing creates the local root (PhysicalFileProvider would
+// throw) and images serve from the absolute R2 public URL instead.
+if (!useR2ImageStorage)
 {
-    FileProvider = new PhysicalFileProvider(imageRootPath),
-    RequestPath = "/images",
-});
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        FileProvider = new PhysicalFileProvider(imageRootPath),
+        RequestPath = "/images",
+    });
+}
+
+// Explicit UseRouting so route matching happens HERE — after the /api rewrite above.
+// Without it, minimal hosting auto-inserts routing at the very start of the pipeline,
+// which selects an endpoint from the ORIGINAL path: every /api/* request would bypass
+// the rewrite and land on the SPA fallback instead of its API route (caught by
+// HealthEndpointTests in CI).
+app.UseRouting();
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -212,9 +268,19 @@ app.MapMealPlanEndpoints();
 
 // Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
 // fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.
-app.MapGet("/api/health", () => Results.Ok(new { status = "ok" }))
+// Root path like every other endpoint (publish cp1) — Railway's healthcheck hits /health
+// directly, and the old /api/health still answers via the /api rewrite above.
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }))
 .AllowAnonymous()
 .WithName("GetHealth");
+
+// publish cp1: SPA fallback — client-routed deep links (/login, /recipes/:id) must serve
+// index.html on a cold GET. Lowest routing priority, so it never shadows an API route.
+// AllowAnonymous is mandatory: the RequireAuthenticatedUser fallback policy would other-
+// wise 401 the login page itself. With no wwwroot (dev/tests) a fallback hit 404s as
+// before.
+app.MapFallbackToFile("index.html")
+.AllowAnonymous();
 
 app.Run();
 
