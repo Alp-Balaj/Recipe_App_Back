@@ -14,9 +14,6 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/recipeapp
-
 jobs:
   build-push-deploy:
     runs-on: ubuntu-latest
@@ -29,6 +26,11 @@ jobs:
       # provisioning has happened.
       HAS_RAILWAY: ${{ secrets.RAILWAY_TOKEN != '' }}
     steps:
+      # Docker rejects uppercase repository names, but github.repository_owner keeps the
+      # account's casing (Alp-Balaj) — lowercase it in bash (${var,,}).
+      - name: Compute image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/recipeapp" >> "$GITHUB_ENV"
+
       - name: Checkout backend
         uses: actions/checkout@v4
         with:
