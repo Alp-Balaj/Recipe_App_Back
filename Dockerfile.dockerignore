@@ -1,0 +1,11 @@
+# BuildKit picks this up because it sits next to the Dockerfile (the build context is the
+# repos' PARENT directory, so a plain .dockerignore at the backend repo root would be
+# invisible). Paths are relative to the context root, hence the **/ prefixes.
+**/.git
+**/bin
+**/obj
+**/node_modules
+**/dist
+**/uploads
+**/.vite
+**/TestResults

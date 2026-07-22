@@ -13,6 +13,10 @@
          its 10.0.4 floor, mismatching Infrastructure's 10.0.9 (CS1705). Pin to 10.0.9 to match
          (Decisions/dotnet-test-project-ef-core-pinning.md). -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.9" />
+    <!-- AuthServiceLoginTests: a real ApplicationDbContext over the InMemory provider (the
+         relational-only jsonb/default-value annotations are ignored there). Same 10.0.9
+         pin as Relational above. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.9" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />

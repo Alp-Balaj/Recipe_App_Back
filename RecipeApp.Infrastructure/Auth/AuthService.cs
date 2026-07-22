@@ -49,13 +49,28 @@ public class AuthService : IAuthService
         return AuthResult.Success(ToAuthResponse(user));
     }
 
+    // Timing-safe unknown-user login (publish cp1 auth hardening): the miss path burns
+    // the same one hash verification as the wrong-password path, so response timing
+    // can't be used to enumerate which usernames/emails exist. The hash is computed
+    // once per process from a throwaway password nobody knows; races just recompute it.
+    private static readonly User DummyUser = new() { Id = Guid.Empty, Username = string.Empty, Email = string.Empty };
+    private static string? _dummyPasswordHash;
+
     public async Task<AuthResult> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default)
     {
         var user = await _db.Users.FirstOrDefaultAsync(
             u => u.Username == request.UsernameOrEmail || u.Email == request.UsernameOrEmail,
             cancellationToken);
 
-        if (user is null || !_passwordHasher.VerifyPassword(user, user.PasswordHash, request.Password))
+        if (user is null)
+        {
+            _dummyPasswordHash ??= _passwordHasher.HashPassword(DummyUser, Guid.NewGuid().ToString("N"));
+            _passwordHasher.VerifyPassword(DummyUser, _dummyPasswordHash, request.Password);
+            _logger.LogWarning("Failed login attempt.");
+            return AuthResult.Failure("Invalid username/email or password.");
+        }
+
+        if (!_passwordHasher.VerifyPassword(user, user.PasswordHash, request.Password))
         {
             _logger.LogWarning("Failed login attempt.");
             return AuthResult.Failure("Invalid username/email or password.");
