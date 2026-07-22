@@ -72,9 +72,11 @@ jobs:
    a PAT with `read:packages`).
 3. Service settings:
    - **Healthcheck path:** `/health`
-   - **Pre-deploy command:** `/app/efbundle --connection "$ConnectionStrings__DefaultConnection"`
+   - **Pre-deploy command:** `/app/efbundle`
      (runs migrations before the new instance goes live; the service itself is stateless,
-     so deploys are zero-downtime)
+     so deploys are zero-downtime. No `--connection` argument: Railway does not shell-expand
+     `$VAR` in this field, so the bundle instead reads ConnectionStrings__DefaultConnection
+     from the environment via the design-time factory)
    - **Public networking:** enable, port `8080`.
 4. Service variables:
 
