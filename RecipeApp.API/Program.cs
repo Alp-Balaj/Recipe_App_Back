@@ -248,6 +248,13 @@ if (!useR2ImageStorage)
     });
 }
 
+// Explicit UseRouting so route matching happens HERE — after the /api rewrite above.
+// Without it, minimal hosting auto-inserts routing at the very start of the pipeline,
+// which selects an endpoint from the ORIGINAL path: every /api/* request would bypass
+// the rewrite and land on the SPA fallback instead of its API route (caught by
+// HealthEndpointTests in CI).
+app.UseRouting();
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
