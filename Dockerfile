@@ -16,7 +16,10 @@ FROM node:22-alpine AS frontend-build
 ARG FRONTEND_DIR
 WORKDIR /src
 COPY ${FRONTEND_DIR}/package.json ${FRONTEND_DIR}/package-lock.json ./
-RUN npm ci
+# The lockfile is written by npm 11 on the dev machines; the image ships npm 10, whose
+# ci mishandles npm-11 locks (nested platform optionals install as required →
+# EBADPLATFORM). Same npm major as the lock author = deterministic installs.
+RUN npm install -g npm@11 && npm ci
 COPY ${FRONTEND_DIR}/ ./
 RUN npm run build
 
