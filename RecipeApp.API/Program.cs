@@ -209,11 +209,29 @@ app.UseExceptionHandler();
 // routes live at the root. In dev the Vite proxy strips the /api prefix; deployed, this
 // rewrite reproduces exactly that. Unconditional so dev, tests, and prod all share one
 // routing behavior ("/api/health" keeps answering via "/health", for example).
+//
+// Publish fix (2026-07-23): the Vite proxy doesn't just strip the prefix — it GATEKEEPS.
+// In dev only /api/* ever reaches the API, so a browser navigating to /feed gets the SPA
+// from Vite. Deployed, SPA routes that share a path with a root API route (/feed,
+// /users/:id, /recipes/:id) matched the API endpoint on a cold GET and 401ed before the
+// SPA could load. So the else-branch: a GET that did NOT arrive /api-prefixed and
+// negotiates text/html is a browser navigation (the frozen client.ts always talks
+// /api/* JSON) and is rewritten to /index.html for the static-file middleware below.
+// Exempt: extension-bearing paths (SPA assets, /images/*.jpg — their pipelines sit
+// below) and /health (stays browser-inspectable). With no wwwroot (dev/tests) the
+// rewritten path finds no file and 404s, matching the SPA fallback's behavior there.
 app.Use((context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/api", out var rest) && rest.HasValue)
     {
         context.Request.Path = rest;
+    }
+    else if (HttpMethods.IsGet(context.Request.Method)
+        && !context.Request.Path.StartsWithSegments("/health")
+        && !Path.HasExtension(context.Request.Path.Value)
+        && context.Request.Headers.Accept.ToString().Contains("text/html", StringComparison.OrdinalIgnoreCase))
+    {
+        context.Request.Path = "/index.html";
     }
 
     return next(context);

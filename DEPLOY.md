@@ -131,7 +131,9 @@ Click-through on `http://localhost:8080` — **no Vite dev server running**:
 - [ ] photo upload lands in the R2 bucket and renders from the absolute URL
 - [ ] chat turn
 - [ ] feed
-- [ ] deep-link refresh on `/recipes/<id>` (SPA fallback serves index.html)
+- [ ] deep-link refresh on `/recipes/<id>`, `/feed`, and `/users/<id>` serves the SPA —
+  these paths double as root API routes, so a cold browser GET must hit the text/html
+  navigation rewrite (Program.cs), not the API endpoint (which would 401)
 - [ ] `/health` and `/api/health` both 200 without a token
 - [ ] migration bundle applied cleanly on the fresh, empty DB (step above)
 
