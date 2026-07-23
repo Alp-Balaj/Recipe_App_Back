@@ -236,14 +236,36 @@ public static class SocialEndpoints
 
     private static void MapFeedEndpoint(WebApplication app)
     {
-        app.MapGet("/feed", async (string? cursor, int? limit, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        app.MapGet("/feed", async (string? cursor, int? limit, string? scope, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
             {
                 return error!;
             }
 
-            var response = await social.GetFeedAsync(decodedCursor, effectiveLimit, GetUserId(user), cancellationToken);
+            // Feed tabs (2026-07-22): ?scope=forYou|following selects the mode explicitly;
+            // omitted keeps the original following-with-discover-fallback behavior.
+            FeedScope? feedScope = null;
+            if (!string.IsNullOrEmpty(scope))
+            {
+                if (string.Equals(scope, "forYou", StringComparison.OrdinalIgnoreCase))
+                {
+                    feedScope = FeedScope.ForYou;
+                }
+                else if (string.Equals(scope, "following", StringComparison.OrdinalIgnoreCase))
+                {
+                    feedScope = FeedScope.Following;
+                }
+                else
+                {
+                    return Results.ValidationProblem(new Dictionary<string, string[]>
+                    {
+                        ["scope"] = ["scope must be 'forYou' or 'following'."],
+                    });
+                }
+            }
+
+            var response = await social.GetFeedAsync(decodedCursor, effectiveLimit, GetUserId(user), feedScope, cancellationToken);
             return Results.Ok(response);
         })
         .RequireRateLimiting(RateLimitPolicies.Social);

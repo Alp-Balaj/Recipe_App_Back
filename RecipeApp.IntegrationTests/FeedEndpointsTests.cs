@@ -146,6 +146,75 @@ public class FeedEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
     }
 
     [Fact]
+    public async Task Feed_ScopeForYou_ShowsOthersRecipesEvenWhileFollowing()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        await CreateRecipeAsync(authorClient);
+
+        var (strangerClient, _) = await NewUserAsync();
+        var strangerRecipe = await CreateRecipeAsync(strangerClient);
+
+        var (viewerClient, _) = await NewUserAsync();
+        var ownRecipe = await CreateRecipeAsync(viewerClient);
+        (await viewerClient.PostAsync($"/users/{author.UserId}/follow", null)).EnsureSuccessStatusCode();
+
+        var feed = await WalkFeedAsync(viewerClient, scope: "forYou");
+
+        Assert.Equal("forYou", feed.Source);
+        // The everyone-feed: non-followed authors appear despite the caller following someone.
+        Assert.Contains(feed.Items, i => i.Recipe.Id == strangerRecipe.Id);
+        // The caller's own recipes never appear, same as discover.
+        Assert.DoesNotContain(feed.Items, i => i.Recipe.Id == ownRecipe.Id);
+        Assert.All(feed.Items, i => Assert.Equal(RecipeVisibility.Public, i.Recipe.Visibility));
+    }
+
+    [Fact]
+    public async Task Feed_ScopeFollowing_FollowingNobody_ReturnsEmptyNotDiscover()
+    {
+        var (otherClient, _) = await NewUserAsync();
+        await CreateRecipeAsync(otherClient); // the shared pool is non-empty…
+
+        var (freshClient, _) = await NewUserAsync();
+        var feed = await GetFeedPageAsync(freshClient, "/feed?limit=50&scope=following");
+
+        // …yet an explicit following scope must NOT fall back to discover.
+        Assert.Equal("following", feed.Source);
+        Assert.Empty(feed.Items);
+        Assert.Null(feed.NextCursor);
+    }
+
+    [Fact]
+    public async Task Feed_ScopeFollowing_ReturnsExactlyFollowedAuthorsRecipes()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var publicRecipe = await CreateRecipeAsync(authorClient);
+
+        var (strangerClient, _) = await NewUserAsync();
+        var strangerRecipe = await CreateRecipeAsync(strangerClient);
+
+        var (viewerClient, _) = await NewUserAsync();
+        (await viewerClient.PostAsync($"/users/{author.UserId}/follow", null)).EnsureSuccessStatusCode();
+
+        var feed = await WalkFeedAsync(viewerClient, scope: "following");
+
+        Assert.Equal("following", feed.Source);
+        var ids = feed.Items.Select(i => i.Recipe.Id).ToList();
+        Assert.Contains(publicRecipe.Id, ids);
+        Assert.DoesNotContain(strangerRecipe.Id, ids);
+        Assert.All(feed.Items, i => Assert.Equal(author.UserId, i.Author.Id));
+    }
+
+    [Fact]
+    public async Task Feed_UnknownScope_Returns400()
+    {
+        var (client, _) = await NewUserAsync();
+
+        var response = await client.GetAsync("/feed?scope=friends");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Feed_MalformedCursor_Returns400()
     {
         var (client, _) = await NewUserAsync();
@@ -183,14 +252,14 @@ public class FeedEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
 
     // Walks every page of the caller's feed and returns the concatenation (following mode
     // is exact-content, so the walk terminates on the followed authors' recipe count).
-    private static async Task<FeedListResponse> WalkFeedAsync(HttpClient client)
+    private static async Task<FeedListResponse> WalkFeedAsync(HttpClient client, string? scope = null)
     {
         var items = new List<FeedItemResponse>();
         string? cursor = null;
         string source;
         do
         {
-            var url = $"/feed?limit=50{(cursor is null ? "" : $"&cursor={Uri.EscapeDataString(cursor)}")}";
+            var url = $"/feed?limit=50{(scope is null ? "" : $"&scope={scope}")}{(cursor is null ? "" : $"&cursor={Uri.EscapeDataString(cursor)}")}";
             var page = await GetFeedPageAsync(client, url);
             items.AddRange(page.Items);
             source = page.Source;

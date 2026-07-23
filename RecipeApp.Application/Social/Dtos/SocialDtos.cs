@@ -56,8 +56,19 @@ public record FeedItemResponse(
     bool LikedByMe,
     bool SavedByMe);
 
-// source: "following" (recipes from followed authors) or "discover" (cold-start fallback
-// for a caller who follows nobody — recent public recipes by others, clearly labeled).
+// Caller-requested feed mode (?scope= on GET /feed, feed-tabs addition 2026-07-22):
+// ForYou = recent Public recipes by others (the discover query, on demand);
+// Following = followed authors only, NO cold-start fallback (empty is empty).
+// A missing scope keeps the original cp03 behavior: following with discover fallback.
+public enum FeedScope
+{
+    ForYou,
+    Following,
+}
+
+// source: "following" (recipes from followed authors), "discover" (cold-start fallback
+// for a caller who follows nobody — recent public recipes by others, clearly labeled),
+// or "forYou" (the explicitly requested ?scope=forYou everyone-feed).
 public record FeedListResponse(
     IReadOnlyList<FeedItemResponse> Items,
     string? NextCursor,

@@ -76,9 +76,11 @@ public interface ISocialService
     // --- cp03: feed ---------------------------------------------------------------------
 
     /// <summary>
-    /// Pull-based feed: Public recipes by followed authors (source "following"), or the
-    /// cold-start fallback of recent Public recipes by others (source "discover") when the
-    /// caller follows nobody. CreatedAt DESC keyset, social envelope per item.
+    /// Pull-based feed, CreatedAt DESC keyset, social envelope per item. Scope selects the
+    /// mode: ForYou = recent Public recipes by others; Following = followed authors only
+    /// (no fallback — empty when they've posted nothing). Null scope keeps the original
+    /// behavior: Public recipes by followed authors (source "following"), falling back to
+    /// the cold-start discover feed (source "discover") when the caller follows nobody.
     /// </summary>
-    Task<FeedListResponse> GetFeedAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default);
+    Task<FeedListResponse> GetFeedAsync(KeysetCursor? cursor, int limit, Guid currentUserId, FeedScope? scope = null, CancellationToken cancellationToken = default);
 }

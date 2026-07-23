@@ -548,7 +548,7 @@ public class SocialService : ISocialService
 
     // --- cp03: feed ---------------------------------------------------------------------
 
-    public async Task<FeedListResponse> GetFeedAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)
+    public async Task<FeedListResponse> GetFeedAsync(KeysetCursor? cursor, int limit, Guid currentUserId, FeedScope? scope = null, CancellationToken cancellationToken = default)
     {
         var followedIds = _db.UserFollows
             .Where(f => f.FollowerId == currentUserId)
@@ -559,7 +559,24 @@ public class SocialService : ISocialService
         // followed authors' Public recipes only (FriendsOnly stays owner-only everywhere).
         IQueryable<Recipe> recipes;
         string source;
-        if (await followedIds.AnyAsync(cancellationToken))
+        if (scope == FeedScope.ForYou)
+        {
+            // The everyone-feed, requested explicitly (the client's "For You" tab) —
+            // same query as the cold-start discover fallback, but available regardless
+            // of the caller's follow count.
+            recipes = _db.Recipes.Where(r =>
+                r.Visibility == RecipeVisibility.Public && r.CreatedByUserId != currentUserId);
+            source = "forYou";
+        }
+        else if (scope == FeedScope.Following)
+        {
+            // Followed authors only, no fallback: an empty follow graph (or quiet
+            // follows) is an empty page, which the client renders as a follow prompt.
+            recipes = _db.Recipes.Where(r =>
+                r.Visibility == RecipeVisibility.Public && followedIds.Contains(r.CreatedByUserId));
+            source = "following";
+        }
+        else if (await followedIds.AnyAsync(cancellationToken))
         {
             recipes = _db.Recipes.Where(r =>
                 r.Visibility == RecipeVisibility.Public && followedIds.Contains(r.CreatedByUserId));
