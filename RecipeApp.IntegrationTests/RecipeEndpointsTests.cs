@@ -165,14 +165,17 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // Guest access: GET /recipes/{id} is anonymous-capable — an unknown id is a 404 for a
+    // guest, same as for a signed-in caller. The guest visibility matrix (public 200,
+    // private/friends 404) lives in GuestAccessTests.
     [Fact]
-    public async Task GetRecipeById_WithoutToken_ReturnsUnauthorized()
+    public async Task GetRecipeById_WithoutToken_UnknownRecipe_ReturnsNotFound()
     {
         var client = factory.CreateClient();
 
         var response = await client.GetAsync($"/recipes/{Guid.NewGuid()}");
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]

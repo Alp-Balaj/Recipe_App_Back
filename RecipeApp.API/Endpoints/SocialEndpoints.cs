@@ -11,8 +11,9 @@ namespace RecipeApp.API.Endpoints;
 // Social-feed endpoints (social-feed plan, cp01–03): recipe interactions, the follow graph +
 // profiles, and the feed. Mirrors MapRecipeEndpoints/MapChatEndpoints: manual mapping,
 // ValidationFilter for bodies, ClaimsPrincipal -> JWT sub scoping, SocialOutcome switched
-// onto status codes. Every group runs under the caller-auth fallback policy and the shared
-// "social" rate-limit budget.
+// onto status codes. Every group runs under the shared "social" rate-limit budget; the
+// write routes sit under the caller-auth fallback policy, while the read routes are
+// AllowAnonymous with a nullable caller id (guest-access plan §3.1).
 public static class SocialEndpoints
 {
     // Same page-size policy as GET /recipes: default 20, above-cap clamps to 50, non-positive 400.
@@ -72,15 +73,19 @@ public static class SocialEndpoints
         // recipe, so surfaces without a feed-cache hit — above all the recipe's own author,
         // who never appears in their own feed — can read counts + caller-relative flags.
         // Same visibility as GET /recipes/{id}: visible → 200, else 404 (rule 2, never 403).
+        // Guest access (§3.1): the envelope + comment reads are anonymous-capable (D7 —
+        // guests read comments; posting stays authenticated above). Null caller = Public
+        // recipes only, caller-relative flags false.
         group.MapGet("/social", async (Guid recipeId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var result = await social.GetRecipeSocialAsync(recipeId, GetUserId(user), cancellationToken);
+            var result = await social.GetRecipeSocialAsync(recipeId, GetOptionalUserId(user), cancellationToken);
             return result.Outcome switch
             {
                 SocialOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
-        });
+        })
+        .AllowAnonymous();
 
         group.MapGet("/comments", async (Guid recipeId, string? cursor, int? limit, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
@@ -89,13 +94,14 @@ public static class SocialEndpoints
                 return error!;
             }
 
-            var result = await social.GetCommentsAsync(recipeId, decodedCursor, effectiveLimit, GetUserId(user), cancellationToken);
+            var result = await social.GetCommentsAsync(recipeId, decodedCursor, effectiveLimit, GetOptionalUserId(user), cancellationToken);
             return result.Outcome switch
             {
                 SocialOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
-        });
+        })
+        .AllowAnonymous();
     }
 
     private static void MapCommentEndpoints(WebApplication app)
@@ -191,7 +197,8 @@ public static class SocialEndpoints
                 SocialOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
-        });
+        })
+        .AllowAnonymous();
 
         group.MapGet("/{id:guid}/following", async (Guid id, string? cursor, int? limit, ISocialService social, CancellationToken cancellationToken) =>
         {
@@ -206,17 +213,23 @@ public static class SocialEndpoints
                 SocialOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
-        });
+        })
+        .AllowAnonymous();
 
+        // Guest access (§3.1): public profiles + their recipe lists are anonymous-capable.
+        // The literal /users/me/* routes above are separate route registrations and stay
+        // under the RequireAuthenticatedUser fallback — AllowAnonymous here cannot widen
+        // them ("me" never matches {id:guid}).
         group.MapGet("/{id:guid}", async (Guid id, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var result = await social.GetUserProfileAsync(id, GetUserId(user), cancellationToken);
+            var result = await social.GetUserProfileAsync(id, GetOptionalUserId(user), cancellationToken);
             return result.Outcome switch
             {
                 SocialOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
-        });
+        })
+        .AllowAnonymous();
 
         group.MapGet("/{id:guid}/recipes", async (Guid id, string? cursor, int? limit, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
@@ -225,13 +238,14 @@ public static class SocialEndpoints
                 return error!;
             }
 
-            var result = await social.GetUserRecipesAsync(id, decodedCursor, effectiveLimit, GetUserId(user), cancellationToken);
+            var result = await social.GetUserRecipesAsync(id, decodedCursor, effectiveLimit, GetOptionalUserId(user), cancellationToken);
             return result.Outcome switch
             {
                 SocialOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
-        });
+        })
+        .AllowAnonymous();
     }
 
     private static void MapFeedEndpoint(WebApplication app)
@@ -265,14 +279,25 @@ public static class SocialEndpoints
                 }
             }
 
-            var response = await social.GetFeedAsync(decodedCursor, effectiveLimit, GetUserId(user), feedScope, cancellationToken);
+            var response = await social.GetFeedAsync(decodedCursor, effectiveLimit, GetOptionalUserId(user), feedScope, cancellationToken);
             return Results.Ok(response);
         })
+        .AllowAnonymous()
         .RequireRateLimiting(RateLimitPolicies.Social);
     }
 
     private static Guid GetUserId(ClaimsPrincipal user) =>
         Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    // Guest access (§3.1): the anonymous-capable read routes resolve the caller id as
+    // nullable — no claim (anonymous request) is a null caller, not a throw. Write routes
+    // keep GetUserId above (the auth policy guarantees the claim there).
+    private static Guid? GetOptionalUserId(ClaimsPrincipal user)
+    {
+        var sub = user.FindFirstValue(JwtRegisteredClaimNames.Sub)
+                  ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
+        return Guid.TryParse(sub, out var id) ? id : null;
+    }
 
     private static IResult ToNoContent<T>(SocialResult<T> result) =>
         result.Outcome switch

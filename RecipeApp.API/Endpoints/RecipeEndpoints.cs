@@ -27,6 +27,10 @@ public static class RecipeEndpoints
         })
         .AddEndpointFilter<ValidationFilter<CreateRecipeRequest>>();
 
+        // Guest access (§3.1): the two read routes are anonymous-capable — the caller id is
+        // read as nullable and the services degrade to Public-only for a null caller. They
+        // also pick up the IP-partitioned Social rate-limit policy (§3.4): anonymous traffic
+        // is now possible here, and these were the only unbudgeted public reads.
         group.MapGet("/", async (
             string? cuisine,
             string? difficulty,
@@ -37,7 +41,7 @@ public static class RecipeEndpoints
             ClaimsPrincipal user,
             CancellationToken cancellationToken) =>
         {
-            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var userId = GetOptionalUserId(user);
 
             // difficulty is bound as a string and parsed by hand so that undefined values
             // (including numeric strings outside the enum, e.g. "99") are a 400 rather
@@ -81,20 +85,25 @@ public static class RecipeEndpoints
             var query = new RecipeListQuery(cuisine, difficultyFilter, tags ?? [], decodedCursor, effectiveLimit);
             var response = await recipeService.GetRecipesAsync(query, userId, cancellationToken);
             return Results.Ok(response);
-        });
+        })
+        .AllowAnonymous()
+        .RequireRateLimiting(RateLimitPolicies.Social);
 
         group.MapGet("/{id:guid}", async (Guid id, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var userId = GetOptionalUserId(user);
             var result = await recipeService.GetRecipeByIdAsync(id, userId, cancellationToken);
             // GET detail never returns 403 — everything non-Success collapses to 404 so
-            // the response can't confirm a private recipe exists.
+            // the response can't confirm a private recipe exists. For an anonymous caller
+            // every non-Public recipe lands here too — existence never leaks to guests.
             return result.Outcome switch
             {
                 RecipeOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
-        });
+        })
+        .AllowAnonymous()
+        .RequireRateLimiting(RateLimitPolicies.Social);
 
         group.MapPut("/{id:guid}", async (Guid id, UpdateRecipeRequest request, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
@@ -122,5 +131,15 @@ public static class RecipeEndpoints
                 _ => Results.NotFound(),
             };
         });
+    }
+
+    // Guest access (§3.1): the anonymous-capable read routes resolve the caller id as
+    // nullable — no claim (or an unparsable one) is an anonymous caller, not a throw.
+    // The write routes keep the parsing GetUserId shape above (auth guarantees the claim).
+    private static Guid? GetOptionalUserId(ClaimsPrincipal user)
+    {
+        var sub = user.FindFirstValue(JwtRegisteredClaimNames.Sub)
+                  ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
+        return Guid.TryParse(sub, out var id) ? id : null;
     }
 }

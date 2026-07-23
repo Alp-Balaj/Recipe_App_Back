@@ -40,7 +40,7 @@ public class RecipeService : IRecipeService
         return RecipeMapper.ToResponse(recipe);
     }
 
-    public async Task<RecipeResult<RecipeResponse>> GetRecipeByIdAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default)
+    public async Task<RecipeResult<RecipeResponse>> GetRecipeByIdAsync(Guid id, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
         // Soft-deleted rows are already excluded by the global query filter (r => !r.IsDeleted).
         var recipe = await _db.Recipes.SingleOrDefaultAsync(r => r.Id == id, cancellationToken);
@@ -51,7 +51,8 @@ public class RecipeService : IRecipeService
 
         // Visibility rule 2 (recipe-management plan): a non-public recipe not owned by the
         // caller is reported as NotFound — never Forbidden — so 404s don't leak that a
-        // private recipe exists. FriendsOnly is owner-only until social-features adds follows.
+        // private recipe exists. An anonymous caller (guest access, null id) owns nothing,
+        // so any non-public recipe is NotFound for them.
         if (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId)
         {
             return RecipeResult<RecipeResponse>.NotFound();
@@ -60,14 +61,17 @@ public class RecipeService : IRecipeService
         return RecipeResult<RecipeResponse>.Success(RecipeMapper.ToResponse(recipe));
     }
 
-    public async Task<RecipeListResponse> GetRecipesAsync(RecipeListQuery query, Guid currentUserId, CancellationToken cancellationToken = default)
+    public async Task<RecipeListResponse> GetRecipesAsync(RecipeListQuery query, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
         // Visibility rule 1 (recipe-management plan): the visibility predicate is the FIRST
         // predicate composed onto the query, before any user-supplied filter, so no filter
         // combination can widen what the caller may see. FriendsOnly is owner-only until
         // social-features adds follows. Soft-deleted rows are excluded by the global filter.
-        var recipes = _db.Recipes
-            .Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId);
+        // Anonymous caller (guest access): explicit null branch — Public only. Branching
+        // beats passing the nullable into EF, where `= NULL` would silently be always-false.
+        var recipes = currentUserId is Guid callerId
+            ? _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId)
+            : _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
 
         if (!string.IsNullOrEmpty(query.Cuisine))
         {

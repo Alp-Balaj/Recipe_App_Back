@@ -188,7 +188,7 @@ public class SocialService : ISocialService
         return SocialResult<CommentResponse>.Success(ToCommentResponse(comment, username));
     }
 
-    public async Task<SocialResult<CommentListResponse>> GetCommentsAsync(Guid recipeId, KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)
+    public async Task<SocialResult<CommentListResponse>> GetCommentsAsync(Guid recipeId, KeysetCursor? cursor, int limit, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
         if (await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken) is null)
         {
@@ -296,16 +296,23 @@ public class SocialService : ISocialService
     // envelope projection GetFeedAsync rides — correlated subqueries, one round trip,
     // live counts — folded into the visibility check itself so a recipe the caller can't
     // see (or a soft-deleted one, via the global filter) is a NotFound, never a Forbidden.
-    public async Task<SocialResult<RecipeSocialResponse>> GetRecipeSocialAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
+    public async Task<SocialResult<RecipeSocialResponse>> GetRecipeSocialAsync(Guid recipeId, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
+        // Guest access: an anonymous caller (null id) sees Public recipes only and never a
+        // caller-relative flag. isAuthenticated is a parameterized constant in the SQL, so
+        // the membership subqueries collapse to FALSE for guests instead of comparing = NULL.
+        var isAuthenticated = currentUserId is not null;
+        var callerId = currentUserId ?? Guid.Empty;
+
         var envelope = await _db.Recipes
-            .Where(r => r.Id == recipeId && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId))
+            .Where(r => r.Id == recipeId
+                && (r.Visibility == RecipeVisibility.Public || (isAuthenticated && r.CreatedByUserId == callerId)))
             .Select(r => new RecipeSocialResponse(
                 new UserSummaryResponse(r.CreatedByUserId, r.CreatedByUser.Username, r.CreatedByUser.ProfileImageUrl),
                 r.Likes.Count(),
                 r.Comments.Count(),
-                r.Likes.Any(l => l.UserId == currentUserId),
-                r.SavedByUsers.Any(s => s.UserId == currentUserId)))
+                isAuthenticated && r.Likes.Any(l => l.UserId == callerId),
+                isAuthenticated && r.SavedByUsers.Any(s => s.UserId == callerId)))
             .SingleOrDefaultAsync(cancellationToken);
 
         return envelope is null
@@ -430,7 +437,7 @@ public class SocialService : ISocialService
             new FollowListResponse(rows.Select(r => r.Summary).ToList(), nextCursor));
     }
 
-    public async Task<SocialResult<UserProfileResponse>> GetUserProfileAsync(Guid targetUserId, Guid currentUserId, CancellationToken cancellationToken = default)
+    public async Task<SocialResult<UserProfileResponse>> GetUserProfileAsync(Guid targetUserId, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
         var user = await _db.Users.SingleOrDefaultAsync(u => u.Id == targetUserId, cancellationToken);
         if (user is null)
@@ -442,10 +449,14 @@ public class SocialService : ISocialService
         var followingCount = await _db.UserFollows.CountAsync(f => f.FollowerId == targetUserId, cancellationToken);
         // RecipeCount is caller-relative: rule 1 scoped to this author, so a profile never
         // advertises recipes its viewer can't open (soft-deleted rows already filtered).
-        var recipeCount = await _db.Recipes
-            .Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId)
+        // Guest access: an anonymous viewer counts Public only and follows nobody — the
+        // membership query is skipped entirely rather than run with a null id.
+        var visibleRecipes = currentUserId is Guid callerId
+            ? _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId)
+            : _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
+        var recipeCount = await visibleRecipes
             .CountAsync(r => r.CreatedByUserId == targetUserId, cancellationToken);
-        var followedByMe = await _db.UserFollows.AnyAsync(
+        var followedByMe = currentUserId is not null && await _db.UserFollows.AnyAsync(
             f => f.FollowerId == currentUserId && f.FollowingId == targetUserId, cancellationToken);
 
         return SocialResult<UserProfileResponse>.Success(new UserProfileResponse(
@@ -506,7 +517,7 @@ public class SocialService : ISocialService
         return await GetUserProfileAsync(currentUserId, currentUserId, cancellationToken);
     }
 
-    public async Task<SocialResult<RecipeListResponse>> GetUserRecipesAsync(Guid targetUserId, KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)
+    public async Task<SocialResult<RecipeListResponse>> GetUserRecipesAsync(Guid targetUserId, KeysetCursor? cursor, int limit, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
         if (!await _db.Users.AnyAsync(u => u.Id == targetUserId, cancellationToken))
         {
@@ -515,9 +526,11 @@ public class SocialService : ISocialService
 
         // Visibility rule 1: the visibility predicate composes FIRST, then the author
         // filter — same discipline as GET /recipes so this endpoint can't widen anything.
-        var recipes = _db.Recipes
-            .Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId)
-            .Where(r => r.CreatedByUserId == targetUserId);
+        // Guest access: anonymous caller (null) gets the explicit Public-only branch.
+        var visibleRecipes = currentUserId is Guid callerId
+            ? _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId)
+            : _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
+        var recipes = visibleRecipes.Where(r => r.CreatedByUserId == targetUserId);
 
         if (cursor is not null)
         {
@@ -548,10 +561,26 @@ public class SocialService : ISocialService
 
     // --- cp03: feed ---------------------------------------------------------------------
 
-    public async Task<FeedListResponse> GetFeedAsync(KeysetCursor? cursor, int limit, Guid currentUserId, FeedScope? scope = null, CancellationToken cancellationToken = default)
+    public async Task<FeedListResponse> GetFeedAsync(KeysetCursor? cursor, int limit, Guid? currentUserId, FeedScope? scope = null, CancellationToken cancellationToken = default)
     {
+        // Guest access (plan §3.3): an anonymous caller has no follow graph and no "self"
+        // to exclude. ForYou/omitted scope degrades to "recent Public recipes"; an explicit
+        // Following scope answers an empty page (defensive — the client gates the tab, but
+        // a crafted request must not 500).
+        if (currentUserId is not Guid callerId)
+        {
+            if (scope == FeedScope.Following)
+            {
+                return new FeedListResponse([], null, "following");
+            }
+
+            var guestRecipes = _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
+            var guestSource = scope == FeedScope.ForYou ? "forYou" : "discover";
+            return await BuildFeedPageAsync(guestRecipes, guestSource, cursor, limit, null, cancellationToken);
+        }
+
         var followedIds = _db.UserFollows
-            .Where(f => f.FollowerId == currentUserId)
+            .Where(f => f.FollowerId == callerId)
             .Select(f => f.FollowingId);
 
         // Pull-based (plan decision): recipes are queried at request time from the followed
@@ -565,7 +594,7 @@ public class SocialService : ISocialService
             // same query as the cold-start discover fallback, but available regardless
             // of the caller's follow count.
             recipes = _db.Recipes.Where(r =>
-                r.Visibility == RecipeVisibility.Public && r.CreatedByUserId != currentUserId);
+                r.Visibility == RecipeVisibility.Public && r.CreatedByUserId != callerId);
             source = "forYou";
         }
         else if (scope == FeedScope.Following)
@@ -587,9 +616,24 @@ public class SocialService : ISocialService
             // Cold start: a caller following nobody sees recent Public recipes by others,
             // labeled so the client can frame it as Discover rather than a followed feed.
             recipes = _db.Recipes.Where(r =>
-                r.Visibility == RecipeVisibility.Public && r.CreatedByUserId != currentUserId);
+                r.Visibility == RecipeVisibility.Public && r.CreatedByUserId != callerId);
             source = "discover";
         }
+
+        return await BuildFeedPageAsync(recipes, source, cursor, limit, callerId, cancellationToken);
+    }
+
+    // The shared page-building tail of GetFeedAsync: keyset paging + the social envelope.
+    // callerId null = anonymous — the caller-relative flags are compile-time false and the
+    // membership subqueries collapse to FALSE in SQL (isAuthenticated is parameterized).
+    private async Task<FeedListResponse> BuildFeedPageAsync(
+        IQueryable<Recipe> recipes,
+        string source,
+        KeysetCursor? cursor,
+        int limit,
+        Guid? callerId,
+        CancellationToken cancellationToken)
+    {
 
         if (cursor is not null)
         {
@@ -599,6 +643,9 @@ public class SocialService : ISocialService
                 r.CreatedAt < cursorCreatedAt
                 || (r.CreatedAt == cursorCreatedAt && r.Id.CompareTo(cursorId) < 0));
         }
+
+        var isAuthenticated = callerId is not null;
+        var callerIdValue = callerId ?? Guid.Empty;
 
         // The social envelope rides along as correlated subqueries in the page query —
         // one round trip, live counts, no denormalized counters until measured slow.
@@ -612,8 +659,8 @@ public class SocialService : ISocialService
                 Author = new UserSummaryResponse(r.CreatedByUserId, r.CreatedByUser.Username, r.CreatedByUser.ProfileImageUrl),
                 LikeCount = r.Likes.Count(),
                 CommentCount = r.Comments.Count(),
-                LikedByMe = r.Likes.Any(l => l.UserId == currentUserId),
-                SavedByMe = r.SavedByUsers.Any(s => s.UserId == currentUserId),
+                LikedByMe = isAuthenticated && r.Likes.Any(l => l.UserId == callerIdValue),
+                SavedByMe = isAuthenticated && r.SavedByUsers.Any(s => s.UserId == callerIdValue),
             })
             .ToListAsync(cancellationToken);
 
@@ -645,11 +692,17 @@ public class SocialService : ISocialService
     // are excluded by the global query filter, so a hidden/missing recipe reads as null —
     // callers turn that into NotFound, never Forbidden. The author id is also what the
     // gamification award/revert path needs, so this one query serves both.
-    private Task<Guid?> VisibleRecipeAuthorAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken) =>
-        _db.Recipes
-            .Where(r => r.Id == recipeId && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId))
+    // Guest access: a null caller (anonymous comment reads) takes the explicit Public-only
+    // branch; write paths keep passing a real Guid, which widens to Guid? implicitly.
+    private Task<Guid?> VisibleRecipeAuthorAsync(Guid recipeId, Guid? currentUserId, CancellationToken cancellationToken)
+    {
+        var visible = currentUserId is Guid callerId
+            ? _db.Recipes.Where(r => r.Id == recipeId && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId))
+            : _db.Recipes.Where(r => r.Id == recipeId && r.Visibility == RecipeVisibility.Public);
+        return visible
             .Select(r => (Guid?)r.CreatedByUserId)
             .SingleOrDefaultAsync(cancellationToken);
+    }
 
     // Gamification award: stage a rank increase on the recipe's author for a social event.
     // Never awards an author for acting on their own recipe (authorId == actingUserId), and

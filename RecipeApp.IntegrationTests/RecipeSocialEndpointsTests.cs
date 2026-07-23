@@ -143,8 +143,10 @@ public class RecipeSocialEndpointsTests(IntegrationTestFactory factory) : IClass
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // Guest access: the envelope read is anonymous-capable for Public recipes; the full
+    // guest matrix (flags false, private 404) lives in GuestAccessTests.
     [Fact]
-    public async Task Social_WithoutToken_Returns401()
+    public async Task Social_WithoutToken_PublicRecipe_ReturnsOk()
     {
         var (authorClient, _) = await NewUserAsync();
         var recipe = await CreateRecipeAsync(authorClient);
@@ -152,7 +154,7 @@ public class RecipeSocialEndpointsTests(IntegrationTestFactory factory) : IClass
         var anonymousClient = factory.CreateClient();
         var response = await anonymousClient.GetAsync($"/recipes/{recipe.Id}/social");
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     // --- helpers ------------------------------------------------------------------------

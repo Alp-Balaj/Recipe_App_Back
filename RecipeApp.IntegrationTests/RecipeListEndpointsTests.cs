@@ -234,14 +234,16 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // Guest access: GET /recipes is anonymous-capable — the public-only guest projection
+    // is covered in GuestAccessTests.
     [Fact]
-    public async Task ListRecipes_WithoutToken_ReturnsUnauthorized()
+    public async Task ListRecipes_WithoutToken_ReturnsOk()
     {
         var client = factory.CreateClient();
 
         var response = await client.GetAsync("/recipes");
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     // Keyset tie-break coverage (audit 4.5): the tie branch in RecipeService

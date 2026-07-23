@@ -224,14 +224,16 @@ public class FeedEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // Guest access: GET /feed is anonymous-capable — see GuestAccessTests for the full
+    // guest matrix (public-only contents, false flags, empty following scope).
     [Fact]
-    public async Task Feed_WithoutToken_Returns401()
+    public async Task Feed_WithoutToken_ReturnsOk()
     {
         var client = factory.CreateClient();
 
         var response = await client.GetAsync("/feed");
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     // --- helpers ------------------------------------------------------------------------

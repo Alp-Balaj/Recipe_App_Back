@@ -67,19 +67,24 @@ public class SpaNavigationTests(SpaWebRootFactory factory) : IClassFixture<SpaWe
     [Fact]
     public async Task Feed_ApiPrefixed_IsNeverTreatedAsNavigation()
     {
-        // Even with a browser Accept header, /api/* stays an API route: anonymous → 401.
+        // Even with a browser Accept header, /api/* stays an API route. GET /feed is
+        // anonymous-capable now (guest access), so the proof it hit the API and not the
+        // SPA fallback is the JSON body, not a 401.
         var response = await _client.SendAsync(BrowserGet("/api/feed"));
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
     }
 
     [Fact]
     public async Task Feed_WithoutHtmlAccept_StillRoutesToApi()
     {
-        // No text/html in Accept (client.ts, curl) → the root API route answers as before.
+        // No text/html in Accept (client.ts, curl) → the root API route answers as before
+        // (200 JSON since guest access — the assertion is that it is NOT index.html).
         var response = await _client.GetAsync("/feed");
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
     }
 
     [Fact]
