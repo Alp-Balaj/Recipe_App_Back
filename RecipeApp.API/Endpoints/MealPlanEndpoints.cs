@@ -41,6 +41,30 @@ public static class MealPlanEndpoints
         })
         .AddEndpointFilter<ValidationFilter<CreateMealPlanRequest>>();
 
+        // meal-planning-ui plan, Task 1. The SPA's entry point: POST /meal-plans 409s
+        // without returning the existing plan's id, so "open this week" needs a query.
+        // weekStart must be a pure UTC date, same rule as CreateMealPlanRequest — a
+        // non-midnight or non-UTC value can never match a stored week, so 400 beats a
+        // silently-empty list.
+        group.MapGet("/", async (string? cursor, int? limit, DateTime? weekStart, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
+            {
+                return error!;
+            }
+
+            if (weekStart is not null && (weekStart.Value.Kind != DateTimeKind.Utc || weekStart.Value.TimeOfDay != TimeSpan.Zero))
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["weekStart"] = ["weekStart must be a UTC midnight date."],
+                });
+            }
+
+            var response = await mealPlans.GetMealPlansAsync(decodedCursor, effectiveLimit, weekStart, GetUserId(user), cancellationToken);
+            return Results.Ok(response);
+        });
+
         // 404-never-403 (meal plans have no visibility tier): unknown id and another user's
         // plan are indistinguishable to the caller.
         group.MapGet("/{id:guid}", async (Guid id, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
