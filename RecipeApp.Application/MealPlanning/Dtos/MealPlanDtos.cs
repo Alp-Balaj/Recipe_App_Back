@@ -41,3 +41,16 @@ public record ShoppingListItemResponse(
     Guid? MealPlanId);
 
 public record ShoppingListItemListResponse(IReadOnlyList<ShoppingListItemResponse> Items, string? NextCursor);
+
+// --- meal-planning-ui plan, Task 1: plan lookup ---------------------------------------
+// The list is a SUMMARY projection, not the full week view: callers page over weeks to
+// find a plan id, then GET /meal-plans/{id} for the entries. EntryCount is the cheap
+// signal a week card needs ("3 meals planned") without shipping every entry.
+
+public record MealPlanSummaryResponse(
+    Guid Id,
+    DateTime WeekStartDate,
+    DateTime CreatedAt,
+    int EntryCount);
+
+public record MealPlanListResponse(IReadOnlyList<MealPlanSummaryResponse> Items, string? NextCursor);

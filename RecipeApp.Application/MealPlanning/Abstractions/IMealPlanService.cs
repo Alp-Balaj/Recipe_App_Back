@@ -24,6 +24,13 @@ public interface IMealPlanService
     Task<MealPlanResult<MealPlanResponse>> GetMealPlanByIdAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The caller's plans, WeekStartDate DESC / Id DESC keyset-paged. An exact
+    /// <paramref name="weekStart"/> narrows to a single week — the SPA's "open this week"
+    /// path, since POST 409s without returning the existing plan's id.
+    /// </summary>
+    Task<MealPlanListResponse> GetMealPlansAsync(KeysetCursor? cursor, int limit, DateTime? weekStart, Guid userId, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Adds an entry to the caller's plan. NotFound if the plan isn't the caller's or the
     /// recipe isn't visible to the caller (rule 1, reused verbatim from GET /recipes/{id}).
     /// Conflict if the (day, mealType) slot is already occupied in this plan.

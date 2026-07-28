@@ -89,6 +89,43 @@ public class MealPlanService : IMealPlanService
         return MealPlanResult<MealPlanResponse>.Success(new MealPlanResponse(plan.Id, plan.WeekStartDate, plan.CreatedAt, entries));
     }
 
+    public async Task<MealPlanListResponse> GetMealPlansAsync(KeysetCursor? cursor, int limit, DateTime? weekStart, Guid userId, CancellationToken cancellationToken = default)
+    {
+        var plans = _db.MealPlans.Where(p => p.UserId == userId);
+
+        if (weekStart is not null)
+        {
+            var week = weekStart.Value;
+            plans = plans.Where(p => p.WeekStartDate == week);
+        }
+
+        if (cursor is not null)
+        {
+            var cursorWeek = cursor.Timestamp;
+            var cursorId = cursor.Id;
+            plans = plans.Where(p =>
+                p.WeekStartDate < cursorWeek
+                || (p.WeekStartDate == cursorWeek && p.Id.CompareTo(cursorId) < 0));
+        }
+
+        var rows = await plans
+            .OrderByDescending(p => p.WeekStartDate)
+            .ThenByDescending(p => p.Id)
+            .Take(limit + 1)
+            .Select(p => new MealPlanSummaryResponse(p.Id, p.WeekStartDate, p.CreatedAt, p.Entries.Count()))
+            .ToListAsync(cancellationToken);
+
+        string? nextCursor = null;
+        if (rows.Count > limit)
+        {
+            rows.RemoveAt(limit);
+            var last = rows[^1];
+            nextCursor = new KeysetCursor(last.WeekStartDate, last.Id).Encode();
+        }
+
+        return new MealPlanListResponse(rows, nextCursor);
+    }
+
     public async Task<MealPlanResult<MealPlanEntryResponse>> AddEntryAsync(Guid mealPlanId, AddMealPlanEntryRequest request, Guid userId, CancellationToken cancellationToken = default)
     {
         var ownsPlan = await _db.MealPlans.AnyAsync(mp => mp.Id == mealPlanId && mp.UserId == userId, cancellationToken);
