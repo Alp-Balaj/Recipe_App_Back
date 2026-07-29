@@ -26,8 +26,17 @@ public class SetShoppingListMarkRequestValidator : AbstractValidator<SetShopping
         // no such regeneration — it supports a real DELETE /shopping-list/{id} — so the
         // projection deliberately ignores IsSuppressed on a manual key. Rejecting is the honest
         // contract; accepting a flag and silently dropping it is not.
+        //
+        // The .When guard is load-bearing, not decoration. FluentValidation's default cascade
+        // mode runs every rule in the class even after a sibling fails, so a request carrying
+        // {"key": null, "isSuppressed": true} would reach this rule with Key already known-bad
+        // and dereference it — an unhandled NullReferenceException, which GlobalExceptionHandler
+        // turns into a 500 for what is plainly a 400. (This repo has been bitten by a 400 masked
+        // as a 500 before; do not remove the guard.) Same `.When(x => …)` shape as
+        // UpdateProfileRequestValidator's nullable-field rules.
         RuleFor(x => x.IsSuppressed)
             .Must((request, isSuppressed) => !(isSuppressed && ShoppingListKeys.IsManual(request.Key)))
-            .WithMessage("A manual item cannot be suppressed — delete it with DELETE /shopping-list/{id} instead.");
+            .WithMessage("A manual item cannot be suppressed — delete it with DELETE /shopping-list/{id} instead.")
+            .When(x => !string.IsNullOrEmpty(x.Key));
     }
 }

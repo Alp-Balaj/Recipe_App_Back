@@ -113,4 +113,18 @@ public class AddManualShoppingListItemRequestValidatorTests
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.PropertyName == nameof(AddManualShoppingListItemRequest.WeekStartDate));
     }
+
+    // Companion to SetShoppingListMarkRequestValidatorTests' null-key case: this validator has no
+    // cross-property lambda, so null strings only meet FluentValidation's own null-safe NotEmpty
+    // and MaximumLength. Pinned so a future cross-property rule here cannot quietly regress into
+    // a 500-for-bad-input.
+    [Fact]
+    public void Validate_NullStrings_FailCleanlyWithoutThrowing()
+    {
+        var result = _validator.Validate(Request(ingredient: null!, quantity: null!));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName == nameof(AddManualShoppingListItemRequest.Ingredient));
+        Assert.Contains(result.Errors, e => e.PropertyName == nameof(AddManualShoppingListItemRequest.Quantity));
+    }
 }

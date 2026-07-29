@@ -2,8 +2,10 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Dtos;
+using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -543,6 +545,50 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         Assert.True(Assert.Single(Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks).Groups).IsPurchased);
     }
 
+    // --- bad input is a 400, never a 500 --------------------------------------------------
+    // GlobalExceptionHandler turns any unhandled exception into a 500 ProblemDetails, so a
+    // validator that throws on malformed input silently converts a 400 into a 500. That exact
+    // masking was fixed deliberately in earlier work; these cases stop it coming back through
+    // the new validators. Raw JSON rather than the record, because the records' string members
+    // are non-nullable — a real client can still send null.
+
+    [Fact]
+    public async Task SetMark_NullKeyWithSuppression_Returns400Not500()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var json = $"{{\"weekStartDate\":\"{NextMonday():o}\",\"key\":null,\"isPurchased\":false,\"isSuppressed\":true}}";
+
+        var response = await client.PutAsync("/shopping-list/marks",
+            new StringContent(json, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task SetMark_MissingKeyWithSuppression_Returns400Not500()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        // Key absent entirely rather than explicitly null — the other way a client produces null.
+        var json = $"{{\"weekStartDate\":\"{NextMonday():o}\",\"isPurchased\":false,\"isSuppressed\":true}}";
+
+        var response = await client.PutAsync("/shopping-list/marks",
+            new StringContent(json, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AddManual_NullStrings_Returns400Not500()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var json = $"{{\"ingredient\":null,\"quantity\":null,\"weekStartDate\":\"{NextMonday():o}\"}}";
+
+        var response = await client.PostAsync("/shopping-list",
+            new StringContent(json, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     // --- generated rows are not manual rows -----------------------------------------------
 
     // The still-live POST /meal-plans/{id}/generate-shopping-list writes ShoppingListItems with
@@ -573,6 +619,52 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         var all = await client.GetFromJsonAsync<ShoppingListResponse>("/shopping-list?scope=All", TestJson.Options);
         Assert.All(all!.Weeks, w => Assert.True(w.WeekStartDate.Year > 1, $"phantom week {w.WeekStartDate:o}"));
         Assert.DoesNotContain(all.Weeks.SelectMany(w => w.Groups), g => g.Origin == ShoppingListGroupOrigin.Manual);
+    }
+
+    // The endpoint-driven guard above can only ever produce WeekStartDate = 0001-01-01, so it
+    // proves ResolveAllWeeksAsync's predicate and NOT ProjectWeekAsync's — a year-1 row can never
+    // equal a real weekStart, so that query's filter is never exercised. This seeds the state
+    // generate cannot produce but the predicate must still exclude: MealPlanId set to a real plan
+    // AND WeekStartDate set to a real Monday. Written through the DbContext, so it touches no
+    // endpoint and survives Task 4 deleting generate.
+    [Fact]
+    public async Task A_plan_attributed_row_in_a_real_week_is_not_a_manual_group()
+    {
+        var client = _factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var weekStart = NextMonday();
+        var planId = await CreatePlanAsync(client, weekStart);
+
+        var seededId = Guid.NewGuid();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.ShoppingListItems.Add(new ShoppingListItem
+            {
+                Id = seededId,
+                Ingredient = "Should never be listed",
+                Quantity = "1",
+                IsPurchased = false,
+                WeekStartDate = weekStart,   // a REAL week, unlike anything generate writes
+                UserId = auth.UserId,
+                MealPlanId = planId,         // ...but attributed to a plan, so it is not manual
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // The week's projection must not adopt it. The plan has no entries, so this is empty.
+        Assert.Empty(Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks).Groups);
+
+        // Nor may it appear anywhere under scope=All.
+        var all = await client.GetFromJsonAsync<ShoppingListResponse>("/shopping-list?scope=All", TestJson.Options);
+        var everyGroup = all!.Weeks.SelectMany(w => w.Groups).ToList();
+        Assert.DoesNotContain(everyGroup, g => g.ManualItemId == seededId);
+        Assert.DoesNotContain(everyGroup, g => g.DisplayName == "Should never be listed");
+
+        // Still in the table — the projection excluded it, nothing deleted it.
+        using var check = _factory.Services.CreateScope();
+        var verifyDb = check.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.True(await verifyDb.ShoppingListItems.AnyAsync(i => i.Id == seededId));
     }
 
     // --- parts read in meal order, not alphabetical ---------------------------------------

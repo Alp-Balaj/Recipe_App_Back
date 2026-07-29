@@ -15,5 +15,12 @@ public static class ShoppingListKeys
 
     public static string ForManual(Guid manualItemId) => $"{ManualPrefix}{manualItemId}";
 
-    public static bool IsManual(string key) => key.StartsWith(ManualPrefix, StringComparison.Ordinal);
+    /// <summary>
+    /// Null-tolerant on purpose: a validator may reach this while a sibling NotEmpty() rule has
+    /// already rejected the key, and a predicate that throws there would surface as a 500 for
+    /// bad input. A missing key is simply not a manual key. Defence in depth behind the callers'
+    /// own guards, not a substitute for them.
+    /// </summary>
+    public static bool IsManual(string? key) =>
+        key is not null && key.StartsWith(ManualPrefix, StringComparison.Ordinal);
 }

@@ -114,4 +114,32 @@ public class SetShoppingListMarkRequestValidatorTests
     {
         Assert.True(_validator.Validate(Request(key: "olive oil", isPurchased: false, isSuppressed: true)).IsValid);
     }
+
+    // The manual-key rule must not dereference a null Key. FluentValidation's default cascade
+    // mode runs every rule even after the sibling NotEmpty() has failed, so without a .When
+    // guard this combination throws NullReferenceException — which the API turns into a 500 for
+    // input that is plainly a 400.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Validate_NullKey_FailsCleanlyWithoutThrowing(bool isSuppressed)
+    {
+        var result = _validator.Validate(Request(key: null!, isSuppressed: isSuppressed, isPurchased: !isSuppressed));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName == nameof(SetShoppingListMarkRequest.Key));
+        // The suppression rule is skipped rather than evaluated — the only complaint is the key.
+        Assert.DoesNotContain(result.Errors, e => e.PropertyName == nameof(SetShoppingListMarkRequest.IsSuppressed));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Validate_BlankKeyWithSuppression_FailsCleanlyWithoutThrowing(string key)
+    {
+        var result = _validator.Validate(Request(key: key, isPurchased: false, isSuppressed: true));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName == nameof(SetShoppingListMarkRequest.Key));
+    }
 }
