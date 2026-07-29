@@ -76,7 +76,15 @@ public class MealPlanService : IMealPlanService
                 e.Id,
                 e.DayOfWeek,
                 e.MealType,
-                Recipe = new MealPlanEntryRecipeSummary(r.Id, r.Title, r.ImageUrl),
+                // TotalTimeMinutes is an unmapped computed property, so it is written out
+                // as Prep + Cook here to stay translatable — same reason the summary's
+                // TotalMinutes aggregate spells it out.
+                Recipe = new MealPlanEntryRecipeSummary(
+                    r.Id,
+                    r.Title,
+                    r.ImageUrl,
+                    r.PrepTimeMinutes + r.CookTimeMinutes,
+                    r.CaloriesPerServing),
             })
             .OrderBy(e => e.DayOfWeek)
             .ThenBy(e => e.MealType)
@@ -215,7 +223,13 @@ public class MealPlanService : IMealPlanService
             entry.Id,
             entry.DayOfWeek,
             entry.MealType,
-            new MealPlanEntryRecipeSummary(recipe.Id, recipe.Title, recipe.ImageUrl)));
+            // A materialised entity here, so the computed property is usable directly.
+            new MealPlanEntryRecipeSummary(
+                recipe.Id,
+                recipe.Title,
+                recipe.ImageUrl,
+                recipe.TotalTimeMinutes,
+                recipe.CaloriesPerServing)));
     }
 
     public async Task<MealPlanResult<bool>> RemoveEntryAsync(Guid mealPlanId, Guid entryId, Guid userId, CancellationToken cancellationToken = default)

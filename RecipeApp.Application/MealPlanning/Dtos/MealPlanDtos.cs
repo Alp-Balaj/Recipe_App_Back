@@ -11,7 +11,23 @@ public record AddMealPlanEntryRequest(DayOfWeek DayOfWeek, MealType MealType, Gu
 
 // Small nested projection of the entry's recipe — just enough for a week-view card, not the
 // full RecipeResponse (decision left to the implementer per the kickoff).
-public record MealPlanEntryRecipeSummary(Guid Id, string Title, string? ImageUrl);
+//
+// TotalTimeMinutes + CaloriesPerServing (meal-plan insights) follow exactly the precedent
+// MealPlanSummaryResponse.TotalMinutes set: the month view wants a per-DAY cook load and a
+// daily calorie figure, and the summary's weekly TotalMinutes cannot be broken down by day.
+// Client-side the only route was GET /recipes/{id} per distinct dish — 25–40 requests to
+// render one month, with no batch endpoint to fold them into. These two fields ride along
+// on a projection the caller already fetches, so both cost nothing extra.
+//
+// CaloriesPerServing stays NULLABLE end to end. It is optional on Recipe and a good number
+// of recipes simply do not have one; papering that over with a 0 would let a client total a
+// month and silently under-report. The client is expected to carry the denominator.
+public record MealPlanEntryRecipeSummary(
+    Guid Id,
+    string Title,
+    string? ImageUrl,
+    int TotalTimeMinutes,
+    int? CaloriesPerServing);
 
 public record MealPlanEntryResponse(Guid Id, DayOfWeek DayOfWeek, MealType MealType, MealPlanEntryRecipeSummary Recipe);
 
