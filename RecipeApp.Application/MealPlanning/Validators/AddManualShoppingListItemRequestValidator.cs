@@ -13,11 +13,12 @@ public class AddManualShoppingListItemRequestValidator : AbstractValidator<AddMa
         RuleFor(x => x.Ingredient).NotEmpty().MaximumLength(200);
         RuleFor(x => x.Quantity).NotEmpty().MaximumLength(50);
 
-        // Same pure-UTC-date rule as CreateMealPlanRequestValidator: a client-local midnight
-        // or an offset date would stamp the item into a week no projection ever asks for, so
-        // the row would silently never appear in any list.
+        // The rework's Global Constraint: UTC-midnight MONDAY. A client-local midnight, an
+        // offset date, or a midnight that lands on a Wednesday would all stamp the item into a
+        // week no plan can ever equal — the row would then be invisible in every week view and
+        // show up only as a phantom week under scope=All.
         RuleFor(x => x.WeekStartDate)
-            .Must(d => d.Kind == DateTimeKind.Utc && d.TimeOfDay == TimeSpan.Zero)
-            .WithMessage("WeekStartDate must be a pure UTC date (00:00:00 UTC, no time component).");
+            .Must(WeekStart.IsUtcMidnightMonday)
+            .WithMessage($"WeekStartDate {WeekStart.ValidationMessage}");
     }
 }

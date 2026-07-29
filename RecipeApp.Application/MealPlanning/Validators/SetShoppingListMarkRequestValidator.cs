@@ -15,8 +15,19 @@ public class SetShoppingListMarkRequestValidator : AbstractValidator<SetShopping
     {
         RuleFor(x => x.Key).NotEmpty().MaximumLength(200);
 
+        // The rework's Global Constraint: UTC-midnight MONDAY. A mark on any other instant can
+        // never be joined to a projected week, so it would be written and then never read.
         RuleFor(x => x.WeekStartDate)
-            .Must(d => d.Kind == DateTimeKind.Utc && d.TimeOfDay == TimeSpan.Zero)
-            .WithMessage("WeekStartDate must be a pure UTC date (00:00:00 UTC, no time component).");
+            .Must(WeekStart.IsUtcMidnightMonday)
+            .WithMessage($"WeekStartDate {WeekStart.ValidationMessage}");
+
+        // Suppression is the lightweight pantry for DERIVED groups ("I already have olive
+        // oil"): it hides a group the plan will regenerate next week anyway. A manual row has
+        // no such regeneration — it supports a real DELETE /shopping-list/{id} — so the
+        // projection deliberately ignores IsSuppressed on a manual key. Rejecting is the honest
+        // contract; accepting a flag and silently dropping it is not.
+        RuleFor(x => x.IsSuppressed)
+            .Must((request, isSuppressed) => !(isSuppressed && ShoppingListKeys.IsManual(request.Key)))
+            .WithMessage("A manual item cannot be suppressed — delete it with DELETE /shopping-list/{id} instead.");
     }
 }

@@ -123,13 +123,13 @@ public static class MealPlanEndpoints
         {
             var effectiveScope = scope ?? ShoppingListScope.Week;
 
-            // Same UTC-midnight rule as GET /meal-plans: a non-midnight or non-UTC value can
-            // never match a stored week, so 400 beats a silently-empty list.
-            if (weekStart is not null && (weekStart.Value.Kind != DateTimeKind.Utc || weekStart.Value.TimeOfDay != TimeSpan.Zero))
+            // The rework's Global Constraint: UTC-midnight MONDAY. A non-midnight, non-UTC or
+            // mid-week value can never match a stored week, so 400 beats a silently-empty list.
+            if (weekStart is not null && !WeekStart.IsUtcMidnightMonday(weekStart.Value))
             {
                 return Results.ValidationProblem(new Dictionary<string, string[]>
                 {
-                    ["weekStart"] = ["weekStart must be a UTC midnight date."],
+                    ["weekStart"] = [$"weekStart {WeekStart.ValidationMessage}"],
                 });
             }
 

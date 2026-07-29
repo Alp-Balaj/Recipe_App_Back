@@ -17,9 +17,6 @@ namespace RecipeApp.Infrastructure.MealPlanning;
 /// </summary>
 public class ShoppingListService : IShoppingListService
 {
-    /// <summary>Prefix of the synthetic key a manual row's mark is stored under.</summary>
-    private const string ManualKeyPrefix = "manual:";
-
     private readonly ApplicationDbContext _db;
 
     public ShoppingListService(ApplicationDbContext db)
@@ -165,11 +162,22 @@ public class ShoppingListService : IShoppingListService
         if (plan is not null)
         {
             // Per ENTRY, not per distinct recipe — two dinners need two dinners' worth.
-            var entries = await _db.MealPlanEntries
+            //
+            // The (day, meal) sort runs CLIENT-side, deliberately. MealType is persisted via
+            // .HasConversion<string>(), so a DB-side ORDER BY sorts it ALPHABETICALLY —
+            // Breakfast, Dessert, Dinner, Lunch, Snack — and a day's Parts would read
+            // Breakfast → Dinner → Lunch. Sorting the materialised list compares the enum's
+            // underlying value instead, which is declaration order (the meal order a human
+            // expects). MealPlanService's own queries have the same latent quirk; it is
+            // invisible there because those results are keyed by day/meal rather than read as a
+            // sequence.
+            var entries = (await _db.MealPlanEntries
                 .Where(e => e.MealPlanId == plan.Id)
                 .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new { e.DayOfWeek, e.MealType, RecipeId = r.Id })
-                .OrderBy(e => e.DayOfWeek).ThenBy(e => e.MealType)
-                .ToListAsync(ct);
+                .ToListAsync(ct))
+                .OrderBy(e => e.DayOfWeek)
+                .ThenBy(e => e.MealType)
+                .ToList();
 
             // Two-query hydrate: the jsonb Ingredients collection cannot ride the anonymous
             // join projection above, so the full recipe rows come back separately (once per
@@ -192,8 +200,12 @@ public class ShoppingListService : IShoppingListService
             }
         }
 
+        // MealPlanId == null is what makes this query "MANUAL rows" rather than "rows". The
+        // still-live generate endpoint writes rows with MealPlanId set and no WeekStartDate,
+        // i.e. 0001-01-01; without this predicate they would surface as Manual-origin groups
+        // labelled "Added by you" and offer a DELETE, in a phantom year-1 week.
         var manual = await _db.ShoppingListItems
-            .Where(i => i.UserId == userId && i.WeekStartDate == weekStart)
+            .Where(i => i.UserId == userId && i.MealPlanId == null && i.WeekStartDate == weekStart)
             .OrderBy(i => i.CreatedAt)
             .ToListAsync(ct);
 
@@ -224,7 +236,7 @@ public class ShoppingListService : IShoppingListService
         // derived group — deleting a manual row must delete the row, not suppress a key.
         foreach (var item in manual)
         {
-            var key = ManualKeyFor(item.Id);
+            var key = ShoppingListKeys.ForManual(item.Id);
             markByKey.TryGetValue(key, out var mark);
 
             groups.Add(new ShoppingListGroupResponse(
@@ -262,8 +274,10 @@ public class ShoppingListService : IShoppingListService
             .Distinct()
             .ToListAsync(ct);
 
+        // MealPlanId == null for the same reason as ProjectWeekAsync's manual query: a
+        // generated row's unset WeekStartDate would otherwise nominate 0001-01-01 as a week.
         var manualWeeks = await _db.ShoppingListItems
-            .Where(i => i.UserId == userId)
+            .Where(i => i.UserId == userId && i.MealPlanId == null)
             .Select(i => i.WeekStartDate)
             .Distinct()
             .ToListAsync(ct);
@@ -297,7 +311,7 @@ public class ShoppingListService : IShoppingListService
         return marks
             .Where(m => m.IsPurchased && !m.IsSuppressed)
             .Where(m => projectedWeeks.Contains(m.WeekStartDate))
-            .Where(m => !m.Key.StartsWith(ManualKeyPrefix, StringComparison.Ordinal))
+            .Where(m => !ShoppingListKeys.IsManual(m.Key))
             .Where(m => !liveKeys.Contains(m.Key))
             .Select(m => DisplayNameForKey(m.Key))
             .Distinct(StringComparer.Ordinal)
@@ -312,8 +326,6 @@ public class ShoppingListService : IShoppingListService
     /// </summary>
     private static string DisplayNameForKey(string key) =>
         key.Length == 0 ? key : char.ToUpperInvariant(key[0]) + key[1..];
-
-    private static string ManualKeyFor(Guid itemId) => $"{ManualKeyPrefix}{itemId}";
 
     /// <summary>The UTC-midnight Monday of the week containing "now".</summary>
     private static DateTime CurrentWeekStart()
