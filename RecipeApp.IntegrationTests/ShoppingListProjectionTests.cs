@@ -49,6 +49,39 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         Assert.Null(flour.ManualItemId);
     }
 
+    // Guards ShoppingListService.FormatQuantity's rendered output, which nothing else in the
+    // suite asserted: every surviving test checks Parts.Count / Dishes / Origin, never the
+    // Quantity STRING itself. FormatQuantity renders the decimal with invariant culture
+    // specifically so the string is deterministic regardless of server locale (a
+    // comma-decimal server would otherwise silently render "2,5 cups") — that guarantee was
+    // completely unguarded before this test.
+    [Fact]
+    public async Task Get_renders_the_exact_quantity_string_for_known_quantities()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        // A fractional decimal actually exercises invariant-culture rendering (a
+        // current-culture regression would render "2,5 cups" on a comma-decimal server).
+        // CreateRecipeRequestValidator requires a non-empty Unit, so there is no
+        // blank/absent-unit case to cover here.
+        var recipe = await CreateRecipeAsync(client, "Pancakes", [("Flour", 2.5m, "cups"), ("Eggs", 3m, "count")]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Breakfast", recipe);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+
+        var flour = Assert.Single(week.Groups, g => g.DisplayName == "Flour");
+        Assert.Equal("2.5 cups", Assert.Single(flour.Parts).Quantity);
+
+        // Integral quantity: pins whether an integer-valued decimal.ToString(InvariantCulture)
+        // renders as "3" or "3.0" for this codebase's actual call sites (a C# `3m` literal has
+        // scale 0, and round-tripping it through System.Text.Json as the test does here
+        // preserves that scale).
+        var eggs = Assert.Single(week.Groups, g => g.DisplayName == "Eggs");
+        Assert.Equal("3 count", Assert.Single(eggs.Parts).Quantity);
+    }
+
     [Fact]
     public async Task A_soft_deleted_recipe_drops_its_ingredients_silently()
     {
