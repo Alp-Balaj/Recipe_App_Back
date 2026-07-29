@@ -381,6 +381,176 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // --- grocery insight (week board) -----------------------------------------------------
+    // Week/shopping rework, Task 4: generate-shopping-list is gone (the projection makes
+    // regeneration meaningless) and GET /meal-plans/{id}/grocery-insight takes its place as
+    // the week board's size/overlap/outlier read.
+
+    // Not a plain 404. Program.cs's app.MapFallbackToFile("index.html") registers a
+    // GET/HEAD-only catch-all for every unmatched path (SPA deep-link support); ASP.NET
+    // Core's routing sees that catch-all's URL match, then 405s because the requested
+    // method (POST) isn't one it accepts — confirmed generic (not specific to this path) by
+    // probing an unrelated unmapped POST, which 405s the same way. The task brief expected a
+    // 404 here; this asserts the app's real behaviour instead.
+    [Fact]
+    public async Task Generate_shopping_list_endpoint_is_gone()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var planId = await CreatePlanAsync(client, MealPlanTestHelper.NextMonday());
+
+        var response = await client.PostAsync($"/meal-plans/{planId}/generate-shopping-list", null);
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Grocery_insight_counts_size_overlap_and_the_outlier()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var weekStart = MealPlanTestHelper.NextMonday();
+
+        // Shared: flour (both). Unique to Tagine: 3 spices. So 5 distinct, 1 shared,
+        // and Tagine is the outlier with 3 ingredients nothing else uses.
+        var bread = await CreateInsightRecipeAsync(client, "Bread", [("Flour", 500m, "g"), ("Yeast", 7m, "g")]);
+        var tagine = await CreateInsightRecipeAsync(client, "Tagine",
+            [("Flour", 2m, "cups"), ("Cumin", 1m, "tsp"), ("Saffron", 1m, "pinch"), ("Harissa", 2m, "tbsp")]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddInsightEntryAsync(client, planId, "Monday", "Dinner", bread);
+        await AddInsightEntryAsync(client, planId, "Tuesday", "Dinner", tagine);
+
+        var insight = await client.GetFromJsonAsync<GroceryInsightResponse>(
+            $"/meal-plans/{planId}/grocery-insight", TestJson.Options);
+
+        Assert.Equal(5, insight!.DistinctIngredientCount);
+        Assert.Equal(1, insight.SharedIngredientCount);
+        Assert.Equal("Tagine", insight.Outlier!.Title);
+        Assert.Equal(3, insight.Outlier.UniqueIngredientCount);
+    }
+
+    // The contract's other null case, distinct from an empty plan: every recipe's keys are
+    // fully shared, so no recipe has anything "used by no other recipe" to be an outlier.
+    [Fact]
+    public async Task Grocery_insight_has_no_outlier_when_nothing_is_unique()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var weekStart = MealPlanTestHelper.NextMonday();
+
+        var pasta = await CreateInsightRecipeAsync(client, "Pasta", [("Flour", 2m, "cups"), ("Egg", 3m, "count")]);
+        var bread = await CreateInsightRecipeAsync(client, "Bread", [("flour", 500m, "g"), ("egg", 1m, "count")]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddInsightEntryAsync(client, planId, "Monday", "Dinner", pasta);
+        await AddInsightEntryAsync(client, planId, "Tuesday", "Dinner", bread);
+
+        var insight = await client.GetFromJsonAsync<GroceryInsightResponse>(
+            $"/meal-plans/{planId}/grocery-insight", TestJson.Options);
+
+        Assert.Equal(2, insight!.DistinctIngredientCount);
+        Assert.Equal(2, insight.SharedIngredientCount);
+        Assert.Null(insight.Outlier);
+    }
+
+    // Ties broken by title, ordinal — "Apple Pie" sorts before "Banana Bread".
+    [Fact]
+    public async Task Grocery_insight_breaks_an_outlier_tie_by_title_ordinal()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var weekStart = MealPlanTestHelper.NextMonday();
+
+        var apple = await CreateInsightRecipeAsync(client, "Apple Pie", [("Apple", 1m, "kg"), ("Cinnamon", 1m, "tsp")]);
+        var banana = await CreateInsightRecipeAsync(client, "Banana Bread", [("Banana", 1m, "kg"), ("Walnut", 1m, "cup")]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddInsightEntryAsync(client, planId, "Monday", "Dinner", apple);
+        await AddInsightEntryAsync(client, planId, "Tuesday", "Dinner", banana);
+
+        var insight = await client.GetFromJsonAsync<GroceryInsightResponse>(
+            $"/meal-plans/{planId}/grocery-insight", TestJson.Options);
+
+        Assert.Equal("Apple Pie", insight!.Outlier!.Title);
+        Assert.Equal(2, insight.Outlier.UniqueIngredientCount);
+    }
+
+    // Collection is per DISTINCT recipe, not per entry: a dish planned twice must not look
+    // like it "shares" its ingredients with a second recipe, and must still register as its
+    // own outlier.
+    [Fact]
+    public async Task Grocery_insight_counts_a_repeated_recipe_once()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var weekStart = MealPlanTestHelper.NextMonday();
+
+        var tagine = await CreateInsightRecipeAsync(client, "Tagine", [("Cumin", 1m, "tsp"), ("Saffron", 1m, "pinch")]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddInsightEntryAsync(client, planId, "Monday", "Dinner", tagine);
+        await AddInsightEntryAsync(client, planId, "Thursday", "Dinner", tagine);
+
+        var insight = await client.GetFromJsonAsync<GroceryInsightResponse>(
+            $"/meal-plans/{planId}/grocery-insight", TestJson.Options);
+
+        Assert.Equal(2, insight!.DistinctIngredientCount);
+        Assert.Equal(0, insight.SharedIngredientCount);
+        Assert.Equal("Tagine", insight.Outlier!.Title);
+        Assert.Equal(2, insight.Outlier.UniqueIngredientCount);
+    }
+
+    [Fact]
+    public async Task Grocery_insight_has_no_outlier_for_an_empty_plan()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var planId = await CreatePlanAsync(client, MealPlanTestHelper.NextMonday());
+
+        var insight = await client.GetFromJsonAsync<GroceryInsightResponse>(
+            $"/meal-plans/{planId}/grocery-insight", TestJson.Options);
+
+        Assert.Equal(0, insight!.DistinctIngredientCount);
+        Assert.Equal(0, insight.SharedIngredientCount);
+        Assert.Null(insight.Outlier);
+    }
+
+    // 404-never-403 (meal plans have no visibility tier), same rule GetMealPlanByIdAsync uses
+    // — not shown in the brief's test list but part of the stated contract.
+    [Fact]
+    public async Task GroceryInsight_UnknownPlan_Returns404()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+
+        var response = await client.GetAsync($"/meal-plans/{Guid.NewGuid()}/grocery-insight");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GroceryInsight_OtherUsersPlan_Returns404()
+    {
+        var ownerClient = await factory.CreateAuthenticatedClientAsync();
+        var planId = await CreatePlanAsync(ownerClient, MealPlanTestHelper.NextMonday());
+
+        var otherClient = await factory.CreateAuthenticatedClientAsync();
+
+        var response = await otherClient.GetAsync($"/meal-plans/{planId}/grocery-insight");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // --- grocery-insight helpers ----------------------------------------------------------
+    // Thin adapters over MealPlanTestHelper, mirroring ShoppingListProjectionTests' style.
+
+    private static async Task<Guid> CreatePlanAsync(HttpClient client, DateTime weekStart) =>
+        (await MealPlanTestHelper.CreateMealPlanAsync(client, weekStart)).Id;
+
+    private static async Task<Guid> AddInsightEntryAsync(HttpClient client, Guid planId, string day, string meal, Guid recipeId) =>
+        (await MealPlanTestHelper.AddEntryAsync(
+            client, planId, Enum.Parse<DayOfWeek>(day), Enum.Parse<MealType>(meal), recipeId)).Id;
+
+    private static async Task<Guid> CreateInsightRecipeAsync(
+        HttpClient client, string title, (string Name, decimal Qty, string Unit)[] ingredients)
+    {
+        var recipe = await MealPlanTestHelper.CreateRecipeAsync(
+            client,
+            title,
+            [.. ingredients.Select(i => new RecipeIngredient { Name = i.Name, Quantity = i.Qty, Unit = i.Unit })]);
+        return recipe.Id;
+    }
+
     // --- helpers ------------------------------------------------------------------------
 
     private static DateTime UtcMidnight(int year, int month, int day) =>

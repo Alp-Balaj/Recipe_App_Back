@@ -1,4 +1,3 @@
-using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using RecipeApp.Application.Common;
@@ -252,87 +251,9 @@ public class MealPlanService : IMealPlanService
             : MealPlanResult<bool>.Success(true);
     }
 
-    // --- cp03: shopping list -------------------------------------------------------------
+    // --- grocery insight (week board) -----------------------------------------------------
 
-    public async Task<ShoppingListItemListResponse> GetShoppingListAsync(KeysetCursor? cursor, int limit, Guid userId, CancellationToken cancellationToken = default)
-    {
-        // meal-planning-v1-semantics #3: single per-user list, ALL of the caller's items
-        // regardless of MealPlanId — the nullable FK is traceability, not a list partition.
-        var items = _db.ShoppingListItems.Where(s => s.UserId == userId);
-
-        if (cursor is not null)
-        {
-            var cursorCreatedAt = cursor.Timestamp;
-            var cursorId = cursor.Id;
-            items = items.Where(s =>
-                s.CreatedAt < cursorCreatedAt
-                || (s.CreatedAt == cursorCreatedAt && s.Id.CompareTo(cursorId) < 0));
-        }
-
-        var rows = await items
-            .OrderByDescending(s => s.CreatedAt)
-            .ThenByDescending(s => s.Id)
-            .Take(limit + 1)
-            .Select(s => new ShoppingListItemResponse(s.Id, s.Ingredient, s.Quantity, s.IsPurchased, s.CreatedAt, s.MealPlanId))
-            .ToListAsync(cancellationToken);
-
-        string? nextCursor = null;
-        if (rows.Count > limit)
-        {
-            rows.RemoveAt(limit);
-            var last = rows[^1];
-            nextCursor = new KeysetCursor(last.CreatedAt, last.Id).Encode();
-        }
-
-        return new ShoppingListItemListResponse(rows, nextCursor);
-    }
-
-    public async Task<ShoppingListItemResponse> AddShoppingListItemAsync(AddShoppingListItemRequest request, Guid userId, CancellationToken cancellationToken = default)
-    {
-        var item = new ShoppingListItem
-        {
-            Id = Guid.NewGuid(),
-            Ingredient = request.Ingredient,
-            Quantity = request.Quantity,
-            IsPurchased = false,
-            UserId = userId,
-            MealPlanId = null,
-        };
-        _db.ShoppingListItems.Add(item);
-        await _db.SaveChangesAsync(cancellationToken);
-
-        return new ShoppingListItemResponse(item.Id, item.Ingredient, item.Quantity, item.IsPurchased, item.CreatedAt, item.MealPlanId);
-    }
-
-    public async Task<MealPlanResult<bool>> UpdateShoppingListItemAsync(Guid id, UpdateShoppingListItemRequest request, Guid userId, CancellationToken cancellationToken = default)
-    {
-        // Explicit set, not a toggle (meal-planning-v1-semantics #4 deviation) — an
-        // ExecuteUpdate targeting (id, userId) is naturally idempotent and also gives the
-        // 404-never-403 behavior for free: an unknown id or another user's item matches zero
-        // rows either way.
-        var updated = await _db.ShoppingListItems
-            .Where(s => s.Id == id && s.UserId == userId)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(s => s.IsPurchased, request.IsPurchased), cancellationToken);
-
-        return updated == 0
-            ? MealPlanResult<bool>.NotFound()
-            : MealPlanResult<bool>.Success(true);
-    }
-
-    public async Task<MealPlanResult<bool>> DeleteShoppingListItemAsync(Guid id, Guid userId, CancellationToken cancellationToken = default)
-    {
-        var deleted = await _db.ShoppingListItems
-            .Where(s => s.Id == id && s.UserId == userId)
-            .ExecuteDeleteAsync(cancellationToken);
-
-        return deleted == 0
-            ? MealPlanResult<bool>.NotFound()
-            : MealPlanResult<bool>.Success(true);
-    }
-
-    // --- cp04: generate shopping list -----------------------------------------------------
-
-    public async Task<MealPlanResult<IReadOnlyList<ShoppingListItemResponse>>> GenerateShoppingListAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default)
+    public async Task<MealPlanResult<GroceryInsightResponse>> GetGroceryInsightAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default)
     {
         // Caller-scoped, never 403 — same rule as GetMealPlanByIdAsync
         // (meal-planning-v1-semantics / 404-never-403).
@@ -340,87 +261,60 @@ public class MealPlanService : IMealPlanService
             mp => mp.Id == mealPlanId && mp.UserId == userId, cancellationToken);
         if (plan is null)
         {
-            return MealPlanResult<IReadOnlyList<ShoppingListItemResponse>>.NotFound();
+            return MealPlanResult<GroceryInsightResponse>.NotFound();
         }
 
-        // Same hydrate idiom as GetMealPlanByIdAsync: join against _db.Recipes (carries the
-        // global !IsDeleted filter) rather than an Include/navigation, so an entry whose
-        // recipe is soft-deleted silently drops out instead of erroring.
-        //
-        // ONE ROW PER ENTRY, not per distinct recipe. cp04 originally deduped by recipe id,
-        // reasoning that buying twice for one recipe was noise; that was wrong. Planning
-        // lasagne for Monday AND Thursday means cooking it twice, so the shopper needs
-        // ingredients for two — deduping silently under-buys, and the month view's week rail
-        // now surfaces repeats, so the gap is visible. Deduping was also the one place the
-        // generator DID aggregate, contradicting meal-planning-v1-semantics #1 below.
-        // Ordered by (day, meal) so repeated dishes land next to their slot's siblings and
-        // the output is deterministic — same ordering GetMealPlanByIdAsync uses.
-        var entries = await _db.MealPlanEntries
+        // An outlier is a property of a DISH, not of how often it is cooked, so this collects
+        // one row per DISTINCT recipe — unlike the shopping-list projection, which
+        // deliberately expands per entry. Join against _db.Recipes (carries the global
+        // !IsDeleted filter) so a soft-deleted recipe's entry silently drops, same idiom as
+        // GetMealPlanByIdAsync.
+        var recipeIds = await _db.MealPlanEntries
             .Where(e => e.MealPlanId == mealPlanId)
-            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new
-            {
-                e.DayOfWeek,
-                e.MealType,
-                RecipeId = r.Id,
-            })
-            .OrderBy(e => e.DayOfWeek)
-            .ThenBy(e => e.MealType)
+            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => r.Id)
+            .Distinct()
             .ToListAsync(cancellationToken);
 
-        // Separate load for the full recipe rows (incl. the jsonb Ingredients column) — mirrors
-        // how the rest of the codebase loads a Recipe entity (e.g. RecipeService), rather than
-        // trying to select a jsonb column out of the join projection above. Still loaded once
-        // per DISTINCT recipe (a repeated dish is one row read, then expanded per entry).
-        var distinctRecipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
-        var recipes = (await _db.Recipes
-            .Where(r => distinctRecipeIds.Contains(r.Id))
-            .ToListAsync(cancellationToken))
-            .ToDictionary(r => r.Id);
+        // Two-query hydrate: the jsonb Ingredients collection cannot ride the join projection
+        // above, so the full recipe rows (incl. Title) come back separately, once per distinct
+        // recipe — same split ShoppingListService.ProjectWeekAsync uses. Recipes.Id is the
+        // primary key, so this naturally returns one row per recipe even without the Distinct
+        // above; that call just keeps the IN clause small rather than doing any deduping work
+        // that matters for correctness here.
+        var recipes = await _db.Recipes
+            .Where(r => recipeIds.Contains(r.Id))
+            .ToListAsync(cancellationToken);
 
-        // meal-planning-v1-semantics #1: no aggregation, no unit conversion. Quantity is the
-        // display string "{Quantity} {Unit}" trimmed, decimal rendered invariant-culture so the
-        // string is deterministic regardless of server locale. ContainsKey guards the window
-        // between the two queries above — a recipe soft-deleted in between drops its entry
-        // rather than throwing.
-        var newItems = entries
-            .Where(e => recipes.ContainsKey(e.RecipeId))
-            .SelectMany(e => recipes[e.RecipeId].Ingredients.Select(i => new ShoppingListItem
-            {
-                Id = Guid.NewGuid(),
-                Ingredient = i.Name,
-                Quantity = FormatQuantity(i.Quantity, i.Unit),
-                IsPurchased = false,
-                UserId = userId,
-                MealPlanId = mealPlanId,
-            }))
+        // Per-recipe distinct key sets (a recipe repeating an ingredient name counts that key
+        // once for this recipe), plus how many distinct recipes each key appears in.
+        var recipeKeys = recipes
+            .Select(r => (r.Id, r.Title, Keys: r.Ingredients.Select(i => IngredientKey.For(i.Name)).ToHashSet(StringComparer.Ordinal)))
             .ToList();
 
-        // meal-planning-v1-semantics #5: replace-per-plan in one explicit transaction.
-        // ExecuteDeleteAsync executes immediately (it doesn't go through the change tracker),
-        // so without the transaction wrapper a failed insert would leave a half-state. Manual
-        // items (MealPlanId null) and other plans' rows are excluded by the WHERE clause and
-        // are never touched.
-        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
-
-        await _db.ShoppingListItems
-            .Where(s => s.MealPlanId == mealPlanId && s.UserId == userId)
-            .ExecuteDeleteAsync(cancellationToken);
-
-        if (newItems.Count > 0)
+        var keyRecipeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (_, _, keys) in recipeKeys)
         {
-            _db.ShoppingListItems.AddRange(newItems);
-            await _db.SaveChangesAsync(cancellationToken);
+            foreach (var key in keys)
+            {
+                keyRecipeCounts[key] = keyRecipeCounts.GetValueOrDefault(key) + 1;
+            }
         }
 
-        await transaction.CommitAsync(cancellationToken);
+        var distinctIngredientCount = keyRecipeCounts.Count;
+        var sharedIngredientCount = keyRecipeCounts.Count(kv => kv.Value >= 2);
 
-        var response = newItems
-            .Select(i => new ShoppingListItemResponse(i.Id, i.Ingredient, i.Quantity, i.IsPurchased, i.CreatedAt, i.MealPlanId))
-            .ToList();
+        // The outlier is the recipe with the most keys nobody else in the plan uses, ties
+        // broken by title (ordinal); null when no recipe has any unique ingredient (covers
+        // the empty-plan case too, since recipeKeys is then empty).
+        var outlier = recipeKeys
+            .Select(r => (r.Id, r.Title, UniqueCount: r.Keys.Count(k => keyRecipeCounts[k] == 1)))
+            .Where(r => r.UniqueCount > 0)
+            .OrderByDescending(r => r.UniqueCount)
+            .ThenBy(r => r.Title, StringComparer.Ordinal)
+            .Select(r => new GroceryOutlierResponse(r.Id, r.Title, r.UniqueCount))
+            .FirstOrDefault();
 
-        return MealPlanResult<IReadOnlyList<ShoppingListItemResponse>>.Success(response);
+        return MealPlanResult<GroceryInsightResponse>.Success(
+            new GroceryInsightResponse(distinctIngredientCount, sharedIngredientCount, outlier));
     }
-
-    private static string FormatQuantity(decimal quantity, string unit) =>
-        $"{quantity.ToString(CultureInfo.InvariantCulture)} {unit}".Trim();
 }

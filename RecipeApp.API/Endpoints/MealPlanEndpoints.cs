@@ -99,11 +99,12 @@ public static class MealPlanEndpoints
             };
         });
 
-        // cp04: replace-per-plan generation (meal-planning-v1-semantics #5). 200 + the fresh
-        // items (a bare array, mirroring the week view's Entries shape — no paging here).
-        group.MapPost("/{id:guid}/generate-shopping-list", async (Guid id, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        // Week board's grocery read: size, overlap, and the one dish worth reconsidering.
+        // Same pass the projection makes, so it is one computation with two consumers.
+        group.MapGet("/{id:guid}/grocery-insight", async (Guid id, IMealPlanService mealPlans,
+            ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var result = await mealPlans.GenerateShoppingListAsync(id, GetUserId(user), cancellationToken);
+            var result = await mealPlans.GetGroceryInsightAsync(id, GetUserId(user), cancellationToken);
             return result.Outcome switch
             {
                 MealPlanOutcome.Success => Results.Ok(result.Value),

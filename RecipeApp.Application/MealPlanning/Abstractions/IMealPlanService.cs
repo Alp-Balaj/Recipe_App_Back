@@ -4,10 +4,9 @@ using RecipeApp.Application.MealPlanning.Dtos;
 namespace RecipeApp.Application.MealPlanning.Abstractions;
 
 // Application-service seam for the meal-planning lane (meal-planning plan, cp02–03). Same
-// plain-service pattern as ISocialService/IChatService. The shopping-list methods (cp03)
-// live on this same interface rather than a sibling IShoppingListService — mirroring how
-// ISocialService groups every resource of the social-feed plan (interactions, comments,
-// follow graph, profiles, feed) behind one seam rather than splitting per resource type.
+// plain-service pattern as ISocialService/IChatService. Shopping-list reads/writes live on
+// the sibling IShoppingListService (week/shopping rework, Task 3) — the list became a
+// per-week projection rather than rows this service owns.
 public interface IMealPlanService
 {
     /// <summary>
@@ -45,36 +44,23 @@ public interface IMealPlanService
     /// </summary>
     Task<MealPlanResult<bool>> RemoveEntryAsync(Guid mealPlanId, Guid entryId, Guid userId, CancellationToken cancellationToken = default);
 
-    // --- cp03: shopping list -------------------------------------------------------------
+    // Shopping-list reads/writes moved to IShoppingListService (week/shopping rework, Task 3)
+    // — the list is a per-week PROJECTION now, not rows owned by this service. The generate
+    // endpoint that used to sit here is gone entirely (Task 4): the projection makes
+    // regeneration meaningless, since there is nothing stored to go stale.
+
+    // --- grocery insight (week board) -----------------------------------------------------
 
     /// <summary>
-    /// The caller's whole shopping list (single per-user list — meal-planning-v1-semantics
-    /// #3 — regardless of MealPlanId), CreatedAt DESC / Id DESC keyset-paged.
+    /// Size, overlap, and outlier for the plan's DISTINCT recipes — an outlier is a property
+    /// of a dish, not of how often it is cooked, so a repeated recipe is counted once here
+    /// (unlike the shopping-list projection, which expands per entry).
+    /// DistinctIngredientCount is the count of distinct IngredientKey.For keys across every
+    /// recipe in the plan; SharedIngredientCount is how many of those keys appear in 2+
+    /// distinct recipes; Outlier is the recipe with the most keys used by no other recipe in
+    /// the plan (ties broken by title, ordinal), or null when the plan has no entries or no
+    /// recipe has a unique ingredient. Caller-scoped, NotFound for an unknown id or another
+    /// user's plan (never Forbidden — no visibility tier, same rule as GetMealPlanByIdAsync).
     /// </summary>
-    Task<ShoppingListItemListResponse> GetShoppingListAsync(KeysetCursor? cursor, int limit, Guid userId, CancellationToken cancellationToken = default);
-
-    /// <summary>Manual add. Always MealPlanId null — generated items come only from cp04's generate endpoint.</summary>
-    Task<ShoppingListItemResponse> AddShoppingListItemAsync(AddShoppingListItemRequest request, Guid userId, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Explicit idempotent set of IsPurchased. NotFound for an unknown item or another
-    /// user's item (never Forbidden — no visibility tier).
-    /// </summary>
-    Task<MealPlanResult<bool>> UpdateShoppingListItemAsync(Guid id, UpdateShoppingListItemRequest request, Guid userId, CancellationToken cancellationToken = default);
-
-    /// <summary>Hard-deletes an item. NotFound for an unknown item or another user's item.</summary>
-    Task<MealPlanResult<bool>> DeleteShoppingListItemAsync(Guid id, Guid userId, CancellationToken cancellationToken = default);
-
-    // --- cp04: generate shopping list -----------------------------------------------------
-
-    /// <summary>
-    /// Replaces the caller's generated shopping-list rows for this plan (meal-planning-v1-
-    /// semantics #5) with a fresh set derived from the plan's surviving entries — one row per
-    /// ENTRY's ingredient, so a recipe planned into two slots contributes its ingredients
-    /// twice (you are cooking it twice). Entries whose Recipe is soft-deleted are silently
-    /// skipped. NotFound for an unknown id or another user's plan (never Forbidden — no
-    /// visibility tier). A zero-entry plan still replaces (deletes any stale rows) and
-    /// returns Success with an empty list.
-    /// </summary>
-    Task<MealPlanResult<IReadOnlyList<ShoppingListItemResponse>>> GenerateShoppingListAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default);
+    Task<MealPlanResult<GroceryInsightResponse>> GetGroceryInsightAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default);
 }

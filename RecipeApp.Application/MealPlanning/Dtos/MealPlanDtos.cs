@@ -37,16 +37,13 @@ public record MealPlanResponse(
     DateTime CreatedAt,
     IReadOnlyList<MealPlanEntryResponse> Entries);
 
-// --- cp03: shopping list -------------------------------------------------------------
-// Wire contracts for the shopping-list endpoints. The per-user list is single (not
-// per-plan) — meal-planning-v1-semantics #3 — so MealPlanId on the response is pure
-// traceability, never a list key.
-
-public record AddShoppingListItemRequest(string Ingredient, string Quantity);
-
-// Explicit set (not a toggle) — meal-planning-v1-semantics #4 records the deviation from
-// the flat plan's "toggle" wording. PATCH is idempotent by construction.
-public record UpdateShoppingListItemRequest(bool IsPurchased);
+// --- shopping list ---------------------------------------------------------------------
+// ShoppingListItemResponse is the shape AddManualAsync (IShoppingListService) still returns
+// for a manually-added row. The list-of-rows request/response DTOs that used to live here
+// (AddShoppingListItemRequest, UpdateShoppingListItemRequest, ShoppingListItemListResponse)
+// went with cp03's shopping-list methods on IMealPlanService (week/shopping rework, Task 4)
+// — the list is a per-week PROJECTION of groups now (see ShoppingListWeekResponse below),
+// not a paged set of rows.
 
 public record ShoppingListItemResponse(
     Guid Id,
@@ -55,8 +52,6 @@ public record ShoppingListItemResponse(
     bool IsPurchased,
     DateTime CreatedAt,
     Guid? MealPlanId);
-
-public record ShoppingListItemListResponse(IReadOnlyList<ShoppingListItemResponse> Items, string? NextCursor);
 
 // --- meal-planning-ui plan, Task 1: plan lookup ---------------------------------------
 // The list is a SUMMARY projection, not the full week view: callers page over weeks to

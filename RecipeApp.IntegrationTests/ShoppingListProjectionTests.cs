@@ -92,6 +92,33 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         Assert.Equal(2, flour.Parts.Count);
     }
 
+    // Carried over from the deleted GenerateShoppingListEndpointsTests
+    // (Generate_RepeatedDishAlongsideOthers_MultipliesOnlyThatDish): the case above only ever
+    // has ONE recipe in the plan, so it cannot catch a bug where the per-entry expansion
+    // accidentally fans out every dish's parts instead of just the repeated one's. This plants
+    // a second, un-repeated dish alongside the repeated one and asserts the second dish's
+    // count is untouched.
+    [Fact]
+    public async Task A_repeated_dish_alongside_others_multiplies_only_that_dishs_parts()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+        var lasagne = await CreateRecipeAsync(client, "Lasagne",
+            [("Pasta Sheets", 250m, "g"), ("Mince", 500m, "g")]);
+        var salad = await CreateRecipeAsync(client, "Salad", [("Lettuce", 1m, "head")]);
+        var planId = await CreatePlanAsync(client, weekStart);
+
+        await AddEntryAsync(client, planId, "Monday", "Dinner", lasagne);
+        await AddEntryAsync(client, planId, "Thursday", "Dinner", lasagne);
+        await AddEntryAsync(client, planId, "Monday", "Lunch", salad);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+
+        Assert.Equal(2, Assert.Single(week.Groups, g => g.DisplayName == "Pasta Sheets").Parts.Count);
+        Assert.Equal(2, Assert.Single(week.Groups, g => g.DisplayName == "Mince").Parts.Count);
+        Assert.Single(Assert.Single(week.Groups, g => g.DisplayName == "Lettuce").Parts);
+    }
+
     [Fact]
     public async Task A_tick_survives_adding_another_meal()
     {
@@ -590,43 +617,16 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
     }
 
     // --- generated rows are not manual rows -----------------------------------------------
+    // Task 4 removed POST /meal-plans/{id}/generate-shopping-list itself, so the endpoint-
+    // driven half of this guard (which could only ever produce WeekStartDate = 0001-01-01)
+    // no longer applies to anything reachable from the API. What remains is the harder case
+    // below, which never depended on the endpoint: a row attributed to a plan but seeded with
+    // a REAL week, proving ProjectWeekAsync's own MealPlanId == null predicate rather than
+    // ResolveAllWeeksAsync's.
 
-    // The still-live POST /meal-plans/{id}/generate-shopping-list writes ShoppingListItems with
-    // MealPlanId set and no WeekStartDate (i.e. 0001-01-01). Without a MealPlanId == null
-    // predicate on the projection's manual query those rows surface as Manual-origin,
-    // DELETE-able groups labelled "Added by you", inside a phantom year-1 week under scope=All.
-    // This guard goes away with the generate endpoint in the next task.
-    [Fact]
-    public async Task Generated_rows_never_surface_as_manual_groups()
-    {
-        var client = await _factory.CreateAuthenticatedClientAsync();
-        var weekStart = NextMonday();
-        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, "cups")]);
-        var planId = await CreatePlanAsync(client, weekStart);
-        await AddEntryAsync(client, planId, "Monday", "Dinner", pasta);
-
-        var generated = await client.PostAsync($"/meal-plans/{planId}/generate-shopping-list", null);
-        Assert.Equal(HttpStatusCode.OK, generated.StatusCode);
-        Assert.Single((await generated.Content.ReadFromJsonAsync<List<ShoppingListItemResponse>>(TestJson.Options))!);
-
-        // The plan's own week reads as ONE derived group, not a derived group plus a manual echo.
-        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
-        var group = Assert.Single(week.Groups);
-        Assert.Equal(ShoppingListGroupOrigin.Derived, group.Origin);
-        Assert.Null(group.ManualItemId);
-
-        // And no phantom week is nominated by the generated rows' unset WeekStartDate.
-        var all = await client.GetFromJsonAsync<ShoppingListResponse>("/shopping-list?scope=All", TestJson.Options);
-        Assert.All(all!.Weeks, w => Assert.True(w.WeekStartDate.Year > 1, $"phantom week {w.WeekStartDate:o}"));
-        Assert.DoesNotContain(all.Weeks.SelectMany(w => w.Groups), g => g.Origin == ShoppingListGroupOrigin.Manual);
-    }
-
-    // The endpoint-driven guard above can only ever produce WeekStartDate = 0001-01-01, so it
-    // proves ResolveAllWeeksAsync's predicate and NOT ProjectWeekAsync's — a year-1 row can never
-    // equal a real weekStart, so that query's filter is never exercised. This seeds the state
-    // generate cannot produce but the predicate must still exclude: MealPlanId set to a real plan
-    // AND WeekStartDate set to a real Monday. Written through the DbContext, so it touches no
-    // endpoint and survives Task 4 deleting generate.
+    // Seeds the state generate could never produce but the predicate must still exclude:
+    // MealPlanId set to a real plan AND WeekStartDate set to a real Monday. Written through
+    // the DbContext, so it touches no endpoint.
     [Fact]
     public async Task A_plan_attributed_row_in_a_real_week_is_not_a_manual_group()
     {

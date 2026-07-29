@@ -335,9 +335,9 @@ public class ShoppingListService : IShoppingListService
         return DateTime.SpecifyKind(today.AddDays(-daysSinceMonday), DateTimeKind.Utc);
     }
 
-    // Copied (not moved) from MealPlanService while the generate endpoint still exists —
-    // the original goes with it in the next task. Decimal rendered invariant-culture so the
-    // string is deterministic regardless of server locale.
+    // Was copied (not moved) from MealPlanService while the generate endpoint still existed;
+    // that original went with it (Task 4), so this is now the only copy. Decimal rendered
+    // invariant-culture so the string is deterministic regardless of server locale.
     private static string FormatQuantity(decimal quantity, string unit) =>
         $"{quantity.ToString(CultureInfo.InvariantCulture)} {unit}".Trim();
 }
