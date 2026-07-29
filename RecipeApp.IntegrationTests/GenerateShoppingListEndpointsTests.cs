@@ -126,8 +126,10 @@ public class GenerateShoppingListEndpointsTests(IntegrationTestFactory factory) 
         Assert.Equal("Rice", item.Ingredient);
     }
 
+    // Reversal of cp04's dedupe-by-recipe decision: a dish planned into two slots is cooked
+    // twice, so it must be shopped for twice. The old test asserted Assert.Single here.
     [Fact]
-    public async Task Generate_DuplicateRecipeAcrossTwoSlots_IsDeduped()
+    public async Task Generate_DuplicateRecipeAcrossTwoSlots_YieldsOneRowPerEntry()
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
@@ -140,9 +142,44 @@ public class GenerateShoppingListEndpointsTests(IntegrationTestFactory factory) 
         var items = await response.Content.ReadFromJsonAsync<List<ShoppingListItemResponse>>(TestJson.Options);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var item = Assert.Single(items!);
-        Assert.Equal("Oats", item.Ingredient);
-        Assert.Equal("1 cup", item.Quantity);
+        Assert.Equal(2, items!.Count);
+        // No aggregation (meal-planning-v1-semantics #1): two separate "1 cup" rows, never
+        // one merged "2 cup" row. Each row is independently tickable while shopping.
+        Assert.All(items, i =>
+        {
+            Assert.Equal("Oats", i.Ingredient);
+            Assert.Equal("1 cup", i.Quantity);
+        });
+        // Distinct rows, not the same row echoed twice.
+        Assert.Equal(2, items.Select(i => i.Id).Distinct().Count());
+    }
+
+    // A repeated dish still only multiplies its OWN ingredients — the rest of the plan is
+    // untouched. Guards against the per-entry expansion accidentally fanning out everything.
+    [Fact]
+    public async Task Generate_RepeatedDishAlongsideOthers_MultipliesOnlyThatDish()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2027, 3, 1));
+        var lasagne = await CreateRecipeAsync(client, "Lasagne",
+        [
+            new RecipeIngredient { Name = "Pasta Sheets", Quantity = 250m, Unit = "g" },
+            new RecipeIngredient { Name = "Mince", Quantity = 500m, Unit = "g" },
+        ]);
+        var salad = await CreateRecipeAsync(client, "Salad", [new RecipeIngredient { Name = "Lettuce", Quantity = 1m, Unit = "head" }]);
+
+        await AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, lasagne.Id);
+        await AddEntryAsync(client, plan.Id, DayOfWeek.Thursday, MealType.Dinner, lasagne.Id);
+        await AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Lunch, salad.Id);
+
+        var items = await (await client.PostAsync($"/meal-plans/{plan.Id}/generate-shopping-list", null))
+            .Content.ReadFromJsonAsync<List<ShoppingListItemResponse>>(TestJson.Options);
+
+        Assert.Equal(5, items!.Count);
+        Assert.Equal(2, items.Count(i => i.Ingredient == "Pasta Sheets"));
+        Assert.Equal(2, items.Count(i => i.Ingredient == "Mince"));
+        Assert.Single(items, i => i.Ingredient == "Lettuce");
     }
 
     [Fact]

@@ -54,6 +54,7 @@ public class SpaNavigationTests(SpaWebRootFactory factory) : IClassFixture<SpaWe
     [InlineData("/feed")]                                          // the reported bug
     [InlineData("/users/0f8fad5b-d9cb-469f-a165-70867728950e")]    // collides with GET /users/{id:guid}
     [InlineData("/recipes/7c9e6679-7425-40de-944b-e07fc1f90ae7")]  // collides with GET /recipes/{id:guid}
+    [InlineData("/recipes/mine")]                                  // collides with GET /recipes/mine
     [InlineData("/login")]                                         // no collision — must keep working
     public async Task BrowserNavigation_Anonymous_ServesIndexHtml(string path)
     {

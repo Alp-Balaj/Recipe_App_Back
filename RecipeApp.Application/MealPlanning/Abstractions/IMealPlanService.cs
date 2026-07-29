@@ -26,7 +26,9 @@ public interface IMealPlanService
     /// <summary>
     /// The caller's plans, WeekStartDate DESC / Id DESC keyset-paged. An exact
     /// <paramref name="weekStart"/> narrows to a single week — the SPA's "open this week"
-    /// path, since POST 409s without returning the existing plan's id.
+    /// path, since POST 409s without returning the existing plan's id. Each summary carries
+    /// EntryCount and TotalMinutes, both computed per ENTRY over recipes that survive the
+    /// soft-delete filter (so they agree with GetMealPlanByIdAsync's Entries).
     /// </summary>
     Task<MealPlanListResponse> GetMealPlansAsync(KeysetCursor? cursor, int limit, DateTime? weekStart, Guid userId, CancellationToken cancellationToken = default);
 
@@ -68,8 +70,9 @@ public interface IMealPlanService
     /// <summary>
     /// Replaces the caller's generated shopping-list rows for this plan (meal-planning-v1-
     /// semantics #5) with a fresh set derived from the plan's surviving entries — one row per
-    /// distinct recipe's ingredient (entries whose Recipe is soft-deleted are silently
-    /// skipped). NotFound for an unknown id or another user's plan (never Forbidden — no
+    /// ENTRY's ingredient, so a recipe planned into two slots contributes its ingredients
+    /// twice (you are cooking it twice). Entries whose Recipe is soft-deleted are silently
+    /// skipped. NotFound for an unknown id or another user's plan (never Forbidden — no
     /// visibility tier). A zero-entry plan still replaces (deletes any stale rows) and
     /// returns Success with an empty list.
     /// </summary>

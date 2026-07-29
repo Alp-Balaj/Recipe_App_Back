@@ -108,11 +108,14 @@ public class MealPlanService : IMealPlanService
                 || (p.WeekStartDate == cursorWeek && p.Id.CompareTo(cursorId) < 0));
         }
 
+        // DB-side projection stays an anonymous type (translatable + orderable); the record is
+        // constructed client-side once the per-plan stats below are in hand — the same split
+        // GetMealPlanByIdAsync uses.
         var rows = await plans
             .OrderByDescending(p => p.WeekStartDate)
             .ThenByDescending(p => p.Id)
             .Take(limit + 1)
-            .Select(p => new MealPlanSummaryResponse(p.Id, p.WeekStartDate, p.CreatedAt, p.Entries.Count()))
+            .Select(p => new { p.Id, p.WeekStartDate, p.CreatedAt })
             .ToListAsync(cancellationToken);
 
         string? nextCursor = null;
@@ -123,7 +126,39 @@ public class MealPlanService : IMealPlanService
             nextCursor = new KeysetCursor(last.WeekStartDate, last.Id).Encode();
         }
 
-        return new MealPlanListResponse(rows, nextCursor);
+        // One aggregate query for the whole page rather than a correlated subquery per row —
+        // and it runs AFTER the trim, so the dropped limit+1 probe row is never counted.
+        // Joining _db.Recipes (global !IsDeleted filter) is what makes EntryCount agree with
+        // GET /meal-plans/{id}: an entry whose recipe was soft-deleted is invisible there, so
+        // counting it here would show a meal the week view can't render. TotalTimeMinutes is
+        // an unmapped computed property, so the sum is written out as Prep + Cook to stay
+        // translatable.
+        var planIds = rows.Select(r => r.Id).ToList();
+        var stats = (await _db.MealPlanEntries
+            .Where(e => planIds.Contains(e.MealPlanId))
+            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new
+            {
+                e.MealPlanId,
+                Minutes = r.PrepTimeMinutes + r.CookTimeMinutes,
+            })
+            .GroupBy(x => x.MealPlanId)
+            .Select(g => new
+            {
+                MealPlanId = g.Key,
+                EntryCount = g.Count(),
+                TotalMinutes = g.Sum(x => x.Minutes),
+            })
+            .ToListAsync(cancellationToken))
+            .ToDictionary(s => s.MealPlanId);
+
+        // A plan with no surviving entries has no group at all, hence the zero default.
+        var items = rows
+            .Select(r => stats.TryGetValue(r.Id, out var s)
+                ? new MealPlanSummaryResponse(r.Id, r.WeekStartDate, r.CreatedAt, s.EntryCount, s.TotalMinutes)
+                : new MealPlanSummaryResponse(r.Id, r.WeekStartDate, r.CreatedAt, 0, 0))
+            .ToList();
+
+        return new MealPlanListResponse(items, nextCursor);
     }
 
     public async Task<MealPlanResult<MealPlanEntryResponse>> AddEntryAsync(Guid mealPlanId, AddMealPlanEntryRequest request, Guid userId, CancellationToken cancellationToken = default)
@@ -296,29 +331,46 @@ public class MealPlanService : IMealPlanService
 
         // Same hydrate idiom as GetMealPlanByIdAsync: join against _db.Recipes (carries the
         // global !IsDeleted filter) rather than an Include/navigation, so an entry whose
-        // recipe is soft-deleted silently drops out instead of erroring. Dedupe micro-decision
-        // (cp04, recorded in the session note): one row per DISTINCT recipe per ingredient —
-        // if the same recipe appears in multiple entries (e.g. breakfast Mon + Tue), buying
-        // for it twice is unambiguous noise, so distinct recipe ids are resolved first.
-        var recipeIds = await _db.MealPlanEntries
+        // recipe is soft-deleted silently drops out instead of erroring.
+        //
+        // ONE ROW PER ENTRY, not per distinct recipe. cp04 originally deduped by recipe id,
+        // reasoning that buying twice for one recipe was noise; that was wrong. Planning
+        // lasagne for Monday AND Thursday means cooking it twice, so the shopper needs
+        // ingredients for two — deduping silently under-buys, and the month view's week rail
+        // now surfaces repeats, so the gap is visible. Deduping was also the one place the
+        // generator DID aggregate, contradicting meal-planning-v1-semantics #1 below.
+        // Ordered by (day, meal) so repeated dishes land next to their slot's siblings and
+        // the output is deterministic — same ordering GetMealPlanByIdAsync uses.
+        var entries = await _db.MealPlanEntries
             .Where(e => e.MealPlanId == mealPlanId)
-            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => r.Id)
-            .Distinct()
+            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new
+            {
+                e.DayOfWeek,
+                e.MealType,
+                RecipeId = r.Id,
+            })
+            .OrderBy(e => e.DayOfWeek)
+            .ThenBy(e => e.MealType)
             .ToListAsync(cancellationToken);
 
         // Separate load for the full recipe rows (incl. the jsonb Ingredients column) — mirrors
         // how the rest of the codebase loads a Recipe entity (e.g. RecipeService), rather than
-        // trying to select a jsonb column out of the join projection above.
-        var recipes = await _db.Recipes
-            .Where(r => recipeIds.Contains(r.Id))
-            .ToListAsync(cancellationToken);
+        // trying to select a jsonb column out of the join projection above. Still loaded once
+        // per DISTINCT recipe (a repeated dish is one row read, then expanded per entry).
+        var distinctRecipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
+        var recipes = (await _db.Recipes
+            .Where(r => distinctRecipeIds.Contains(r.Id))
+            .ToListAsync(cancellationToken))
+            .ToDictionary(r => r.Id);
 
         // meal-planning-v1-semantics #1: no aggregation, no unit conversion. Quantity is the
         // display string "{Quantity} {Unit}" trimmed, decimal rendered invariant-culture so the
-        // string is deterministic regardless of server locale.
-        var newItems = recipes
-            .OrderBy(r => r.Id)
-            .SelectMany(r => r.Ingredients.Select(i => new ShoppingListItem
+        // string is deterministic regardless of server locale. ContainsKey guards the window
+        // between the two queries above — a recipe soft-deleted in between drops its entry
+        // rather than throwing.
+        var newItems = entries
+            .Where(e => recipes.ContainsKey(e.RecipeId))
+            .SelectMany(e => recipes[e.RecipeId].Ingredients.Select(i => new ShoppingListItem
             {
                 Id = Guid.NewGuid(),
                 Ingredient = i.Name,

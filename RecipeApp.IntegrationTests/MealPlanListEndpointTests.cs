@@ -116,6 +116,90 @@ public class MealPlanListEndpointTests(IntegrationTestFactory factory) : IClassF
         Assert.Equal(1, body!.Items[0].EntryCount);
     }
 
+    // --- meal-plan redesign: TotalMinutes on the summary ---------------------------------
+    // The month view's week rail shows cook load per week; totalling it client-side needed a
+    // GET /recipes/{id} per entry, so the surface shipped without it.
+
+    [Fact]
+    public async Task List_TotalMinutes_SumsPrepPlusCookAcrossEntries()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var quick = await CreateRecipeAsync(client, prepMinutes: 5, cookMinutes: 10);   // 15
+        var slow = await CreateRecipeAsync(client, prepMinutes: 20, cookMinutes: 45);   // 65
+        var plan = await CreatePlanAsync(client, UtcMidnight(2026, 8, 3));
+
+        await AddEntryAsync(client, plan, DayOfWeek.Monday, MealType.Breakfast, quick);
+        await AddEntryAsync(client, plan, DayOfWeek.Tuesday, MealType.Dinner, slow);
+
+        var summary = await GetSummaryAsync(client, UtcMidnight(2026, 8, 3));
+
+        Assert.Equal(2, summary.EntryCount);
+        Assert.Equal(80, summary.TotalMinutes);
+    }
+
+    // Per ENTRY, not per distinct recipe — cooking the same dish twice costs the time twice.
+    // Same reasoning that ended the shopping-list dedupe.
+    [Fact]
+    public async Task List_TotalMinutes_CountsARepeatedRecipeOncePerEntry()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var recipe = await CreateRecipeAsync(client, prepMinutes: 15, cookMinutes: 25);  // 40
+        var plan = await CreatePlanAsync(client, UtcMidnight(2026, 8, 10));
+
+        await AddEntryAsync(client, plan, DayOfWeek.Monday, MealType.Dinner, recipe);
+        await AddEntryAsync(client, plan, DayOfWeek.Thursday, MealType.Dinner, recipe);
+
+        var summary = await GetSummaryAsync(client, UtcMidnight(2026, 8, 10));
+
+        Assert.Equal(2, summary.EntryCount);
+        Assert.Equal(80, summary.TotalMinutes);
+    }
+
+    [Fact]
+    public async Task List_PlanWithNoEntries_ReportsZeroCountAndZeroMinutes()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        await CreatePlanAsync(client, UtcMidnight(2026, 8, 17));
+
+        var summary = await GetSummaryAsync(client, UtcMidnight(2026, 8, 17));
+
+        Assert.Equal(0, summary.EntryCount);
+        Assert.Equal(0, summary.TotalMinutes);
+    }
+
+    // Both counters run over the join against Recipes, which carries the soft-delete filter,
+    // so the summary agrees with GET /meal-plans/{id} — which drops those entries entirely.
+    // Before TotalMinutes landed, EntryCount counted the raw entry rows and over-reported.
+    [Fact]
+    public async Task List_SoftDeletedRecipe_DropsFromBothCounters()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var kept = await CreateRecipeAsync(client, prepMinutes: 5, cookMinutes: 5);      // 10
+        var doomed = await CreateRecipeAsync(client, prepMinutes: 30, cookMinutes: 30);  // 60
+        var plan = await CreatePlanAsync(client, UtcMidnight(2026, 8, 24));
+
+        await AddEntryAsync(client, plan, DayOfWeek.Monday, MealType.Lunch, kept);
+        await AddEntryAsync(client, plan, DayOfWeek.Tuesday, MealType.Lunch, doomed);
+
+        var before = await GetSummaryAsync(client, UtcMidnight(2026, 8, 24));
+        Assert.Equal(2, before.EntryCount);
+        Assert.Equal(70, before.TotalMinutes);
+
+        (await client.DeleteAsync($"/recipes/{doomed}")).EnsureSuccessStatusCode();
+
+        var after = await GetSummaryAsync(client, UtcMidnight(2026, 8, 24));
+        Assert.Equal(1, after.EntryCount);
+        Assert.Equal(10, after.TotalMinutes);
+
+        // The week view agrees — that is the consistency this join buys.
+        var week = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan}", TestJson.Options);
+        Assert.Single(week!.Entries);
+    }
+
     [Fact]
     public async Task List_LimitZero_Returns400()
     {
@@ -173,14 +257,41 @@ public class MealPlanListEndpointTests(IntegrationTestFactory factory) : IClassF
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    private static async Task<Guid> CreatePlanAsync(HttpClient client, DateTime weekStart)
+    {
+        var response = await client.PostAsJsonAsync("/meal-plans", new CreateMealPlanRequest(weekStart), TestJson.Options);
+        response.EnsureSuccessStatusCode();
+        var plan = await response.Content.ReadFromJsonAsync<MealPlanResponse>(TestJson.Options);
+        return plan!.Id;
+    }
+
+    private static async Task AddEntryAsync(HttpClient client, Guid planId, DayOfWeek day, MealType meal, Guid recipeId)
+    {
+        var response = await client.PostAsJsonAsync(
+            $"/meal-plans/{planId}/entries",
+            new AddMealPlanEntryRequest(day, meal, recipeId),
+            TestJson.Options);
+        response.EnsureSuccessStatusCode();
+    }
+
+    // Scoped by ?weekStart= so the shared database can't leak another test's plan in.
+    private static async Task<MealPlanSummaryResponse> GetSummaryAsync(HttpClient client, DateTime weekStart)
+    {
+        var body = await client.GetFromJsonAsync<MealPlanListResponse>(
+            $"/meal-plans?weekStart={weekStart:yyyy-MM-dd}T00:00:00Z", TestJson.Options);
+        return Assert.Single(body!.Items);
+    }
+
     // Same request shape MealPlanEndpointsTests uses to create the recipe an entry needs.
-    private static async Task<Guid> CreateRecipeAsync(HttpClient client)
+    // Prep/cook are parameterised so the TotalMinutes tests can assert an exact, distinctive
+    // sum rather than a multiple of one shared constant.
+    private static async Task<Guid> CreateRecipeAsync(HttpClient client, int prepMinutes = 10, int cookMinutes = 20)
     {
         var response = await client.PostAsJsonAsync("/recipes", new CreateRecipeRequest(
             Title: "Meal Plan List Test Focaccia",
             Description: "A minimal focaccia used to exercise the meal-plan list endpoint.",
-            PrepTimeMinutes: 10,
-            CookTimeMinutes: 20,
+            PrepTimeMinutes: prepMinutes,
+            CookTimeMinutes: cookMinutes,
             Servings: 4,
             Difficulty: DifficultyLevel.Easy,
             CuisineType: "Italian",
