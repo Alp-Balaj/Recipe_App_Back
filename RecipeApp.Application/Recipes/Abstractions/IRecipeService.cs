@@ -11,6 +11,9 @@ public interface IRecipeService
     // non-nullable Guid; they are only reachable authenticated.
     Task<RecipeResult<RecipeResponse>> GetRecipeByIdAsync(Guid id, Guid? currentUserId, CancellationToken cancellationToken = default);
 
+    // Backs both GET /recipes and GET /recipes/mine — the latter sets query.OwnedByUserId to
+    // the caller's id, which narrows to that author AFTER the visibility predicate (so it can
+    // only ever restrict what the caller may see, never widen it).
     Task<RecipeListResponse> GetRecipesAsync(RecipeListQuery query, Guid? currentUserId, CancellationToken cancellationToken = default);
 
     Task<RecipeResult<RecipeResponse>> UpdateRecipeAsync(Guid id, UpdateRecipeRequest request, Guid currentUserId, CancellationToken cancellationToken = default);

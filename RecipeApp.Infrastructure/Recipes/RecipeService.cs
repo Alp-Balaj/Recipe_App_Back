@@ -73,6 +73,17 @@ public class RecipeService : IRecipeService
             ? _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId)
             : _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
 
+        // Author filter (GET /recipes/mine). Composed straight after the visibility predicate
+        // and before any user-supplied filter — it only ever NARROWS, and it is deliberately
+        // not allowed to widen: asking for another user's id here still yields just their
+        // Public rows, because the visibility predicate above already ran. When the id is the
+        // caller's own, the two predicates AND down to "everything I wrote", private drafts
+        // included — which is the whole point of the endpoint.
+        if (query.OwnedByUserId is Guid ownerId)
+        {
+            recipes = recipes.Where(r => r.CreatedByUserId == ownerId);
+        }
+
         if (!string.IsNullOrEmpty(query.Cuisine))
         {
             // Case-insensitive exact match (Decisions §3) — lower() equality, not ILIKE,

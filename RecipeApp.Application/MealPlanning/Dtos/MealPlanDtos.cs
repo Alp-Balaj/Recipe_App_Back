@@ -46,11 +46,22 @@ public record ShoppingListItemListResponse(IReadOnlyList<ShoppingListItemRespons
 // The list is a SUMMARY projection, not the full week view: callers page over weeks to
 // find a plan id, then GET /meal-plans/{id} for the entries. EntryCount is the cheap
 // signal a week card needs ("3 meals planned") without shipping every entry.
+//
+// TotalMinutes (meal-plan redesign): the month view's week rail wants "3 meals · 95 min"
+// as a load signal, and the only client-side way to get it was GET /recipes/{id} per entry
+// — 100+ requests to render one month, so the surface shipped without time at all. Summing
+// server-side is one extra aggregate query for the whole page. It is PrepTime + CookTime
+// per entry summed over the week, NOT per distinct recipe: cooking the same dish twice
+// costs the time twice (the same reasoning that ended the shopping-list dedupe).
+//
+// Both counters are computed over entries whose Recipe survives the soft-delete filter, so
+// they agree with GET /meal-plans/{id}, which drops those entries from Entries.
 
 public record MealPlanSummaryResponse(
     Guid Id,
     DateTime WeekStartDate,
     DateTime CreatedAt,
-    int EntryCount);
+    int EntryCount,
+    int TotalMinutes);
 
 public record MealPlanListResponse(IReadOnlyList<MealPlanSummaryResponse> Items, string? NextCursor);

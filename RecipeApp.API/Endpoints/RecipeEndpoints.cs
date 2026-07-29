@@ -43,50 +43,51 @@ public static class RecipeEndpoints
         {
             var userId = GetOptionalUserId(user);
 
-            // difficulty is bound as a string and parsed by hand so that undefined values
-            // (including numeric strings outside the enum, e.g. "99") are a 400 rather
-            // than an undefined enum value that silently matches nothing.
-            DifficultyLevel? difficultyFilter = null;
-            if (!string.IsNullOrEmpty(difficulty))
+            if (!TryResolveListQuery(cuisine, difficulty, tags, cursor, limit, ownedByUserId: null, out var query, out var error))
             {
-                if (!Enum.TryParse<DifficultyLevel>(difficulty, ignoreCase: true, out var parsedDifficulty)
-                    || !Enum.IsDefined(parsedDifficulty))
-                {
-                    return Results.ValidationProblem(new Dictionary<string, string[]>
-                    {
-                        ["difficulty"] = [$"'{difficulty}' is not a valid difficulty."],
-                    });
-                }
-                difficultyFilter = parsedDifficulty;
+                return error!;
             }
 
-            RecipeListCursor? decodedCursor = null;
-            if (!string.IsNullOrEmpty(cursor))
-            {
-                if (!RecipeListCursor.TryDecode(cursor, out decodedCursor))
-                {
-                    return Results.ValidationProblem(new Dictionary<string, string[]>
-                    {
-                        ["cursor"] = ["The cursor is malformed."],
-                    });
-                }
-            }
-
-            var effectiveLimit = limit ?? DefaultPageSize;
-            if (effectiveLimit <= 0)
-            {
-                return Results.ValidationProblem(new Dictionary<string, string[]>
-                {
-                    ["limit"] = ["limit must be a positive integer."],
-                });
-            }
-            effectiveLimit = Math.Min(effectiveLimit, MaxPageSize);
-
-            var query = new RecipeListQuery(cuisine, difficultyFilter, tags ?? [], decodedCursor, effectiveLimit);
-            var response = await recipeService.GetRecipesAsync(query, userId, cancellationToken);
+            var response = await recipeService.GetRecipesAsync(query!, userId, cancellationToken);
             return Results.Ok(response);
         })
         .AllowAnonymous()
+        .RequireRateLimiting(RateLimitPolicies.Social);
+
+        // The caller's own recipes, private drafts included. Registered BEFORE /{id:guid} for
+        // readability only — "mine" can never match the guid constraint, so the two cannot
+        // shadow each other in either order.
+        //
+        // Why a route and not a client-side filter: the SPA previously paged the global list
+        // and filtered by author in the browser, so a recipe sitting on page four simply did
+        // not exist for "My recipes" until the user paged that far — silently lossy, and the
+        // recipe picker's "Mine" segment inherited the same hole. Narrowing server-side means
+        // the keyset pages over the caller's rows, so the pages are dense and complete.
+        //
+        // No AllowAnonymous: "mine" is meaningless without a caller, and the global
+        // RequireAuthenticatedUser fallback policy turns that into a 401 for free. It also
+        // keeps the parsing GetUserId shape (auth guarantees the claim) rather than the
+        // nullable GetOptionalUserId the two anonymous-capable reads use.
+        group.MapGet("/mine", async (
+            string? cuisine,
+            string? difficulty,
+            string[]? tags,
+            string? cursor,
+            int? limit,
+            IRecipeService recipeService,
+            ClaimsPrincipal user,
+            CancellationToken cancellationToken) =>
+        {
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+            if (!TryResolveListQuery(cuisine, difficulty, tags, cursor, limit, ownedByUserId: userId, out var query, out var error))
+            {
+                return error!;
+            }
+
+            var response = await recipeService.GetRecipesAsync(query!, userId, cancellationToken);
+            return Results.Ok(response);
+        })
         .RequireRateLimiting(RateLimitPolicies.Social);
 
         group.MapGet("/{id:guid}", async (Guid id, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
@@ -131,6 +132,66 @@ public static class RecipeEndpoints
                 _ => Results.NotFound(),
             };
         });
+    }
+
+    // Shared wire-level parsing for the two list routes (GET /recipes and GET /recipes/mine),
+    // mirroring MealPlanEndpoints.TryResolvePaging: malformed cursor, undefined difficulty or
+    // non-positive limit -> 400; above-cap limit clamps silently to MaxPageSize. Extracted when
+    // /mine landed so the two routes can never drift on filter or paging semantics.
+    private static bool TryResolveListQuery(
+        string? cuisine,
+        string? difficulty,
+        string[]? tags,
+        string? cursor,
+        int? limit,
+        Guid? ownedByUserId,
+        out RecipeListQuery? query,
+        out IResult? error)
+    {
+        query = null;
+        error = null;
+
+        // difficulty is bound as a string and parsed by hand so that undefined values
+        // (including numeric strings outside the enum, e.g. "99") are a 400 rather
+        // than an undefined enum value that silently matches nothing.
+        DifficultyLevel? difficultyFilter = null;
+        if (!string.IsNullOrEmpty(difficulty))
+        {
+            if (!Enum.TryParse<DifficultyLevel>(difficulty, ignoreCase: true, out var parsedDifficulty)
+                || !Enum.IsDefined(parsedDifficulty))
+            {
+                error = Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["difficulty"] = [$"'{difficulty}' is not a valid difficulty."],
+                });
+                return false;
+            }
+            difficultyFilter = parsedDifficulty;
+        }
+
+        RecipeListCursor? decodedCursor = null;
+        if (!string.IsNullOrEmpty(cursor) && !RecipeListCursor.TryDecode(cursor, out decodedCursor))
+        {
+            error = Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["cursor"] = ["The cursor is malformed."],
+            });
+            return false;
+        }
+
+        var effectiveLimit = limit ?? DefaultPageSize;
+        if (effectiveLimit <= 0)
+        {
+            error = Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["limit"] = ["limit must be a positive integer."],
+            });
+            return false;
+        }
+        effectiveLimit = Math.Min(effectiveLimit, MaxPageSize);
+
+        query = new RecipeListQuery(cuisine, difficultyFilter, tags ?? [], decodedCursor, effectiveLimit, ownedByUserId);
+        return true;
     }
 
     // Guest access (§3.1): the anonymous-capable read routes resolve the caller id as
