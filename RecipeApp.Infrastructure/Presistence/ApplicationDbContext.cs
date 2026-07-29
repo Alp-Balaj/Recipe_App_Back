@@ -26,6 +26,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<MealPlan> MealPlans => Set<MealPlan>();
     public DbSet<MealPlanEntry> MealPlanEntries => Set<MealPlanEntry>();
     public DbSet<ShoppingListItem> ShoppingListItems => Set<ShoppingListItem>();
+    public DbSet<ShoppingListMark> ShoppingListMarks => Set<ShoppingListMark>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -141,6 +142,24 @@ public class ApplicationDbContext : DbContext
         builder.Entity<ShoppingListItem>()
             .HasIndex(sli => new { sli.UserId, sli.CreatedAt, sli.Id })
             .IsDescending(false, true, true);
+
+        // Week-scoped rework: one decision per (user, week, ingredient key). Unique because
+        // the projection reads exactly one mark per group — a duplicate would make "is this
+        // ticked" ambiguous. Upserts rely on this index as the race backstop.
+        builder.Entity<ShoppingListMark>()
+            .HasIndex(m => new { m.UserId, m.WeekStartDate, m.Key })
+            .IsUnique();
+
+        // Keys are compared for exact equality only, so a bounded column is correct and
+        // keeps the unique index narrow.
+        builder.Entity<ShoppingListMark>()
+            .Property(m => m.Key)
+            .HasMaxLength(200)
+            .IsRequired();
+
+        // Backs "this week's manual items" — the default list scope.
+        builder.Entity<ShoppingListItem>()
+            .HasIndex(sli => new { sli.UserId, sli.WeekStartDate });
 
         builder.Entity<ChatMessage>()
             .Property(m => m.SuggestedRecipeIds)
