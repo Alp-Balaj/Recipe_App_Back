@@ -1,15 +1,24 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 using System.Net.Http.Json;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
+using RecipeApp.Domain.Entities;
+using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.IntegrationTests;
 
 // meal-planning plan, cp04: POST /meal-plans/{id}/generate-shopping-list. Fresh users/recipes
-// per test (shared Testcontainers DB), mirroring MealPlanEndpointsTests'/
-// ShoppingListEndpointsTests' style.
+// per test (shared Testcontainers DB), mirroring MealPlanEndpointsTests' style.
+//
+// Week/shopping rework (Task 3): the "did the row survive?" assertions used to read back
+// through GET /shopping-list, which is now a per-week PROJECTION of groups and no longer
+// echoes generated rows at all (generate never stamps WeekStartDate). Those assertions now
+// read the ShoppingListItems table directly, which is what they were really about. The whole
+// endpoint and this file go away in the next task.
 public class GenerateShoppingListEndpointsTests(IntegrationTestFactory factory) : IClassFixture<IntegrationTestFactory>
 {
     [Fact]
@@ -65,10 +74,10 @@ public class GenerateShoppingListEndpointsTests(IntegrationTestFactory factory) 
         Assert.Single(firstItems!);
         Assert.Single(secondItems!);
 
-        // The whole per-user list should still show exactly one row for this ingredient —
-        // regeneration replaced rather than appended.
-        var list = await client.GetFromJsonAsync<ShoppingListItemListResponse>("/shopping-list", TestJson.Options);
-        Assert.Single(list!.Items, i => i.MealPlanId == plan.Id);
+        // The stored rows should still show exactly one for this plan — regeneration replaced
+        // rather than appended.
+        var stored = await StoredItemsForPlanAsync(plan.Id);
+        Assert.Single(stored);
     }
 
     [Fact]
@@ -94,11 +103,9 @@ public class GenerateShoppingListEndpointsTests(IntegrationTestFactory factory) 
         // regenerate again to make sure the replace pass doesn't disturb unrelated rows
         await client.PostAsync($"/meal-plans/{plan.Id}/generate-shopping-list", null);
 
-        var list = await client.GetFromJsonAsync<ShoppingListItemListResponse>("/shopping-list", TestJson.Options);
-        var ids = list!.Items.Select(i => i.Id).ToList();
-        Assert.Contains(manual.Id, ids);
-        Assert.Contains(otherItemId, ids);
-        Assert.Contains(list.Items, i => i.Ingredient == "Butter" && i.MealPlanId == plan.Id);
+        Assert.True(await StoredItemExistsAsync(manual.Id));
+        Assert.True(await StoredItemExistsAsync(otherItemId));
+        Assert.Contains(await StoredItemsForPlanAsync(plan.Id), i => i.Ingredient == "Butter");
     }
 
     [Fact]
@@ -229,8 +236,7 @@ public class GenerateShoppingListEndpointsTests(IntegrationTestFactory factory) 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Empty(items!);
 
-        var list = await client.GetFromJsonAsync<ShoppingListItemListResponse>("/shopping-list", TestJson.Options);
-        Assert.DoesNotContain(list!.Items, i => i.MealPlanId == plan.Id);
+        Assert.Empty(await StoredItemsForPlanAsync(plan.Id));
     }
 
     // --- helpers ------------------------------------------------------------------------
@@ -264,9 +270,30 @@ public class GenerateShoppingListEndpointsTests(IntegrationTestFactory factory) 
 
     private static async Task<ShoppingListItemResponse> AddManualItemAsync(HttpClient client, string ingredient, string quantity)
     {
-        var response = await client.PostAsJsonAsync("/shopping-list", new AddShoppingListItemRequest(ingredient, quantity), TestJson.Options);
+        // Manual adds now carry their week (week/shopping rework). Any UTC-midnight Monday will
+        // do here — this file only cares that the manual row survives regeneration.
+        var response = await client.PostAsJsonAsync(
+            "/shopping-list",
+            new AddManualShoppingListItemRequest(ingredient, quantity, UtcMidnight(2027, 1, 4)),
+            TestJson.Options);
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<ShoppingListItemResponse>(TestJson.Options))!;
+    }
+
+    // GET /shopping-list is a projection now and never echoes generated rows, so the
+    // survive/replace assertions read the table instead.
+    private async Task<List<ShoppingListItem>> StoredItemsForPlanAsync(Guid mealPlanId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        return await db.ShoppingListItems.Where(i => i.MealPlanId == mealPlanId).ToListAsync();
+    }
+
+    private async Task<bool> StoredItemExistsAsync(Guid id)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        return await db.ShoppingListItems.AnyAsync(i => i.Id == id);
     }
 
     private static async Task<RecipeResponse> CreateRecipeAsync(HttpClient client, string title, List<RecipeIngredient> ingredients)

@@ -81,3 +81,57 @@ public record MealPlanSummaryResponse(
     int TotalMinutes);
 
 public record MealPlanListResponse(IReadOnlyList<MealPlanSummaryResponse> Items, string? NextCursor);
+
+// --- week/shopping rework (2026-07-29 design) -----------------------------------------
+// The list is a PROJECTION, so the wire shape is groups, not rows. One group per exact
+// IngredientKey, carrying its constituent parts and the dishes they serve — which is what
+// lets an ingredient-led list still answer "what is this for" without listing it per dish.
+
+public enum ShoppingListScope { Week, All }
+
+public enum ShoppingListGroupOrigin { Derived, Manual }
+
+/// <summary>One dish's contribution to a group. Quantity stays a display string — grouped, never summed.</summary>
+public record ShoppingListPartResponse(string Quantity, string DishTitle);
+
+/// <summary>
+/// One shopping-list line. <c>ManualItemId</c> is set only when Origin is Manual — it is the
+/// row DELETE /shopping-list/{id} targets.
+/// </summary>
+public record ShoppingListGroupResponse(
+    string Key,
+    string DisplayName,
+    IReadOnlyList<ShoppingListPartResponse> Parts,
+    IReadOnlyList<string> Dishes,
+    bool IsPurchased,
+    ShoppingListGroupOrigin Origin,
+    Guid? ManualItemId);
+
+public record ShoppingListWeekResponse(
+    DateTime WeekStartDate,
+    IReadOnlyList<ShoppingListGroupResponse> Groups,
+    int PurchasedCount,
+    int TotalCount);
+
+/// <summary>
+/// OrphanedPurchasedNames carries display names for ticks whose group no longer exists —
+/// the "1 item you'd already bought is no longer in your plan" notice. Surfaced as a
+/// dismissible banner, never as ghost rows.
+/// </summary>
+public record ShoppingListResponse(
+    IReadOnlyList<ShoppingListWeekResponse> Weeks,
+    IReadOnlyList<string> OrphanedPurchasedNames);
+
+/// <summary>Explicit full set of both flags — idempotent by construction, like the old PATCH.</summary>
+public record SetShoppingListMarkRequest(DateTime WeekStartDate, string Key, bool IsPurchased, bool IsSuppressed);
+
+// Manual adds now carry their week.
+public record AddManualShoppingListItemRequest(string Ingredient, string Quantity, DateTime WeekStartDate);
+
+// --- grocery insight (week board) -----------------------------------------------------
+public record GroceryOutlierResponse(Guid RecipeId, string Title, int UniqueIngredientCount);
+
+public record GroceryInsightResponse(
+    int DistinctIngredientCount,
+    int SharedIngredientCount,
+    GroceryOutlierResponse? Outlier);

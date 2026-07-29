@@ -54,6 +54,7 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();
+builder.Services.AddScoped<IShoppingListService, ShoppingListService>();
 
 // social-feed cp04 (decision I1): uploaded images live behind the IImageStorage seam.
 // Production (Railway is ephemeral-disk) sets ImageStorage:R2:* and stores in Cloudflare

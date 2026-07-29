@@ -116,37 +116,55 @@ public static class MealPlanEndpoints
     {
         var group = app.MapGroup("/shopping-list").RequireRateLimiting(RateLimitPolicies.Meal);
 
-        group.MapGet("/", async (string? cursor, int? limit, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        // Week/shopping rework (2026-07-29 design): the list is a PROJECTION, so there is no
+        // row paging left — one read returns whole weeks of groups.
+        group.MapGet("/", async (DateTime? weekStart, ShoppingListScope? scope,
+            IShoppingListService shopping, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
+            var effectiveScope = scope ?? ShoppingListScope.Week;
+
+            // Same UTC-midnight rule as GET /meal-plans: a non-midnight or non-UTC value can
+            // never match a stored week, so 400 beats a silently-empty list.
+            if (weekStart is not null && (weekStart.Value.Kind != DateTimeKind.Utc || weekStart.Value.TimeOfDay != TimeSpan.Zero))
             {
-                return error!;
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["weekStart"] = ["weekStart must be a UTC midnight date."],
+                });
             }
 
-            var response = await mealPlans.GetShoppingListAsync(decodedCursor, effectiveLimit, GetUserId(user), cancellationToken);
-            return Results.Ok(response);
+            if (effectiveScope == ShoppingListScope.Week && weekStart is null)
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["weekStart"] = ["weekStart is required when scope is Week."],
+                });
+            }
+
+            return Results.Ok(await shopping.GetAsync(weekStart, effectiveScope, GetUserId(user), cancellationToken));
         });
 
-        group.MapPost("/", async (AddShoppingListItemRequest request, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        group.MapPost("/", async (AddManualShoppingListItemRequest request, IShoppingListService shopping,
+            ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var item = await mealPlans.AddShoppingListItemAsync(request, GetUserId(user), cancellationToken);
+            var item = await shopping.AddManualAsync(request, GetUserId(user), cancellationToken);
             return Results.Created($"/shopping-list/{item.Id}", item);
         })
-        .AddEndpointFilter<ValidationFilter<AddShoppingListItemRequest>>();
+        .AddEndpointFilter<ValidationFilter<AddManualShoppingListItemRequest>>();
 
-        group.MapPatch("/{id:guid}", async (Guid id, UpdateShoppingListItemRequest request, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        // Explicit full set of both flags, mirroring the old PATCH's idempotence rule.
+        group.MapPut("/marks", async (SetShoppingListMarkRequest request, IShoppingListService shopping,
+            ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var result = await mealPlans.UpdateShoppingListItemAsync(id, request, GetUserId(user), cancellationToken);
-            return result.Outcome switch
-            {
-                MealPlanOutcome.Success => Results.NoContent(),
-                _ => Results.NotFound(),
-            };
-        });
+            await shopping.SetMarkAsync(request, GetUserId(user), cancellationToken);
+            return Results.NoContent();
+        })
+        .AddEndpointFilter<ValidationFilter<SetShoppingListMarkRequest>>();
 
-        group.MapDelete("/{id:guid}", async (Guid id, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        group.MapDelete("/{id:guid}", async (Guid id, IShoppingListService shopping,
+            ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var result = await mealPlans.DeleteShoppingListItemAsync(id, GetUserId(user), cancellationToken);
+            var result = await shopping.DeleteManualAsync(id, GetUserId(user), cancellationToken);
             return result.Outcome switch
             {
                 MealPlanOutcome.Success => Results.NoContent(),
