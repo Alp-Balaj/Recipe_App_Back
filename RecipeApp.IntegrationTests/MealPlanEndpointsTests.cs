@@ -98,6 +98,69 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         Assert.Equal(recipe.Title, entry.Recipe.Title);
     }
 
+    // --- entry recipe summary: time + calories (meal-plan insights) --------------------------
+    // Two construction sites build this projection — the week view's Join and the add-entry
+    // response — so both are covered. The month view reads them off entries it already
+    // fetches, which is the entire point: no GET /recipes/{id} per dish.
+
+    [Fact]
+    public async Task GetMealPlan_Entry_CarriesRecipeTimeAndCalories()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2026, 9, 14));
+        var recipe = await CreateRecipeAsync(client);
+        await AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+
+        var response = await client.GetAsync($"/meal-plans/{plan.Id}");
+        var body = await response.Content.ReadFromJsonAsync<MealPlanResponse>(TestJson.Options);
+
+        var entry = Assert.Single(body!.Entries);
+        // Prep 10 + Cook 20, the same sum MealPlanSummaryResponse.TotalMinutes uses per entry.
+        Assert.Equal(30, entry.Recipe.TotalTimeMinutes);
+        Assert.Equal(210, entry.Recipe.CaloriesPerServing);
+    }
+
+    [Fact]
+    public async Task AddEntry_Response_CarriesRecipeTimeAndCalories()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2026, 9, 21));
+        var recipe = await CreateRecipeAsync(client);
+
+        var entry = await AddEntryAsync(client, plan.Id, DayOfWeek.Friday, MealType.Lunch, recipe.Id);
+
+        Assert.Equal(30, entry.Recipe.TotalTimeMinutes);
+        Assert.Equal(210, entry.Recipe.CaloriesPerServing);
+    }
+
+    // Nullable end to end. Defaulting this to 0 would let a client total a month and
+    // under-report it silently — the caller is meant to see the hole and carry a denominator.
+    [Fact]
+    public async Task GetMealPlan_RecipeWithoutCalories_LeavesCaloriesNull()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2026, 9, 28));
+
+        var created = await client.PostAsJsonAsync(
+            "/recipes",
+            ValidCreateRecipeRequest() with { Title = "Uncounted stew", CaloriesPerServing = null },
+            TestJson.Options);
+        created.EnsureSuccessStatusCode();
+        var recipe = (await created.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options))!;
+        await AddEntryAsync(client, plan.Id, DayOfWeek.Tuesday, MealType.Dinner, recipe.Id);
+
+        var response = await client.GetAsync($"/meal-plans/{plan.Id}");
+        var body = await response.Content.ReadFromJsonAsync<MealPlanResponse>(TestJson.Options);
+
+        var entry = Assert.Single(body!.Entries);
+        Assert.Null(entry.Recipe.CaloriesPerServing);
+        // Time is never null, so it survives a recipe that has no calorie figure.
+        Assert.Equal(30, entry.Recipe.TotalTimeMinutes);
+    }
+
     [Fact]
     public async Task GetMealPlan_OtherUsersPlan_Returns404()
     {
