@@ -8,8 +8,9 @@ namespace RecipeApp.Application.MealPlanning;
 /// that no plan week can ever equal, so without the day-of-week rule a manual add silently
 /// creates a phantom week that only ever surfaces under scope=All.
 ///
-/// Deliberately NOT applied to CreateMealPlanRequestValidator, which has the same gap: that
-/// would change existing plan-creation behaviour outside this task's scope. Tracked separately.
+/// Also applied to CreateMealPlanRequestValidator (Task 4) — without it, POST /meal-plans could
+/// create a plan on a non-Monday whose shopping list GET /shopping-list and PUT
+/// /shopping-list/marks could then never reach, since both already enforced this rule.
 /// </summary>
 public static class WeekStart
 {

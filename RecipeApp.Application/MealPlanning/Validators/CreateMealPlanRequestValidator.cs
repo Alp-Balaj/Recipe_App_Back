@@ -1,5 +1,6 @@
 using FluentValidation;
 using RecipeApp.Application.MealPlanning.Dtos;
+using RecipeApp.Application.MealPlanning;
 
 namespace RecipeApp.Application.MealPlanning.Validators;
 
@@ -9,12 +10,15 @@ public class CreateMealPlanRequestValidator : AbstractValidator<CreateMealPlanRe
 {
     public CreateMealPlanRequestValidator()
     {
-        // meal-planning-v1-semantics: WeekStartDate must be a pure UTC date (Kind Utc after
-        // binding, time component zero) so the (UserId, WeekStartDate) uniqueness is
-        // meaningful — a client-local midnight or an offset date would silently fragment
-        // "the same week" into multiple rows.
+        // Week/shopping rework's Global Constraint: WeekStartDate is always a UTC-midnight
+        // MONDAY. Previously this only checked pure-UTC-midnight, which let a client create a
+        // plan on e.g. a Wednesday — a plan whose shopping list GET /shopping-list and PUT
+        // /shopping-list/marks could then never reach, since both already enforce the Monday
+        // rule via WeekStart.IsUtcMidnightMonday. No legitimate client sends a non-Monday (the
+        // SPA always computes it), so tightening this closes the self-contradiction rather than
+        // breaking a real caller.
         RuleFor(x => x.WeekStartDate)
-            .Must(d => d.Kind == DateTimeKind.Utc && d.TimeOfDay == TimeSpan.Zero)
-            .WithMessage("WeekStartDate must be a pure UTC date (00:00:00 UTC, no time component).");
+            .Must(WeekStart.IsUtcMidnightMonday)
+            .WithMessage($"WeekStartDate {WeekStart.ValidationMessage}");
     }
 }
