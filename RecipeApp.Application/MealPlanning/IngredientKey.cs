@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 
 namespace RecipeApp.Application.MealPlanning;
@@ -21,13 +20,28 @@ namespace RecipeApp.Application.MealPlanning;
 /// </summary>
 public static class IngredientKey
 {
-    // Whole-token preparation noise. Deliberately conservative: every entry here is a
-    // word whose removal cannot change WHICH ingredient is meant.
+    // Whole-token noise. VERY short on purpose: every entry is a word that cannot name a
+    // product on its own.
+    //
+    // An earlier draft stripped the obvious cooking vocabulary — fresh, dried, ground,
+    // chopped, minced, sliced, grated, crushed, diced, whole, raw, cooked, peeled — and
+    // that was a wrong-merge factory, because in a FOOD domain those words name products
+    // rather than preparation:
+    //
+    //   "chopped tomatoes" is a tin, not a tomato you chopped
+    //   "minced beef" is a different cut from "beef"
+    //   "whole milk" is a different milk from "milk"
+    //   "fresh basil" and "dried basil" are different aisles and are not 1:1 substitutes
+    //   "ground ginger" and "fresh ginger" likewise
+    //
+    // What survives is only: adverbs that can never stand alone as a product (finely,
+    // roughly, coarsely), size words, and the "organic" label. Everything else is left in
+    // the key, which costs some MISSED merges — "chopped onion" stays separate from
+    // "onion" — and that is the correct direction to fail. See For_never_merges_different_ingredients.
     private static readonly HashSet<string> PrepWords = new(StringComparer.Ordinal)
     {
-        "fresh", "freshly", "dried", "chopped", "finely", "roughly", "coarsely",
-        "minced", "sliced", "diced", "grated", "crushed", "ground",
-        "large", "small", "medium", "organic", "whole", "raw", "cooked", "peeled",
+        "finely", "roughly", "coarsely", "freshly",
+        "large", "small", "medium", "organic",
     };
 
     public static string For(string? rawName)
@@ -38,17 +52,19 @@ public static class IngredientKey
         var withoutParens = RemoveParentheticals(lowered);
         var tokens = Tokenise(withoutParens);
 
-        if (tokens.Count == 0) return Collapse(lowered);
+        // Fall back on the PARENTHETICAL-STRIPPED text, not the raw lowered string, or
+        // "(Fresh)" keys as "(fresh)" and splits from an identical bare "Fresh".
+        if (tokens.Count == 0) return Collapse(withoutParens);
 
         // A leading count ("2 eggs", "1/2 onion") is quantity, not identity.
         if (tokens.Count > 1 && IsCountLike(tokens[0])) tokens.RemoveAt(0);
 
         var kept = tokens.Where(t => !PrepWords.Contains(t)).Select(Singularise).ToList();
 
-        // Stripping must never empty the name — "Fresh" as a whole ingredient name is
+        // Stripping must never empty the name — "Finely" as a whole ingredient name is
         // odd but it is still an identity, and an empty key would collide with every
         // other fully-stripped name.
-        return kept.Count == 0 ? Collapse(lowered) : string.Join(' ', kept);
+        return kept.Count == 0 ? Collapse(withoutParens) : string.Join(' ', kept);
     }
 
     public static string DisplayNameFor(IEnumerable<string> rawNames)
