@@ -60,13 +60,21 @@ namespace RecipeApp.Infrastructure.Migrations
             // Manual rows keep their identity and gain a week: the Monday of CreatedAt, in UTC.
             // date_trunc('week') is Monday-based in Postgres, which matches WeekStartDate.
             //
-            // date_trunc('week', ... AT TIME ZONE 'UTC') returns a timestamp WITHOUT time zone.
-            // Assigning that directly to a timestamptz column makes Postgres reinterpret the
-            // naive value in the SERVER's local timezone, silently producing a non-UTC,
-            // non-midnight instant on any server that isn't already UTC. The trailing
-            // `AT TIME ZONE 'UTC'` converts that naive timestamp back into a timestamptz by
-            // explicitly telling Postgres the naive value IS UTC, so the stored instant is
-            // always UTC midnight regardless of the server's timezone setting.
+            // DO NOT "simplify" this to a single `date_trunc('week', "CreatedAt" AT TIME ZONE
+            // 'UTC')` assigned straight into WeekStartDate — that form is silently wrong on any
+            // server whose TimeZone setting isn't UTC. `date_trunc('week', ts AT TIME ZONE
+            // 'UTC')` returns a timestamp WITHOUT time zone (a naive value already in UTC).
+            // Assigning that naive value directly into a `timestamptz` column does NOT store it
+            // as UTC: Postgres reinterprets the naive value as being in the SERVER's local
+            // TimeZone setting and converts FROM there, shifting the stored instant by the
+            // server's UTC offset. Measured on a Europe/Belgrade (UTC+2) server with
+            // "CreatedAt" = 2026-07-29 14:30:00+00 (a Wednesday): the single-conversion form
+            // stored 2026-07-26 22:00:00 UTC — Sunday night, not Monday — while the form below
+            // (with the second, explicit `AT TIME ZONE 'UTC'`) stored 2026-07-27 00:00:00 UTC,
+            // the correct Monday midnight. The second `AT TIME ZONE 'UTC'` is what reinterprets
+            // the naive date_trunc result as UTC (rather than server-local) before Postgres
+            // converts it into the timestamptz column; removing it reintroduces the bug on any
+            // non-UTC server, including this one.
             migrationBuilder.Sql(@"
                 UPDATE ""ShoppingListItems""
                 SET ""WeekStartDate"" = (date_trunc('week', ""CreatedAt"" AT TIME ZONE 'UTC')) AT TIME ZONE 'UTC'
