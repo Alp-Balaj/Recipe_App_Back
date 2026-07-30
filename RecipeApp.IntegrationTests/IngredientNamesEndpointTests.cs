@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 
 namespace RecipeApp.IntegrationTests;
@@ -97,6 +98,40 @@ public class IngredientNamesEndpointTests(IntegrationTestFactory factory) : ICla
 
         var afterDelete = await client.GetFromJsonAsync<string[]>("/ingredients/names?q=Unobtainium");
         Assert.DoesNotContain(afterDelete!, n => n.Equals("Unobtainium root", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // Week/shopping rework fix wave, F2 (privacy leak). The corpus query originally had NO
+    // visibility predicate, so ANOTHER user's Private recipe's ingredient names were suggested
+    // to every authenticated caller. It now composes the same visibility rule 1 predicate as
+    // GET /recipes (Public OR the caller's own) as the first predicate on the query.
+    //
+    // Two distinctive names, one recipe each, both owned by a SECOND user: the private one must
+    // never be suggested to the first user, the public one must be.
+    [Fact]
+    public async Task Ingredient_names_exclude_another_users_private_recipe_but_include_their_public_one()
+    {
+        var otherClient = await factory.CreateAuthenticatedClientAsync();
+        await MealPlanTestHelper.CreateRecipeAsync(otherClient, "Other user's secret",
+        [
+            new RecipeIngredient { Name = "Xyzzy privateleek", Quantity = 1m, Unit = "unit" },
+        ], RecipeVisibility.Private);
+        await MealPlanTestHelper.CreateRecipeAsync(otherClient, "Other user's shared dish",
+        [
+            new RecipeIngredient { Name = "Xyzzy publicleek", Quantity = 1m, Unit = "unit" },
+        ], RecipeVisibility.Public);
+
+        // A different authenticated user — owns neither recipe.
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var names = await client.GetFromJsonAsync<string[]>("/ingredients/names?q=Xyzzy");
+
+        Assert.NotNull(names);
+        Assert.DoesNotContain(names!, n => n.Equals("Xyzzy privateleek", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(names!, n => n.Equals("Xyzzy publicleek", StringComparison.OrdinalIgnoreCase));
+
+        // ...and the owner still gets their own private recipe's name — the predicate is
+        // "Public OR mine", not "Public only".
+        var ownerNames = await otherClient.GetFromJsonAsync<string[]>("/ingredients/names?q=Xyzzy");
+        Assert.Contains(ownerNames!, n => n.Equals("Xyzzy privateleek", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

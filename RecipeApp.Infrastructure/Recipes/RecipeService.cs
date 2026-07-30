@@ -227,13 +227,20 @@ public class RecipeService : IRecipeService
     // corpus and cheap to project (one jsonb column, no joins); revisit if that changes.
     private const int IngredientNamesScanCap = 500;
 
-    public async Task<List<string>> GetIngredientNamesAsync(string? prefix, CancellationToken cancellationToken = default)
+    public async Task<List<string>> GetIngredientNamesAsync(string? prefix, Guid currentUserId, CancellationToken cancellationToken = default)
     {
+        // Visibility rule 1, same as GetRecipesAsync above: the visibility predicate is the
+        // FIRST predicate composed onto the query. Without it this endpoint leaked every
+        // user's PRIVATE recipes' ingredient names to every authenticated caller. No nullable
+        // branch is needed here (unlike GetRecipesAsync) because the route is not
+        // AllowAnonymous — auth guarantees a caller id.
+        //
         // Soft-deleted recipes are already excluded by the global query filter (r => !r.IsDeleted).
         // ThenBy(Id) is a deterministic tiebreaker: two recipes can share a CreatedAt timestamp
         // exactly, and which one wins the scan-order "first encountered casing" for a shared
         // ingredient name (below) must not depend on undefined ORDER BY behaviour.
         var ingredientLists = await _db.Recipes
+            .Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == currentUserId)
             .OrderByDescending(r => r.CreatedAt)
             .ThenBy(r => r.Id)
             .Take(IngredientNamesScanCap)

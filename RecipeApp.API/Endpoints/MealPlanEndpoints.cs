@@ -43,9 +43,12 @@ public static class MealPlanEndpoints
 
         // meal-planning-ui plan, Task 1. The SPA's entry point: POST /meal-plans 409s
         // without returning the existing plan's id, so "open this week" needs a query.
-        // weekStart must be a pure UTC date, same rule as CreateMealPlanRequest — a
-        // non-midnight or non-UTC value can never match a stored week, so 400 beats a
-        // silently-empty list.
+        // weekStart goes through WeekStart.IsUtcMidnightMonday — the single week-boundary rule
+        // shared with CreateMealPlanRequestValidator and the /shopping-list routes. A value
+        // that isn't a UTC-midnight Monday can never match a stored week, so 400 beats a
+        // silently-empty list. (This route hand-rolled the midnight/UTC half of the check and
+        // omitted the Monday half until the week/shopping rework's fix wave, which meant a
+        // Wednesday 200'd empty here while GET /shopping-list 400'd on the same value.)
         group.MapGet("/", async (string? cursor, int? limit, DateTime? weekStart, IMealPlanService mealPlans, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
@@ -53,11 +56,11 @@ public static class MealPlanEndpoints
                 return error!;
             }
 
-            if (weekStart is not null && (weekStart.Value.Kind != DateTimeKind.Utc || weekStart.Value.TimeOfDay != TimeSpan.Zero))
+            if (weekStart is not null && !WeekStart.IsUtcMidnightMonday(weekStart.Value))
             {
                 return Results.ValidationProblem(new Dictionary<string, string[]>
                 {
-                    ["weekStart"] = ["weekStart must be a UTC midnight date."],
+                    ["weekStart"] = [$"weekStart {WeekStart.ValidationMessage}"],
                 });
             }
 

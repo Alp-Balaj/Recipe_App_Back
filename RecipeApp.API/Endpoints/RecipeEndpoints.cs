@@ -134,14 +134,20 @@ public static class RecipeEndpoints
         });
 
         // task-10 (meal-planning-week-shopping-rework): recipe-form autocomplete. A shared
-        // corpus across ALL non-deleted recipes (not just the caller's) — ingredient names
-        // carry nothing private, and a shared corpus is what makes autocomplete converge.
-        // Doesn't require ownership of anything; still behind the global auth fallback (no
-        // AllowAnonymous here), same as the write routes above. On its own Meal rate-limit
-        // lane per the plan.
-        app.MapGet("/ingredients/names", async (string? q, IRecipeService recipeService, CancellationToken cancellationToken) =>
+        // corpus, but only over the recipes the CALLER MAY SEE — Public plus their own, the
+        // same visibility rule 1 predicate the list routes use. The original spec said "all
+        // non-deleted recipes"; that was wrong, and it made every user's private recipes'
+        // ingredient names readable by every authenticated caller. Public recipes dominate the
+        // corpus, so autocomplete still converges — the feature is unharmed.
+        //
+        // No AllowAnonymous (the global auth fallback applies, same as the write routes above),
+        // so this keeps the parsing caller-id shape /mine uses rather than the nullable
+        // GetOptionalUserId of the two anonymous-capable reads. On its own Meal rate-limit lane
+        // per the plan.
+        app.MapGet("/ingredients/names", async (string? q, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var names = await recipeService.GetIngredientNamesAsync(q, cancellationToken);
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var names = await recipeService.GetIngredientNamesAsync(q, userId, cancellationToken);
             return Results.Ok(names);
         })
         .RequireRateLimiting(RateLimitPolicies.Meal);

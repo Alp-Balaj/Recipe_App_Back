@@ -64,7 +64,8 @@ public class ShoppingListService : IShoppingListService
     {
         // WeekStartDate is what makes the row visible in a week's projection at all — the old
         // MealPlanService.AddShoppingListItemAsync path never set it, so its rows are invisible
-        // here. That path is dead once the generate endpoint goes (next task).
+        // here. That path is gone: the generate endpoint it belonged to was deleted, and this
+        // is now the only writer of ShoppingListItem rows.
         var item = new ShoppingListItem
         {
             Id = Guid.NewGuid(),
@@ -200,10 +201,13 @@ public class ShoppingListService : IShoppingListService
             }
         }
 
-        // MealPlanId == null is what makes this query "MANUAL rows" rather than "rows". The
-        // still-live generate endpoint writes rows with MealPlanId set and no WeekStartDate,
-        // i.e. 0001-01-01; without this predicate they would surface as Manual-origin groups
-        // labelled "Added by you" and offer a DELETE, in a phantom year-1 week.
+        // MealPlanId == null is what makes this query "MANUAL rows" rather than "rows". It is
+        // now purely defensive: the deleted generate endpoint used to write rows with
+        // MealPlanId set and no WeekStartDate (i.e. 0001-01-01), and no code path can create
+        // such a row any more — AddManualAsync is the only writer and always leaves MealPlanId
+        // null. LEGACY rows from before the rework can still be sitting in the table, though,
+        // and without this predicate they would surface as Manual-origin groups labelled
+        // "Added by you", offering a DELETE, in a phantom year-1 week.
         var manual = await _db.ShoppingListItems
             .Where(i => i.UserId == userId && i.MealPlanId == null && i.WeekStartDate == weekStart)
             .OrderBy(i => i.CreatedAt)

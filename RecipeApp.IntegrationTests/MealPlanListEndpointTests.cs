@@ -96,6 +96,22 @@ public class MealPlanListEndpointTests(IntegrationTestFactory factory) : IClassF
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // Week/shopping rework fix wave, F3: this route hand-rolled the UTC/midnight half of the
+    // week rule and omitted the Monday half, so a Wednesday MIDNIGHT value 200'd with an empty
+    // list here while GET /shopping-list 400'd on the exact same value. 2026-07-22 is a
+    // Wednesday and a legitimate UTC midnight — the only thing wrong with it is the day of
+    // week, which is precisely what the old check could not see.
+    [Fact]
+    public async Task List_WeekStartUtcMidnightButNotMonday_Returns400()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var response = await client.GetAsync("/meal-plans?weekStart=2026-07-22T00:00:00Z");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     [Fact]
     public async Task List_EntryCount_CountsEntries()
     {

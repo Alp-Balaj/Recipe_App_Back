@@ -137,8 +137,12 @@ public class ApplicationDbContext : DbContext
             .HasIndex(me => new { me.MealPlanId, me.DayOfWeek, me.MealType })
             .IsUnique();
 
-        // meal-planning cp1: backs keyset paging of the caller's shopping list
-        // (CreatedAt DESC, Id DESC within a user).
+        // meal-planning cp1: added to back keyset paging of the caller's shopping list
+        // (CreatedAt DESC, Id DESC within a user). NOTHING PAGES THESE ROWS ANY MORE — the
+        // week/shopping rework made the list a per-week projection read whole, so the reads
+        // now go through the (UserId, WeekStartDate) index below. This index is retained only
+        // because dropping it is a migration, deliberately deferred out of that rework's fix
+        // wave; it still serves the CreatedAt ordering AddManualAsync's rows are read in.
         builder.Entity<ShoppingListItem>()
             .HasIndex(sli => new { sli.UserId, sli.CreatedAt, sli.Id })
             .IsDescending(false, true, true);

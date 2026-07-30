@@ -23,9 +23,13 @@ public interface IRecipeService
     Task<RecipeResult<bool>> DeleteRecipeAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default);
 
     // task-10 (meal-planning-week-shopping-rework): backs the recipe-form autocomplete.
-    // Distinct ingredient names across all non-deleted recipes (a shared corpus — ingredient
-    // names carry nothing private), prefix-matched case-insensitively on q, capped at 20,
-    // alphabetical. A blank/absent q returns the 20 most common names instead. Doesn't
-    // repair existing groupings — it slows the corpus from diverging further.
-    Task<List<string>> GetIngredientNamesAsync(string? prefix, CancellationToken cancellationToken = default);
+    // Distinct ingredient names drawn from the recipes the CALLER MAY SEE (Public, plus the
+    // caller's own — visibility rule 1, same predicate as GetRecipesAsync), prefix-matched
+    // case-insensitively on q, capped at 20, alphabetical. A blank/absent q returns the 20
+    // most common names instead. Doesn't repair existing groupings — it slows the corpus from
+    // diverging further.
+    //
+    // The caller id is non-nullable, unlike the two anonymous-capable reads above: this
+    // endpoint has no AllowAnonymous, so auth guarantees the claim.
+    Task<List<string>> GetIngredientNamesAsync(string? prefix, Guid currentUserId, CancellationToken cancellationToken = default);
 }
