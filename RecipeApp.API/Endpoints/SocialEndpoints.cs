@@ -58,6 +58,43 @@ public static class SocialEndpoints
             return ToNoContent(result);
         });
 
+        // open-loops slice 1. Unlike likes/saves these return the caller's own row rather
+        // than 204: the SPA needs the new TimesCooked to render "cooked 3 times" without a
+        // refetch, and a rating control has to show what it just committed.
+        group.MapPost("/cooked", async (Guid recipeId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.MarkCookedAsync(recipeId, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                SocialOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        });
+
+        // Idempotent full-row removal — the undo for a mis-tapped "I cooked this", and the
+        // way to retract a rating. 200 with a zeroed row whether or not one existed.
+        group.MapDelete("/cooked", async (Guid recipeId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.ClearCookedAsync(recipeId, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                SocialOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        });
+
+        // PUT, not POST: setting a rating is idempotent and replaces whatever was there.
+        group.MapPut("/rating", async (Guid recipeId, RatingRequest request, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.RateRecipeAsync(recipeId, request.Rating, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                SocialOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        })
+        .AddEndpointFilter<ValidationFilter<RatingRequest>>();
+
         group.MapPost("/comments", async (Guid recipeId, CommentRequest request, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var result = await social.AddCommentAsync(recipeId, request.Content, GetUserId(user), cancellationToken);
@@ -129,6 +166,21 @@ public static class SocialEndpoints
                 SocialOutcome.Forbidden => Results.Forbid(),
                 _ => Results.NotFound(),
             };
+        });
+
+        // open-loops slice 1: comment likes, same idempotent-toggle contract as recipe likes
+        // (204 for the end state, not for whether a row changed). Authenticated only — the
+        // fallback policy handles that, since nothing here says AllowAnonymous.
+        group.MapPost("/{commentId:guid}/likes", async (Guid commentId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.LikeCommentAsync(commentId, GetUserId(user), cancellationToken);
+            return ToNoContent(result);
+        });
+
+        group.MapDelete("/{commentId:guid}/likes", async (Guid commentId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.UnlikeCommentAsync(commentId, GetUserId(user), cancellationToken);
+            return ToNoContent(result);
         });
     }
 

@@ -433,7 +433,163 @@ public class SocialInteractionEndpointsTests(IntegrationTestFactory factory) : I
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // --- comment likes (open-loops slice 1) -----------------------------------------------
+
+    [Fact]
+    public async Task LikeComment_CommentByAnotherUser_Returns204AndAwardsTheCommenter()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        var commenter = await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Made this twice already.");
+        var before = await RankOfAsync(commenterClient, commenter.UserId);
+
+        var likerClient = factory.CreateClient();
+        var liker = await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+
+        var response = await likerClient.PostAsync($"/comments/{comment.Id}/likes", null);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        // +1 goes to the COMMENT's author, not the recipe's.
+        Assert.Equal(before + 1, await RankOfAsync(commenterClient, commenter.UserId));
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.True(await db.CommentLikes.AnyAsync(cl => cl.UserId == liker.UserId && cl.CommentId == comment.Id));
+    }
+
+    [Fact]
+    public async Task LikeComment_Twice_IsIdempotentAndAwardsOnce()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        var commenter = await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Second this.");
+        var before = await RankOfAsync(commenterClient, commenter.UserId);
+
+        var likerClient = factory.CreateClient();
+        var liker = await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        await likerClient.PostAsync($"/comments/{comment.Id}/likes", null);
+        var second = await likerClient.PostAsync($"/comments/{comment.Id}/likes", null);
+
+        Assert.Equal(HttpStatusCode.NoContent, second.StatusCode);
+        Assert.Equal(before + 1, await RankOfAsync(commenterClient, commenter.UserId));
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Equal(1, await db.CommentLikes.CountAsync(cl => cl.UserId == liker.UserId && cl.CommentId == comment.Id));
+    }
+
+    [Fact]
+    public async Task UnlikeComment_RealTransition_ReversesTheAward()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        var commenter = await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Worth the wait.");
+        var before = await RankOfAsync(commenterClient, commenter.UserId);
+
+        var likerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        await likerClient.PostAsync($"/comments/{comment.Id}/likes", null);
+        await likerClient.DeleteAsync($"/comments/{comment.Id}/likes");
+
+        Assert.Equal(before, await RankOfAsync(commenterClient, commenter.UserId));
+    }
+
+    [Fact]
+    public async Task UnlikeComment_NothingLiked_IsIdempotentAndLeavesRankAlone()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        var commenter = await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Nothing here yet.");
+        var before = await RankOfAsync(commenterClient, commenter.UserId);
+
+        var likerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        var response = await likerClient.DeleteAsync($"/comments/{comment.Id}/likes");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(before, await RankOfAsync(commenterClient, commenter.UserId));
+    }
+
+    [Fact]
+    public async Task LikeComment_OwnComment_NeverAwards()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+        var comment = await AddCommentAsync(ownerClient, recipe.Id, "Note to self: less salt.");
+        var before = await RankOfAsync(ownerClient, owner.UserId);
+
+        await ownerClient.PostAsync($"/comments/{comment.Id}/likes", null);
+
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+    }
+
+    [Fact]
+    public async Task LikeComment_OnNonVisibleRecipe_Returns404()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient, RecipeVisibility.Private);
+        var comment = await AddCommentAsync(ownerClient, recipe.Id, "Only I can see this.");
+
+        var otherClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+
+        var response = await otherClient.PostAsync($"/comments/{comment.Id}/likes", null);
+
+        // 404, never 403 — confirming the comment exists would leak the private recipe.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetComments_ReportsLikeCountAndTheCallersOwnFlag()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Counted.");
+
+        var likerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        await likerClient.PostAsync($"/comments/{comment.Id}/likes", null);
+
+        var asLiker = await likerClient.GetFromJsonAsync<CommentListResponse>($"/recipes/{recipe.Id}/comments", TestJson.Options);
+        var mine = Assert.Single(asLiker!.Items, c => c.Id == comment.Id);
+        Assert.Equal(1, mine.LikeCount);
+        Assert.True(mine.LikedByMe);
+
+        var asOwner = await ownerClient.GetFromJsonAsync<CommentListResponse>($"/recipes/{recipe.Id}/comments", TestJson.Options);
+        var theirs = Assert.Single(asOwner!.Items, c => c.Id == comment.Id);
+        Assert.Equal(1, theirs.LikeCount);
+        Assert.False(theirs.LikedByMe);
+    }
+
     // --- helpers ------------------------------------------------------------------------
+
+    private static async Task<int> RankOfAsync(HttpClient client, Guid userId)
+    {
+        var profile = await client.GetFromJsonAsync<UserProfileResponse>($"/users/{userId}", TestJson.Options);
+        return profile!.CookingRank;
+    }
 
     private static async Task<RecipeResponse> CreateRecipeAsync(HttpClient client, RecipeVisibility visibility = RecipeVisibility.Public)
     {

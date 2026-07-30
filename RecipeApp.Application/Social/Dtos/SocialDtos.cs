@@ -10,6 +10,8 @@ namespace RecipeApp.Application.Social.Dtos;
 // { content } shape and one validator), mirroring how chat's SendMessageRequest is shared.
 public record CommentRequest(string Content);
 
+// open-loops slice 1: LikeCount/LikedByMe are live-computed like every other social count
+// (see FeedItemResponse below). LikedByMe is always false for an anonymous caller.
 public record CommentResponse(
     Guid Id,
     string Content,
@@ -17,7 +19,22 @@ public record CommentResponse(
     DateTime? UpdatedAt,
     Guid AuthorId,
     string AuthorUsername,
-    Guid RecipeId);
+    Guid RecipeId,
+    int LikeCount,
+    bool LikedByMe);
+
+// Body of PUT /recipes/{id}/rating. Range is enforced by RatingRequestValidator and,
+// independently, by a check constraint on the CookedRecipes table.
+public record RatingRequest(int Rating);
+
+// State of the caller's own cooked/rated row, returned by POST /recipes/{id}/cooked so the
+// SPA can render the new count without a refetch. TimesCooked is 0 and Rating null once the
+// row has been deleted.
+public record CookedRecipeResponse(
+    Guid RecipeId,
+    int TimesCooked,
+    int? Rating,
+    DateTime? LastCookedAt);
 
 public record CommentListResponse(IReadOnlyList<CommentResponse> Items, string? NextCursor);
 
@@ -48,13 +65,23 @@ public record UpdateProfileRequest(
 
 // The feed's social envelope around each recipe (social-feed plan, cp03). Counts are
 // live-computed correlated subqueries — no denormalized counters until measured slow.
+//
+// open-loops slice 1 extends it with the rating aggregate on the same terms. Note what
+// this deliberately does NOT buy: ordering the catalogue by rating. The keyset cursor
+// carries only (CreatedAt, Id), so sorting on a computed average would break pagination —
+// that needs a denormalized column and a new cursor shape, and is out of scope here.
+// AverageRating is null when nobody has rated, never 0 — 0 is not a rating.
 public record FeedItemResponse(
     RecipeResponse Recipe,
     UserSummaryResponse Author,
     int LikeCount,
     int CommentCount,
     bool LikedByMe,
-    bool SavedByMe);
+    bool SavedByMe,
+    double? AverageRating,
+    int RatingCount,
+    bool CookedByMe,
+    int? MyRating);
 
 // Caller-requested feed mode (?scope= on GET /feed, feed-tabs addition 2026-07-22):
 // ForYou = recent Public recipes by others (the discover query, on demand);
@@ -84,4 +111,8 @@ public record RecipeSocialResponse(
     int LikeCount,
     int CommentCount,
     bool LikedByMe,
-    bool SavedByMe);
+    bool SavedByMe,
+    double? AverageRating,
+    int RatingCount,
+    bool CookedByMe,
+    int? MyRating);
