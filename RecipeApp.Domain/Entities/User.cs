@@ -12,6 +12,17 @@ public class User
     public string? Bio { get; set; }
     public string? ProfileImageUrl { get; set; }
     public int CookingRank { get; set; } = 0;
+    // Governor (stream D): role for the named admin policy. Stored as text, backfilled
+    // to User for existing rows; promotion is config-driven (Admin:Emails) at login.
+    public UserRole Role { get; set; } = UserRole.User;
+    // Governor (stream D): moderation state. A banned account can never log in again and
+    // its live tokens fail the per-request security-state check; a suspension does the
+    // same until the timestamp passes. TokenVersion is the revocation check — it is
+    // stamped into every JWT as "tver" and bumped on ban/suspend, so tokens issued before
+    // the action stop validating immediately instead of living out their expiry.
+    public bool IsBanned { get; set; }
+    public DateTime? SuspendedUntilUtc { get; set; }
+    public int TokenVersion { get; set; }
     // The visibility applied by default to recipes this user creates (edited from
     // account settings — Edit profile). Stored as text, backfilled to Public.
     public RecipeVisibility DefaultRecipeVisibility { get; set; } = RecipeVisibility.Public;

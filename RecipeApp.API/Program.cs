@@ -15,12 +15,17 @@ using RecipeApp.API.Endpoints;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Common;
 using RecipeApp.Application.MealPlanning.Abstractions;
+using RecipeApp.Application.Moderation.Abstractions;
+using RecipeApp.Application.Notifications.Abstractions;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Social.Abstractions;
+using RecipeApp.Domain.Enums;
 using RecipeApp.Infrastructure.Auth;
 using RecipeApp.Infrastructure.Chat;
 using RecipeApp.Infrastructure.Images;
 using RecipeApp.Infrastructure.MealPlanning;
+using RecipeApp.Infrastructure.Moderation;
+using RecipeApp.Infrastructure.Notifications;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
 using RecipeApp.Infrastructure.Social;
@@ -55,6 +60,20 @@ builder.Services.AddScoped<IRecipeService, RecipeService>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();
 builder.Services.AddScoped<IShoppingListService, ShoppingListService>();
+// Governor (stream D): reports (user-facing), the separate admin service (decision D5),
+// and the security-state read behind the revocation check. The memory cache is the
+// singleton store that read caches into.
+builder.Services.AddMemoryCache();
+builder.Services.AddScoped<IReportService, ReportService>();
+builder.Services.AddScoped<IAdminService, AdminService>();
+builder.Services.AddScoped<IUserSecurityStateService, UserSecurityStateService>();
+// Stream C (AI week proposal): the assistant needs IChatMessageCaller, registered by
+// AddChatAssistant below — resolution is lazy, so order here doesn't matter.
+builder.Services.AddScoped<IMealPlanAssistantService, MealPlanAssistantService>();
+builder.Services.AddScoped<IMealPlanProposalService, MealPlanProposalService>();
+// open-loops slice 3: the READ side only — notification writes are staged inline in
+// SocialService so they share a transaction with the interaction that caused them.
+builder.Services.AddScoped<INotificationService, NotificationService>();
 
 // social-feed cp04 (decision I1): uploaded images live behind the IImageStorage seam.
 // Production (Railway is ephemeral-disk) sets ImageStorage:R2:* and stores in Cloudflare
@@ -177,6 +196,49 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateIssuerSigningKey = true,
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSettings.Key)),
         };
+
+        // Governor (stream D, decision D3): the revocation check. A signature-valid,
+        // unexpired JWT is no longer sufficient — the user's live security state must
+        // agree. Fails validation when the account is banned, currently suspended, or the
+        // token's "tver" claim is behind the row's TokenVersion (bumped on ban/suspend),
+        // so banning actually bans instead of waiting out the token's expiry. The read is
+        // one cached three-column lookup (UserSecurityStateService, 60s TTL, invalidated
+        // by admin actions), so the per-request cost is a cache hit.
+        //
+        // Tokens issued before stream D carry no "tver" claim; they read as version 0,
+        // which matches the column's backfill default — existing sessions survive the
+        // deploy and revocation still catches them the moment their user is actioned.
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = async context =>
+            {
+                var sub = context.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+                    ?? context.Principal?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+                if (!Guid.TryParse(sub, out var userId))
+                {
+                    context.Fail("Token carries no usable subject.");
+                    return;
+                }
+
+                var securityState = context.HttpContext.RequestServices.GetRequiredService<IUserSecurityStateService>();
+                var state = await securityState.GetAsync(userId, context.HttpContext.RequestAborted);
+                if (state is null)
+                {
+                    context.Fail("Unknown user.");
+                    return;
+                }
+
+                var claimedVersion = int.TryParse(
+                    context.Principal?.FindFirst(JwtTokenService.TokenVersionClaim)?.Value, out var v) ? v : 0;
+
+                if (state.IsBanned
+                    || (state.SuspendedUntilUtc is DateTime suspendedUntil && suspendedUntil > DateTime.UtcNow)
+                    || claimedVersion != state.TokenVersion)
+                {
+                    context.Fail("Token has been revoked.");
+                }
+            },
+        };
     });
 
 builder.Services.AddAuthorization(options =>
@@ -184,6 +246,12 @@ builder.Services.AddAuthorization(options =>
     options.FallbackPolicy = new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
         .Build();
+
+    // Governor (stream D): the named admin policy — additive on top of deny-by-default.
+    // The role claim is written as ClaimTypes.Role at token issue, which is what
+    // RequireRole reads after the JWT handler's inbound claim-type mapping.
+    options.AddPolicy(AuthorizationPolicies.AdminOnly, policy =>
+        policy.RequireRole(nameof(UserRole.Admin)));
 });
 
 var app = builder.Build();
@@ -284,6 +352,9 @@ app.MapChatEndpoints();
 app.MapSocialEndpoints();
 app.MapImageEndpoints();
 app.MapMealPlanEndpoints();
+app.MapReportEndpoints();
+app.MapAdminEndpoints();
+app.MapNotificationEndpoints();
 
 // Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
 // fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.

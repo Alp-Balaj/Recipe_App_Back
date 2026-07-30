@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
 using RecipeApp.Application.Chat.Abstractions;
+using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Infrastructure.Persistence;
 using Testcontainers.PostgreSql;
 
@@ -71,6 +72,11 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             // GeminiMessageCaller registration is never invoked, so no key check fires.)
             services.RemoveAll<IChatAssistantService>();
             services.AddScoped<IChatAssistantService, FakeChatAssistantService>();
+
+            // Same for the meal-plan proposal lane (Stream C): the real MealPlanProposalService
+            // under test resolves a deterministic IMealPlanAssistantService instead of Gemini.
+            services.RemoveAll<IMealPlanAssistantService>();
+            services.AddScoped<IMealPlanAssistantService, FakeMealPlanAssistantService>();
 
             // Same dynamic-JSON opt-in as Program.cs/ApplicationDbContextFactory: the jsonb
             // List<> columns (Recipe.Ingredients/Steps/Tags) throw NotSupportedException at

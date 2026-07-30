@@ -41,7 +41,10 @@ public class ChatAssistantService : IChatAssistantService
             ? recentHistory.Skip(recentHistory.Count - MaxHistoryMessages).ToList()
             : recentHistory;
 
-        var call = await _caller.CreateJsonMessageAsync(systemPrompt, history, userMessage, cancellationToken);
+        // cancellationToken is NAMED deliberately: the seam's 4th positional parameter is now
+        // responseSchema (object?), and a CancellationToken passed positionally binds to it
+        // without a compile error — it boxes into object and gets serialized as the schema.
+        var call = await _caller.CreateJsonMessageAsync(systemPrompt, history, userMessage, cancellationToken: cancellationToken);
 
         var parsed = ParseResponse(call.Json);
 

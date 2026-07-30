@@ -44,6 +44,7 @@ public class SocialService : ISocialService
             // someone else. The bump rides the same SaveChanges as the insert, so if this
             // instance loses the concurrent-double-tap race the tracker clear reverts both.
             await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeReceivedLike, cancellationToken);
+            Notify(authorId.Value, currentUserId, NotificationType.RecipeLiked, recipeId: recipeId);
             await SaveIgnoringDuplicateAsync(cancellationToken);
         }
 
@@ -70,6 +71,7 @@ public class SocialService : ISocialService
         if (deleted > 0)
         {
             await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeReceivedLike, cancellationToken);
+            await WithdrawUnreadNotificationAsync(authorId.Value, currentUserId, NotificationType.RecipeLiked, cancellationToken, recipeId: recipeId);
             await _db.SaveChangesAsync(cancellationToken);
         }
 
@@ -176,6 +178,7 @@ public class SocialService : ISocialService
         // Comments aren't idempotent — each new comment by a non-author awards again (and its
         // deletion reverses). Bump rides the same SaveChanges as the insert.
         await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeReceivedComment, cancellationToken);
+        Notify(authorId.Value, currentUserId, NotificationType.RecipeCommented, recipeId: recipeId, commentId: comment.Id);
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User {UserId} commented on recipe {RecipeId}.", currentUserId, recipeId);
@@ -302,6 +305,13 @@ public class SocialService : ISocialService
         // guard fire exactly when the award was skipped (author commenting on their own
         // recipe), so a self-comment's deletion never docks the author.
         await RevertAuthorAsync(recipe.CreatedByUserId, comment.UserId, RankEvent.RecipeReceivedComment, cancellationToken);
+        // No explicit notification withdrawal here: Notification.CommentId cascades, so
+        // deleting the comment removes every notification about it — the "commented on
+        // your recipe" line AND any "liked your comment" ones. That is deliberately
+        // stronger than the unread-only rule the unlike/unfollow paths use: those undo an
+        // ACTION and leave read history intact, whereas this destroys the SUBJECT, and a
+        // notification pointing at a comment that no longer exists is not history, it is a
+        // dead link.
         await _db.SaveChangesAsync(cancellationToken);
 
         return SocialResult<bool>.Success(true);
@@ -324,6 +334,7 @@ public class SocialService : ISocialService
             // Gamification: the COMMENT's author earns CommentReceivedLike (+1) — not the
             // recipe's author. This is the call site that makes the enum member reachable.
             await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.CommentReceivedLike, cancellationToken);
+            Notify(authorId.Value, currentUserId, NotificationType.CommentLiked, commentId: commentId);
             await SaveIgnoringDuplicateAsync(cancellationToken);
         }
 
@@ -345,6 +356,7 @@ public class SocialService : ISocialService
         if (deleted > 0)
         {
             await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.CommentReceivedLike, cancellationToken);
+            await WithdrawUnreadNotificationAsync(authorId.Value, currentUserId, NotificationType.CommentLiked, cancellationToken, commentId: commentId);
             await _db.SaveChangesAsync(cancellationToken);
         }
 
@@ -516,6 +528,8 @@ public class SocialService : ISocialService
         if (!alreadyFollowing)
         {
             _db.UserFollows.Add(new UserFollow { FollowerId = currentUserId, FollowingId = targetUserId });
+            // The followed user is the recipient; no recipe or comment context applies.
+            Notify(targetUserId, currentUserId, NotificationType.UserFollowed);
             await SaveIgnoringDuplicateAsync(cancellationToken);
             _logger.LogInformation("User {UserId} followed user {TargetUserId}.", currentUserId, targetUserId);
         }
@@ -530,9 +544,17 @@ public class SocialService : ISocialService
             return SocialResult<bool>.NotFound();
         }
 
-        await _db.UserFollows
+        var removed = await _db.UserFollows
             .Where(f => f.FollowerId == currentUserId && f.FollowingId == targetUserId)
             .ExecuteDeleteAsync(cancellationToken);
+
+        // Only a real follow -> unfollow transition withdraws anything; a no-op unfollow
+        // leaves an unrelated earlier notification alone.
+        if (removed > 0)
+        {
+            await WithdrawUnreadNotificationAsync(targetUserId, currentUserId, NotificationType.UserFollowed, cancellationToken);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
         return SocialResult<bool>.Success(true);
     }
@@ -925,6 +947,68 @@ public class SocialService : ISocialService
         {
             author.CookingRank = RankingService.RevertRank(author.CookingRank, rankEvent);
         }
+    }
+
+    // --- open-loops slice 3: notification fan-out ----------------------------------------
+    //
+    // Staged, never saved here — the caller's SaveChanges commits the notification in the
+    // same transaction as the interaction that caused it, so a like and its notification
+    // cannot half-commit. Exactly the contract AwardAuthorAsync already has, and the reason
+    // these are private helpers rather than a second injected service.
+    //
+    // The self-guard is the same one the awards use: acting on your own content notifies
+    // nobody. It is checked here rather than at each call site so a future call site cannot
+    // forget it.
+    private void Notify(
+        Guid recipientId,
+        Guid actorId,
+        NotificationType type,
+        Guid? recipeId = null,
+        Guid? commentId = null)
+    {
+        if (recipientId == actorId)
+        {
+            return;
+        }
+
+        _db.Notifications.Add(new Notification
+        {
+            Id = Guid.NewGuid(),
+            RecipientId = recipientId,
+            ActorId = actorId,
+            Type = type,
+            RecipeId = recipeId,
+            CommentId = commentId,
+        });
+    }
+
+    // The reverse transition: an unlike/unfollow withdraws the notification it created —
+    // but only if it is still UNREAD. Once someone has seen "X liked your recipe", that
+    // happened; deleting it would rewrite history and make the unread count drift against
+    // a list the user already read. Staged like Notify, committed by the caller.
+    private async Task WithdrawUnreadNotificationAsync(
+        Guid recipientId,
+        Guid actorId,
+        NotificationType type,
+        CancellationToken cancellationToken,
+        Guid? recipeId = null,
+        Guid? commentId = null)
+    {
+        if (recipientId == actorId)
+        {
+            return;
+        }
+
+        var pending = await _db.Notifications
+            .Where(n => n.RecipientId == recipientId
+                && n.ActorId == actorId
+                && n.Type == type
+                && n.RecipeId == recipeId
+                && n.CommentId == commentId
+                && n.ReadAt == null)
+            .ToListAsync(cancellationToken);
+
+        _db.Notifications.RemoveRange(pending);
     }
 
     // Idempotency under races (plan decision): two concurrent likes/saves/follows both pass
