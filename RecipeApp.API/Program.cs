@@ -55,6 +55,10 @@ builder.Services.AddScoped<IRecipeService, RecipeService>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();
 builder.Services.AddScoped<IShoppingListService, ShoppingListService>();
+// Stream C (AI week proposal): the assistant needs IChatMessageCaller, registered by
+// AddChatAssistant below — resolution is lazy, so order here doesn't matter.
+builder.Services.AddScoped<IMealPlanAssistantService, MealPlanAssistantService>();
+builder.Services.AddScoped<IMealPlanProposalService, MealPlanProposalService>();
 
 // social-feed cp04 (decision I1): uploaded images live behind the IImageStorage seam.
 // Production (Railway is ephemeral-disk) sets ImageStorage:R2:* and stores in Cloudflare

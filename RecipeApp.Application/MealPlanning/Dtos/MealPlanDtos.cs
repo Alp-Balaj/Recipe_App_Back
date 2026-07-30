@@ -37,6 +37,19 @@ public record MealPlanResponse(
     DateTime CreatedAt,
     IReadOnlyList<MealPlanEntryResponse> Entries);
 
+// --- AI week proposal (Stream C, D2 = propose-then-accept) ----------------------------
+// The proposal is READ-ONLY wire data: the client renders it and writes only the slots the
+// user accepts, through the existing POST /meal-plans/{id}/entries. Slots reuse
+// MealPlanEntryRecipeSummary so a proposed card renders exactly like a planned one.
+
+public record ProposeWeekRequest(DateTime WeekStartDate);
+
+public record ProposedSlotResponse(DayOfWeek DayOfWeek, MealType MealType, MealPlanEntryRecipeSummary Recipe);
+
+// Slots is Monday-first, Breakfast/Lunch/Dinner within a day. Empty is a valid proposal:
+// the week is already full, or the caller has no visible recipes to ground on.
+public record ProposeWeekResponse(DateTime WeekStartDate, IReadOnlyList<ProposedSlotResponse> Slots);
+
 // --- shopping list ---------------------------------------------------------------------
 // ShoppingListItemResponse is the shape AddManualAsync (IShoppingListService) still returns
 // for a manually-added row. The list-of-rows request/response DTOs that used to live here

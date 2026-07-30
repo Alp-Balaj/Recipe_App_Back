@@ -26,6 +26,7 @@ public class ChatAssistantServiceTests
             string systemPrompt,
             IReadOnlyList<ChatHistoryItem> history,
             string userMessage,
+            object? responseSchema = null,
             CancellationToken cancellationToken = default)
         {
             CapturedSystemPrompt = systemPrompt;

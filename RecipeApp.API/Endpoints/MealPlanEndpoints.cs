@@ -114,6 +114,26 @@ public static class MealPlanEndpoints
                 _ => Results.NotFound(),
             };
         });
+
+        // AI week proposal (Stream C, D2 = propose-then-accept): READ-ONLY. The model fills
+        // only the week's open Breakfast/Lunch/Dinner slots from a grounded candidate set;
+        // nothing is written here — accepted slots go through POST /{id}/entries above, so
+        // the slot 409 and WeekStart rules keep a single write path. Mapped outside the meal
+        // group because each call is paid LLM traffic: it rides the chat lane's tight budget
+        // (20/min), not Meal's 100/min.
+        app.MapPost("/meal-plans/propose-week", async (ProposeWeekRequest request, IMealPlanProposalService proposals,
+            ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await proposals.ProposeWeekAsync(request, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                MealPlanOutcome.Success => Results.Ok(result.Value),
+                MealPlanOutcome.AssistantUnavailable => AssistantUnavailable(),
+                _ => Results.NotFound(),
+            };
+        })
+        .RequireRateLimiting(RateLimitPolicies.Chat)
+        .AddEndpointFilter<ValidationFilter<ProposeWeekRequest>>();
     }
 
     private static void MapShoppingListEndpoints(WebApplication app)
@@ -219,4 +239,12 @@ public static class MealPlanEndpoints
             statusCode: StatusCodes.Status409Conflict,
             title: "Conflict",
             detail: detail);
+
+    // Mirrors ChatEndpoints.AssistantUnavailable: the LLM failed, nothing was written, retry
+    // is safe. 502 (bad gateway), not 500 — the app is fine, the upstream assistant is not.
+    private static IResult AssistantUnavailable() =>
+        Results.Problem(
+            statusCode: StatusCodes.Status502BadGateway,
+            title: "The planning assistant is temporarily unavailable.",
+            detail: "The assistant could not propose a week. Nothing was changed — please try again.");
 }
