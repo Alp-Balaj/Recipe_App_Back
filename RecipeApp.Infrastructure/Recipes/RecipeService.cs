@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using NpgsqlTypes;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
@@ -104,6 +105,24 @@ public class RecipeService : IRecipeService
             recipes = recipes.Where(r => r.Tags.Contains(tag));
         }
 
+        // Full-text search (open-loops slice 2) over title + description + ingredient names,
+        // against the stored generated tsvector column configured in ApplicationDbContext.
+        //
+        // websearch_to_tsquery is the parser to use for user input: it accepts whatever
+        // someone types — bare words, "quoted phrases", or/-negation — and NEVER throws on
+        // malformed input, unlike to_tsquery. So there is nothing to escape here, which is
+        // also why this is not the ILIKE path where % and _ would need neutralising.
+        //
+        // Composed AFTER the visibility predicate like every other filter: it can only
+        // narrow. A private recipe is not findable by another caller, by construction.
+        if (!string.IsNullOrWhiteSpace(query.Search))
+        {
+            var term = query.Search.Trim();
+            recipes = recipes.Where(r =>
+                EF.Property<NpgsqlTsVector>(r, "SearchVector")
+                    .Matches(EF.Functions.WebSearchToTsQuery("english", term)));
+        }
+
         if (query.Cursor is not null)
         {
             var cursorCreatedAt = query.Cursor.CreatedAt;
@@ -117,6 +136,11 @@ public class RecipeService : IRecipeService
 
         // limit + 1: the extra row only signals that a further page exists; it is trimmed
         // from the response, and the last returned item becomes the next cursor.
+        //
+        // Ordering stays CreatedAt DESC even for a search — deliberately, not by omission.
+        // RecipeListCursor carries only (CreatedAt, Id), so ordering by ts_rank would make
+        // the cursor unable to describe a position in the result set and pagination would
+        // silently repeat or skip rows. Relevance ranking needs a new cursor shape first.
         var rows = await recipes
             .OrderByDescending(r => r.CreatedAt)
             .ThenByDescending(r => r.Id)

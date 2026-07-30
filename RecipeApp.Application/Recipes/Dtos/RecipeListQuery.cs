@@ -18,4 +18,8 @@ public record RecipeListQuery(
     IReadOnlyList<string> Tags,
     RecipeListCursor? Cursor,
     int Limit,
-    Guid? OwnedByUserId = null);
+    Guid? OwnedByUserId = null,
+    // open-loops slice 2. Appended last with a default, per this record's convention, so
+    // existing constructions keep compiling. Free text: the backend hands it to
+    // websearch_to_tsquery, which tolerates anything a user can type.
+    string? Search = null);

@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -14,9 +15,11 @@ using RecipeApp.Infrastructure.Persistence;
 namespace RecipeApp.Infrastructure.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260730092304_RecipeSearchVector")]
+    partial class RecipeSearchVector
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -267,57 +270,6 @@ namespace RecipeApp.Infrastructure.Migrations
                         .IsDescending(false, true, true);
 
                     b.ToTable("Comments");
-                });
-
-            modelBuilder.Entity("RecipeApp.Domain.Entities.RecipeInteractions.CommentLike", b =>
-                {
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("CommentId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("UserId", "CommentId");
-
-                    b.HasIndex("CommentId");
-
-                    b.ToTable("CommentLikes");
-                });
-
-            modelBuilder.Entity("RecipeApp.Domain.Entities.RecipeInteractions.CookedRecipe", b =>
-                {
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("RecipeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("FirstCookedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("LastCookedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime?>("RatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int?>("Rating")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("TimesCooked")
-                        .HasColumnType("integer");
-
-                    b.HasKey("UserId", "RecipeId");
-
-                    b.HasIndex("RecipeId");
-
-                    b.ToTable("CookedRecipes", t =>
-                        {
-                            t.HasCheckConstraint("CK_CookedRecipes_Rating_Range", "\"Rating\" IS NULL OR (\"Rating\" BETWEEN 1 AND 5)");
-                        });
                 });
 
             modelBuilder.Entity("RecipeApp.Domain.Entities.RecipeInteractions.Like", b =>
@@ -597,44 +549,6 @@ namespace RecipeApp.Infrastructure.Migrations
                     b.Navigation("User");
                 });
 
-            modelBuilder.Entity("RecipeApp.Domain.Entities.RecipeInteractions.CommentLike", b =>
-                {
-                    b.HasOne("RecipeApp.Domain.Entities.RecipeInteractions.Comment", "Comment")
-                        .WithMany("Likes")
-                        .HasForeignKey("CommentId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("RecipeApp.Domain.Entities.User", "User")
-                        .WithMany("CommentLikes")
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Comment");
-
-                    b.Navigation("User");
-                });
-
-            modelBuilder.Entity("RecipeApp.Domain.Entities.RecipeInteractions.CookedRecipe", b =>
-                {
-                    b.HasOne("RecipeApp.Domain.Entities.Recipe", "Recipe")
-                        .WithMany("CookedBy")
-                        .HasForeignKey("RecipeId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("RecipeApp.Domain.Entities.User", "User")
-                        .WithMany("CookedRecipes")
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Recipe");
-
-                    b.Navigation("User");
-                });
-
             modelBuilder.Entity("RecipeApp.Domain.Entities.RecipeInteractions.Like", b =>
                 {
                     b.HasOne("RecipeApp.Domain.Entities.Recipe", "Recipe")
@@ -734,8 +648,6 @@ namespace RecipeApp.Infrastructure.Migrations
                 {
                     b.Navigation("Comments");
 
-                    b.Navigation("CookedBy");
-
                     b.Navigation("Likes");
 
                     b.Navigation("MealPlanEntries");
@@ -743,20 +655,11 @@ namespace RecipeApp.Infrastructure.Migrations
                     b.Navigation("SavedByUsers");
                 });
 
-            modelBuilder.Entity("RecipeApp.Domain.Entities.RecipeInteractions.Comment", b =>
-                {
-                    b.Navigation("Likes");
-                });
-
             modelBuilder.Entity("RecipeApp.Domain.Entities.User", b =>
                 {
                     b.Navigation("ChatMessages");
 
-                    b.Navigation("CommentLikes");
-
                     b.Navigation("Comments");
-
-                    b.Navigation("CookedRecipes");
 
                     b.Navigation("CreatedRecipes");
 
