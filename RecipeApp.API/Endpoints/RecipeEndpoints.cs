@@ -37,13 +37,14 @@ public static class RecipeEndpoints
             string[]? tags,
             string? cursor,
             int? limit,
+            string? search,
             IRecipeService recipeService,
             ClaimsPrincipal user,
             CancellationToken cancellationToken) =>
         {
             var userId = GetOptionalUserId(user);
 
-            if (!TryResolveListQuery(cuisine, difficulty, tags, cursor, limit, ownedByUserId: null, out var query, out var error))
+            if (!TryResolveListQuery(cuisine, difficulty, tags, cursor, limit, ownedByUserId: null, search, out var query, out var error))
             {
                 return error!;
             }
@@ -74,13 +75,14 @@ public static class RecipeEndpoints
             string[]? tags,
             string? cursor,
             int? limit,
+            string? search,
             IRecipeService recipeService,
             ClaimsPrincipal user,
             CancellationToken cancellationToken) =>
         {
             var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
-            if (!TryResolveListQuery(cuisine, difficulty, tags, cursor, limit, ownedByUserId: userId, out var query, out var error))
+            if (!TryResolveListQuery(cuisine, difficulty, tags, cursor, limit, ownedByUserId: userId, search, out var query, out var error))
             {
                 return error!;
             }
@@ -164,6 +166,7 @@ public static class RecipeEndpoints
         string? cursor,
         int? limit,
         Guid? ownedByUserId,
+        string? search,
         out RecipeListQuery? query,
         out IResult? error)
     {
@@ -209,7 +212,12 @@ public static class RecipeEndpoints
         }
         effectiveLimit = Math.Min(effectiveLimit, MaxPageSize);
 
-        query = new RecipeListQuery(cuisine, difficultyFilter, tags ?? [], decodedCursor, effectiveLimit, ownedByUserId);
+        // Search needs no validation of its own: websearch_to_tsquery accepts any string
+        // without throwing, so there is no malformed-input 400 to raise here. A blank or
+        // whitespace-only term collapses to null so it does not become a no-op predicate.
+        var searchTerm = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
+
+        query = new RecipeListQuery(cuisine, difficultyFilter, tags ?? [], decodedCursor, effectiveLimit, ownedByUserId, searchTerm);
         return true;
     }
 

@@ -1,4 +1,5 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using NpgsqlTypes;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Entities.RecipeInteractions;
 
@@ -85,6 +86,38 @@ public class ApplicationDbContext : DbContext
         builder.Entity<Recipe>()
             .HasIndex(r => new { r.CreatedAt, r.Id })
             .IsDescending();
+
+        // ── Full-text search (open-loops slice 2) ────────────────────────────────────
+        //
+        // A SHADOW property, not a property on Recipe: RecipeApp.Domain has zero package
+        // references and NpgsqlTsVector would drag Npgsql into it. Nothing outside this
+        // file and the search predicate in RecipeService needs to know the column exists.
+        //
+        // Why a stored generated column rather than an expression index: Postgres keeps it
+        // in sync on every write with no application code, and the query planner matches it
+        // without the generated SQL having to reproduce the index expression byte-for-byte.
+        //
+        // Ingredient names come out of the jsonb through jsonb_path_query_array. Its ::text
+        // render is ["flour","sugar"] — the brackets and quotes are punctuation to_tsvector
+        // discards, so this indexes the names and nothing else. The jsonpath is '$[*].Name'
+        // with a CAPITAL N: Npgsql's dynamic JSON serializes CLR property names verbatim.
+        // All three functions are IMMUTABLE, which a stored generated column requires.
+        builder.Entity<Recipe>()
+            .Property<NpgsqlTsVector>("SearchVector")
+            .HasComputedColumnSql(
+                """
+                to_tsvector('english',
+                    coalesce("Title", '') || ' ' ||
+                    coalesce("Description", '') || ' ' ||
+                    coalesce(jsonb_path_query_array("Ingredients", '$[*].Name')::text, ''))
+                """,
+                stored: true);
+
+        // GIN is the right access method for a tsvector: the query is "does this document
+        // contain these lexemes", which is exactly the inverted-index question.
+        builder.Entity<Recipe>()
+            .HasIndex("SearchVector")
+            .HasMethod("gin");
 
         builder.Entity<UserFollow>()
             .HasKey(uf => new { uf.FollowerId, uf.FollowingId });
