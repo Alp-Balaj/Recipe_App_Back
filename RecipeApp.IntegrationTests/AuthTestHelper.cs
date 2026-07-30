@@ -27,7 +27,7 @@ public static class AuthTestHelper
             new LoginRequest(username, password));
         loginResponse.EnsureSuccessStatusCode();
 
-        var auth = await loginResponse.Content.ReadFromJsonAsync<AuthResponse>()
+        var auth = await loginResponse.Content.ReadFromJsonAsync<AuthResponse>(TestJson.Options)
             ?? throw new InvalidOperationException("Login returned an empty body.");
 
         client.DefaultRequestHeaders.Authorization =

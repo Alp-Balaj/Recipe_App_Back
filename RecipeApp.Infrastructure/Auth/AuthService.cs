@@ -1,9 +1,11 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Auth;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
 using RecipeApp.Domain.Entities;
+using RecipeApp.Domain.Enums;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.Auth;
@@ -13,13 +15,15 @@ public class AuthService : IAuthService
     private readonly ApplicationDbContext _db;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenService _jwtTokenService;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<AuthService> _logger;
 
-    public AuthService(ApplicationDbContext db, IPasswordHasher passwordHasher, IJwtTokenService jwtTokenService, ILogger<AuthService> logger)
+    public AuthService(ApplicationDbContext db, IPasswordHasher passwordHasher, IJwtTokenService jwtTokenService, IConfiguration configuration, ILogger<AuthService> logger)
     {
         _db = db;
         _passwordHasher = passwordHasher;
         _jwtTokenService = jwtTokenService;
+        _configuration = configuration;
         _logger = logger;
     }
 
@@ -76,15 +80,50 @@ public class AuthService : IAuthService
             return AuthResult.Failure("Invalid username/email or password.");
         }
 
+        // Governor (stream D): moderation gates sit AFTER password verification so the
+        // failure can't be used to probe whether an account exists without its password.
+        if (user.IsBanned)
+        {
+            _logger.LogWarning("Banned user {UserId} attempted to log in.", user.Id);
+            return AuthResult.Failure("This account has been banned.");
+        }
+
+        if (user.SuspendedUntilUtc is DateTime suspendedUntil && suspendedUntil > DateTime.UtcNow)
+        {
+            _logger.LogWarning("Suspended user {UserId} attempted to log in.", user.Id);
+            return AuthResult.Failure("This account is suspended.");
+        }
+
+        // Admin bootstrap (stream D): Admin:Emails names accounts promoted on their next
+        // login — config-driven so no seed data or startup DB write is needed (the test
+        // factory starts the host before migrating, so a startup seed would crash there).
+        // Additive only: removal from the list never demotes.
+        if (user.Role != UserRole.Admin && IsConfiguredAdmin(user.Email))
+        {
+            user.Role = UserRole.Admin;
+            await _db.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("User {UserId} promoted to Admin via Admin:Emails.", user.Id);
+        }
+
         _logger.LogInformation("User {UserId} logged in.", user.Id);
         return AuthResult.Success(ToAuthResponse(user));
+    }
+
+    // Accepts either a config array (Admin:Emails:0=...) or one delimited string
+    // (Admin__Emails="a@x;b@y"), because Railway env vars are flat strings.
+    private bool IsConfiguredAdmin(string email)
+    {
+        var emails = _configuration.GetSection("Admin:Emails").Get<string[]>()
+            ?? _configuration["Admin:Emails"]?.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            ?? [];
+        return emails.Contains(email, StringComparer.OrdinalIgnoreCase);
     }
 
     public async Task<MeResponse?> GetMeAsync(Guid userId, CancellationToken cancellationToken = default)
     {
         return await _db.Users
             .Where(u => u.Id == userId)
-            .Select(u => new MeResponse(u.Id, u.Username))
+            .Select(u => new MeResponse(u.Id, u.Username, u.Role))
             .SingleOrDefaultAsync(cancellationToken);
     }
 
@@ -94,6 +133,6 @@ public class AuthService : IAuthService
     private AuthResponse ToAuthResponse(User user)
     {
         var (token, expiresAtUtc) = _jwtTokenService.GenerateToken(user);
-        return new AuthResponse(token, expiresAtUtc, user.Id, user.Username);
+        return new AuthResponse(token, expiresAtUtc, user.Id, user.Username, user.Role);
     }
 }

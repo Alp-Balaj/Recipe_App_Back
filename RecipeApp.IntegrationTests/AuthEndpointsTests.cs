@@ -25,7 +25,7 @@ public class AuthEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
             new LoginRequest(username, password));
 
         Assert.Equal(HttpStatusCode.OK, loginResponse.StatusCode);
-        var body = await loginResponse.Content.ReadFromJsonAsync<AuthResponse>();
+        var body = await loginResponse.Content.ReadFromJsonAsync<AuthResponse>(TestJson.Options);
         Assert.NotNull(body);
         Assert.False(string.IsNullOrWhiteSpace(body!.Token));
         Assert.Equal(username, body.Username);
