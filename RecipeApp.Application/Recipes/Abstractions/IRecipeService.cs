@@ -21,4 +21,11 @@ public interface IRecipeService
     // Soft delete restricted to the owner. RecipeResult<bool> carries no meaningful payload
     // (the endpoint maps Success to 204 No Content); bool is a throwaway T for the generic.
     Task<RecipeResult<bool>> DeleteRecipeAsync(Guid id, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    // task-10 (meal-planning-week-shopping-rework): backs the recipe-form autocomplete.
+    // Distinct ingredient names across all non-deleted recipes (a shared corpus — ingredient
+    // names carry nothing private), prefix-matched case-insensitively on q, capped at 20,
+    // alphabetical. A blank/absent q returns the 20 most common names instead. Doesn't
+    // repair existing groupings — it slows the corpus from diverging further.
+    Task<List<string>> GetIngredientNamesAsync(string? prefix, CancellationToken cancellationToken = default);
 }

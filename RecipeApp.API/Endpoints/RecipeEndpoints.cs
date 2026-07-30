@@ -132,6 +132,19 @@ public static class RecipeEndpoints
                 _ => Results.NotFound(),
             };
         });
+
+        // task-10 (meal-planning-week-shopping-rework): recipe-form autocomplete. A shared
+        // corpus across ALL non-deleted recipes (not just the caller's) — ingredient names
+        // carry nothing private, and a shared corpus is what makes autocomplete converge.
+        // Doesn't require ownership of anything; still behind the global auth fallback (no
+        // AllowAnonymous here), same as the write routes above. On its own Meal rate-limit
+        // lane per the plan.
+        app.MapGet("/ingredients/names", async (string? q, IRecipeService recipeService, CancellationToken cancellationToken) =>
+        {
+            var names = await recipeService.GetIngredientNamesAsync(q, cancellationToken);
+            return Results.Ok(names);
+        })
+        .RequireRateLimiting(RateLimitPolicies.Meal);
     }
 
     // Shared wire-level parsing for the two list routes (GET /recipes and GET /recipes/mine),

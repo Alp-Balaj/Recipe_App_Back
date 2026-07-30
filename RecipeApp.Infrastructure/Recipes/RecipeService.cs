@@ -215,6 +215,76 @@ public class RecipeService : IRecipeService
         return RecipeResult<bool>.Success(true);
     }
 
+    // task-10 (meal-planning-week-shopping-rework): backs the recipe-form autocomplete.
+    // Recipe.Ingredients is a jsonb column (RecipeApp.Domain gotchas) — there is no relational
+    // child table to DISTINCT over, and per the established idiom a jsonb collection can't ride
+    // an anonymous join projection either. So: project just the Ingredients column for a bounded
+    // window of recipes, then distinct/filter/cap in memory.
+    //
+    // IngredientNamesScanCap bounds how many recipes are pulled so this stays predictable as the
+    // corpus grows — most-recently-created first, so the scan favours the current, most likely
+    // to still be typed, vocabulary over long-tail history. 500 recipes is generous for today's
+    // corpus and cheap to project (one jsonb column, no joins); revisit if that changes.
+    private const int IngredientNamesScanCap = 500;
+
+    public async Task<List<string>> GetIngredientNamesAsync(string? prefix, CancellationToken cancellationToken = default)
+    {
+        // Soft-deleted recipes are already excluded by the global query filter (r => !r.IsDeleted).
+        var ingredientLists = await _db.Recipes
+            .OrderByDescending(r => r.CreatedAt)
+            .Take(IngredientNamesScanCap)
+            .Select(r => r.Ingredients)
+            .ToListAsync(cancellationToken);
+
+        // Case-insensitively distinct: "Flour" and "flour" collapse to one suggestion. The
+        // first-encountered casing (scan order = most recent recipe first) is kept as the
+        // display form, tracked alongside how many recipes used that name for the blank-q case.
+        var byKey = new Dictionary<string, (string Display, int Count)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ingredients in ingredientLists)
+        {
+            foreach (var ingredient in ingredients)
+            {
+                var name = ingredient.Name?.Trim();
+                if (string.IsNullOrEmpty(name))
+                {
+                    continue;
+                }
+
+                if (byKey.TryGetValue(name, out var existing))
+                {
+                    byKey[name] = (existing.Display, existing.Count + 1);
+                }
+                else
+                {
+                    byKey[name] = (name, 1);
+                }
+            }
+        }
+
+        IEnumerable<(string Display, int Count)> matches = byKey.Values;
+        if (!string.IsNullOrWhiteSpace(prefix))
+        {
+            // Prefix given: alphabetical selection AND display — the alphabetically-first 20
+            // matches are the 20 returned.
+            return matches
+                .Where(c => c.Display.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(c => c.Display, StringComparer.OrdinalIgnoreCase)
+                .Take(20)
+                .Select(c => c.Display)
+                .ToList();
+        }
+
+        // Blank/absent q: select the 20 most common names first (most recipes using the name
+        // wins), THEN sort the selected 20 alphabetically for stable display.
+        return matches
+            .OrderByDescending(c => c.Count)
+            .ThenBy(c => c.Display, StringComparer.OrdinalIgnoreCase)
+            .Take(20)
+            .Select(c => c.Display)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     // Manual DTO->entity mapping (per 02-01/02-04): a private method colocated with the
     // service, named To<Entity>(dto). CreatedByUserId is passed in explicitly from the
     // authenticated user's JWT claims, never taken from the request body.
