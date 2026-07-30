@@ -14,8 +14,10 @@ public sealed class GeminiMessageCaller : IChatMessageCaller
     // Gemini's schema is a Google-flavored OpenAPI subset: type values are UPPERCASE enums and
     // `additionalProperties` is unsupported (simply omitted). Ids still arrive as strings; the
     // Guid.TryParse + candidate-membership filter in ChatAssistantService already guards
-    // hallucinated/malformed ids, so the looser schema costs nothing.
-    private static readonly object ResponseSchema = new
+    // hallucinated/malformed ids, so the looser schema costs nothing. This is the DEFAULT
+    // schema (the chat lane's); callers with a different output shape pass their own via the
+    // responseSchema parameter, in this same dialect.
+    private static readonly object DefaultResponseSchema = new
     {
         type = "OBJECT",
         properties = new
@@ -39,6 +41,7 @@ public sealed class GeminiMessageCaller : IChatMessageCaller
         string systemPrompt,
         IReadOnlyList<ChatHistoryItem> history,
         string userMessage,
+        object? responseSchema = null,
         CancellationToken cancellationToken = default)
     {
         var contents = new List<object>(history.Count + 1);
@@ -59,7 +62,7 @@ public sealed class GeminiMessageCaller : IChatMessageCaller
             generationConfig = new
             {
                 responseMimeType = "application/json",
-                responseSchema = ResponseSchema,
+                responseSchema = responseSchema ?? DefaultResponseSchema,
                 maxOutputTokens = _options.MaxOutputTokens,
                 // No temperature/topP — parity with the old Claude call, which sent neither.
             },

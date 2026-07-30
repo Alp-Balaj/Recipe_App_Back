@@ -21,15 +21,18 @@ public class ChatAssistantServiceTests
 
         public string? CapturedSystemPrompt { get; private set; }
         public IReadOnlyList<ChatHistoryItem>? CapturedHistory { get; private set; }
+        public object? CapturedSchema { get; private set; }
 
         public Task<string> CreateJsonMessageAsync(
             string systemPrompt,
             IReadOnlyList<ChatHistoryItem> history,
             string userMessage,
+            object? responseSchema = null,
             CancellationToken cancellationToken = default)
         {
             CapturedSystemPrompt = systemPrompt;
             CapturedHistory = history;
+            CapturedSchema = responseSchema;
             return Task.FromResult(_json);
         }
     }
@@ -157,5 +160,23 @@ public class ChatAssistantServiceTests
         Assert.Equal(20, caller.CapturedHistory!.Count);
         Assert.Equal("msg 5", caller.CapturedHistory[0].Content);   // oldest 5 dropped
         Assert.Equal("msg 24", caller.CapturedHistory[^1].Content);
+    }
+
+    // Regression (stream C seam change): the seam's 4th positional parameter became
+    // responseSchema (object?), and a CancellationToken passed positionally binds to it
+    // WITHOUT a compile error — it boxes into object and got serialized into the Gemini
+    // request as the schema (caught live: "$.generationConfig.responseSchema.WaitHandle").
+    // The chat lane must always leave the schema null so the caller's default applies.
+    [Fact]
+    public async Task ChatLane_WithRealCancellationToken_LeavesResponseSchemaNull()
+    {
+        var caller = new FakeCaller("""{"reply":"ok","suggestedRecipeIds":[]}""");
+        var service = new ChatAssistantService(caller);
+        using var cts = new CancellationTokenSource();
+
+        await service.GetReplyAsync(
+            "something warm", Array.Empty<ChatHistoryItem>(), TwoCandidates(), Array.Empty<string>(), cts.Token);
+
+        Assert.Null(caller.CapturedSchema);
     }
 }

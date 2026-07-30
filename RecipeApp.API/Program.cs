@@ -57,6 +57,10 @@ builder.Services.AddScoped<IRecipeService, RecipeService>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();
 builder.Services.AddScoped<IShoppingListService, ShoppingListService>();
+// Stream C (AI week proposal): the assistant needs IChatMessageCaller, registered by
+// AddChatAssistant below — resolution is lazy, so order here doesn't matter.
+builder.Services.AddScoped<IMealPlanAssistantService, MealPlanAssistantService>();
+builder.Services.AddScoped<IMealPlanProposalService, MealPlanProposalService>();
 // open-loops slice 3: the READ side only — notification writes are staged inline in
 // SocialService so they share a transaction with the interaction that caused them.
 builder.Services.AddScoped<INotificationService, NotificationService>();
