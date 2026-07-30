@@ -1,6 +1,7 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using NpgsqlTypes;
 using RecipeApp.Domain.Entities;
+using RecipeApp.Domain.Entities.Moderation;
 using RecipeApp.Domain.Entities.RecipeInteractions;
 
 namespace RecipeApp.Infrastructure.Persistence;
@@ -33,6 +34,10 @@ public class ApplicationDbContext : DbContext
     public DbSet<MealPlanEntry> MealPlanEntries => Set<MealPlanEntry>();
     public DbSet<ShoppingListItem> ShoppingListItems => Set<ShoppingListItem>();
     public DbSet<ShoppingListMark> ShoppingListMarks => Set<ShoppingListMark>();
+    // Governor (stream D): the report inbox and the append-only audit log. Both are
+    // queried directly by the admin service, so both are promoted DbSets.
+    public DbSet<Report> Reports => Set<Report>();
+    public DbSet<AuditLogEntry> AuditLog => Set<AuditLogEntry>();
     // open-loops slice 3: the social loop's return path.
     public DbSet<Notification> Notifications => Set<Notification>();
 
@@ -88,6 +93,109 @@ public class ApplicationDbContext : DbContext
             .Property(u => u.DefaultRecipeVisibility)
             .HasConversion<string>()
             .HasDefaultValue(RecipeApp.Domain.Enums.RecipeVisibility.Public);
+
+        // ── Governor (stream D): roles, moderation state, reports, audit log ─────────
+        //
+        // Role as text (same idiom as every enum), backfilled to User for existing rows.
+        // The three moderation columns default to the "account in good standing" state.
+        builder.Entity<User>()
+            .Property(u => u.Role)
+            .HasConversion<string>()
+            .HasDefaultValue(RecipeApp.Domain.Enums.UserRole.User);
+
+        builder.Entity<User>()
+            .Property(u => u.IsBanned)
+            .HasDefaultValue(false);
+
+        builder.Entity<User>()
+            .Property(u => u.TokenVersion)
+            .HasDefaultValue(0);
+
+        builder.Entity<Report>()
+            .Property(r => r.TargetType)
+            .HasConversion<string>();
+
+        builder.Entity<Report>()
+            .Property(r => r.Reason)
+            .HasConversion<string>();
+
+        builder.Entity<Report>()
+            .Property(r => r.Status)
+            .HasConversion<string>();
+
+        // The snapshot is an excerpt, bounded on write by the report service.
+        builder.Entity<Report>()
+            .Property(r => r.TargetSummary)
+            .HasMaxLength(300)
+            .IsRequired();
+
+        builder.Entity<Report>()
+            .Property(r => r.Details)
+            .HasMaxLength(1000);
+
+        builder.Entity<Report>()
+            .Property(r => r.ResolutionNote)
+            .HasMaxLength(500);
+
+        // Three relationships into User (reporter, target, resolver) — configured
+        // explicitly, with no inverse collections on User, so EF cannot mis-pair them.
+        // Restrict everywhere a row is never hard-deleted (users, recipes — recipes only
+        // soft-delete); SetNull for comments, whose owner path hard-deletes: the report
+        // must survive its target's removal, that is what TargetSummary is for.
+        builder.Entity<Report>()
+            .HasOne(r => r.Reporter)
+            .WithMany()
+            .HasForeignKey(r => r.ReporterId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.Entity<Report>()
+            .HasOne(r => r.TargetUser)
+            .WithMany()
+            .HasForeignKey(r => r.TargetUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.Entity<Report>()
+            .HasOne(r => r.ResolvedByUser)
+            .WithMany()
+            .HasForeignKey(r => r.ResolvedByUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.Entity<Report>()
+            .HasOne(r => r.Recipe)
+            .WithMany()
+            .HasForeignKey(r => r.RecipeId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.Entity<Report>()
+            .HasOne(r => r.Comment)
+            .WithMany()
+            .HasForeignKey(r => r.CommentId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // Backs the admin queue: filter by Status, keyset on (CreatedAt DESC, Id DESC) —
+        // the same list shape as every other keyset lane.
+        builder.Entity<Report>()
+            .HasIndex(r => new { r.Status, r.CreatedAt, r.Id })
+            .IsDescending(false, true, true);
+
+        builder.Entity<AuditLogEntry>()
+            .Property(a => a.Action)
+            .HasConversion<string>();
+
+        builder.Entity<AuditLogEntry>()
+            .Property(a => a.Detail)
+            .HasMaxLength(500);
+
+        builder.Entity<AuditLogEntry>()
+            .HasOne(a => a.ActorUser)
+            .WithMany()
+            .HasForeignKey(a => a.ActorUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // Backs the audit list, newest first.
+        builder.Entity<AuditLogEntry>()
+            .HasIndex(a => new { a.CreatedAt, a.Id })
+            .IsDescending();
 
         builder.Entity<Recipe>()
             .Property(r => r.Ingredients)

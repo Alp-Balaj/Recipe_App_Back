@@ -49,7 +49,7 @@ public class ProfileUpdateEndpointTests(IntegrationTestFactory factory) : IClass
 
         // /auth/me is DB-backed, so the rename is authoritative even though the bearer
         // token still carries the old unique_name claim.
-        var me = await client.GetFromJsonAsync<MeResponse>("/auth/me");
+        var me = await client.GetFromJsonAsync<MeResponse>("/auth/me", TestJson.Options);
         Assert.Equal(newUsername, me!.Username);
     }
 

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
@@ -65,6 +66,10 @@ public class AuthServiceLoginTests
             builder.Ignore<Domain.Entities.MealPlan>();
             builder.Ignore<Domain.Entities.MealPlanEntry>();
             builder.Ignore<Domain.Entities.ShoppingListItem>();
+            // Governor (stream D): the moderation entities reference Recipe/Comment,
+            // both ignored above, so they are carved out with the rest.
+            builder.Ignore<Domain.Entities.Moderation.Report>();
+            builder.Ignore<Domain.Entities.Moderation.AuditLogEntry>();
         }
     }
 
@@ -73,8 +78,9 @@ public class AuthServiceLoginTests
             .UseInMemoryDatabase($"auth-login-tests-{Guid.NewGuid():N}")
             .Options);
 
+    // Empty configuration: no Admin:Emails, so the promotion path stays inert here.
     private static AuthService NewService(ApplicationDbContext db, CountingPasswordHasher hasher) =>
-        new(db, hasher, new FakeJwtTokenService(), NullLogger<AuthService>.Instance);
+        new(db, hasher, new FakeJwtTokenService(), new ConfigurationBuilder().Build(), NullLogger<AuthService>.Instance);
 
     private static User KnownUser(CountingPasswordHasher hasher) => new()
     {
@@ -125,6 +131,94 @@ public class AuthServiceLoginTests
         var wrongPassword = await service.LoginAsync(new LoginRequest("known", "WrongPassword1"));
 
         Assert.Equal(wrongPassword.Error, unknown.Error);
+    }
+
+    // --- Governor (stream D): moderation gates and the admin bootstrap -----------------
+
+    [Fact]
+    public async Task LoginAsync_BannedUser_FailsEvenWithCorrectPassword()
+    {
+        await using var db = NewDb();
+        var hasher = new CountingPasswordHasher();
+        var user = KnownUser(hasher);
+        user.IsBanned = true;
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+        var service = NewService(db, hasher);
+
+        var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
+
+        Assert.False(result.Succeeded);
+    }
+
+    [Fact]
+    public async Task LoginAsync_ActivelySuspendedUser_Fails()
+    {
+        await using var db = NewDb();
+        var hasher = new CountingPasswordHasher();
+        var user = KnownUser(hasher);
+        user.SuspendedUntilUtc = DateTime.UtcNow.AddDays(3);
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+        var service = NewService(db, hasher);
+
+        var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
+
+        Assert.False(result.Succeeded);
+    }
+
+    [Fact]
+    public async Task LoginAsync_ExpiredSuspension_Succeeds()
+    {
+        await using var db = NewDb();
+        var hasher = new CountingPasswordHasher();
+        var user = KnownUser(hasher);
+        user.SuspendedUntilUtc = DateTime.UtcNow.AddDays(-1);
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+        var service = NewService(db, hasher);
+
+        var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
+
+        Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public async Task LoginAsync_ConfiguredAdminEmail_PromotesOnLogin()
+    {
+        await using var db = NewDb();
+        var hasher = new CountingPasswordHasher();
+        var user = KnownUser(hasher);
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:Emails:0"] = "KNOWN@example.com" })
+            .Build();
+        var service = new AuthService(db, hasher, new FakeJwtTokenService(), configuration, NullLogger<AuthService>.Instance);
+
+        var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(Domain.Enums.UserRole.Admin, result.Response!.Role);
+        Assert.Equal(Domain.Enums.UserRole.Admin, (await db.Users.SingleAsync(u => u.Id == user.Id)).Role);
+    }
+
+    [Fact]
+    public async Task LoginAsync_UnlistedEmail_StaysUser()
+    {
+        await using var db = NewDb();
+        var hasher = new CountingPasswordHasher();
+        db.Users.Add(KnownUser(hasher));
+        await db.SaveChangesAsync();
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:Emails:0"] = "someone-else@example.com" })
+            .Build();
+        var service = new AuthService(db, hasher, new FakeJwtTokenService(), configuration, NullLogger<AuthService>.Instance);
+
+        var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(Domain.Enums.UserRole.User, result.Response!.Role);
     }
 
     [Fact]
