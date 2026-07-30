@@ -11,11 +11,15 @@ namespace RecipeApp.Infrastructure.Chat;
 public interface IChatMessageCaller
 {
     // Sends the request and returns the model's raw structured-output JSON text, shaped
-    // { "reply": string, "suggestedRecipeIds": string[] }. Parsing/validation is the caller's
-    // job — this returns the text of the first content part verbatim.
-    Task<string> CreateJsonMessageAsync(
+    // { "reply": string, "suggestedRecipeIds": string[] }, plus the provider-reported token
+    // usage (ai-quotas). Parsing/validation of the JSON is the caller's job — the text of the
+    // first content part is returned verbatim; Usage is null when the provider omitted it.
+    Task<ChatMessageCall> CreateJsonMessageAsync(
         string systemPrompt,
         IReadOnlyList<ChatHistoryItem> history,
         string userMessage,
         CancellationToken cancellationToken = default);
 }
+
+// What one provider call produced: the structured-output text and what it cost.
+public record ChatMessageCall(string Json, ChatTokenUsage? Usage);

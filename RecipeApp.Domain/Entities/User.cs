@@ -39,6 +39,9 @@ public class User
     // Chat history
     public ICollection<ChatMessage> ChatMessages { get; set; } = [];
 
+    // AI calls this user spent (ai-quotas accounting)
+    public ICollection<AiUsageRecord> AiUsageRecords { get; set; } = [];
+
     // Meal plans
     public ICollection<MealPlan> MealPlans { get; set; } = [];
 

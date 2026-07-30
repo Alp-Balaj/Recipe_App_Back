@@ -41,9 +41,9 @@ public class ChatAssistantService : IChatAssistantService
             ? recentHistory.Skip(recentHistory.Count - MaxHistoryMessages).ToList()
             : recentHistory;
 
-        var json = await _caller.CreateJsonMessageAsync(systemPrompt, history, userMessage, cancellationToken);
+        var call = await _caller.CreateJsonMessageAsync(systemPrompt, history, userMessage, cancellationToken);
 
-        var parsed = ParseResponse(json);
+        var parsed = ParseResponse(call.Json);
 
         // Defense against hallucinated ids: structured output guarantees the SHAPE (an array
         // of strings), not semantic validity. Guid.TryParse each returned id and drop any that
@@ -58,7 +58,9 @@ public class ChatAssistantService : IChatAssistantService
             }
         }
 
-        return new ChatAssistantResult(parsed.Reply, suggested);
+        // Token usage rides along untouched (ai-quotas): this class validates the model's
+        // CONTENT; what the call cost is the provider's report and is accounted upstream.
+        return new ChatAssistantResult(parsed.Reply, suggested, call.Usage);
     }
 
     private static RawResponse ParseResponse(string json)

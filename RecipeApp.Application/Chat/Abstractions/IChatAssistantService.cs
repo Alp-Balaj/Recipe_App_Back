@@ -38,5 +38,15 @@ public record ChatCandidateRecipe(
 public record ChatHistoryItem(string Role, string Content);
 
 // The assistant's reply plus the recipe ids it suggested. SuggestedRecipeIds is always a
-// subset of the candidate ids passed in (empty is valid — nothing fit).
-public record ChatAssistantResult(string Reply, IReadOnlyList<Guid> SuggestedRecipeIds);
+// subset of the candidate ids passed in (empty is valid — nothing fit). Usage is the
+// provider-reported token cost of the call (ai-quotas): null when the provider omitted usage
+// metadata, in which case the call is still accounted (at zero tokens) by IAiUsageService.
+public record ChatAssistantResult(
+    string Reply,
+    IReadOnlyList<Guid> SuggestedRecipeIds,
+    ChatTokenUsage? Usage = null);
+
+// Provider-reported token counts for one AI call (ai-quotas). Provider-neutral: prompt and
+// completion mean what every provider means by them; TotalTokens is the provider's own total
+// and can exceed the sum (Gemini 3.x counts thinking tokens there), so budgets sum TotalTokens.
+public record ChatTokenUsage(int PromptTokens, int CompletionTokens, int TotalTokens);

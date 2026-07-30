@@ -29,18 +29,26 @@ public class ChatService : IChatService
 
     private readonly ApplicationDbContext _db;
     private readonly IChatAssistantService _assistant;
+    private readonly IAiUsageService _aiUsage;
     private readonly ILogger<ChatService> _logger;
 
-    public ChatService(ApplicationDbContext db, IChatAssistantService assistant, ILogger<ChatService> logger)
+    public ChatService(ApplicationDbContext db, IChatAssistantService assistant, IAiUsageService aiUsage, ILogger<ChatService> logger)
     {
         _db = db;
         _assistant = assistant;
+        _aiUsage = aiUsage;
         _logger = logger;
     }
 
     public async Task<ChatResult<StartConversationResponse>> StartConversationAsync(
         string content, Guid userId, CancellationToken cancellationToken = default)
     {
+        // ai-quotas: refuse BEFORE the provider call — an exhausted budget must not cost money.
+        if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
+        {
+            return ChatResult<StartConversationResponse>.QuotaExceeded();
+        }
+
         // A brand-new conversation has no prior history.
         var reply = await InvokeAssistantAsync(content, [], userId, cancellationToken);
         if (reply is null)
@@ -64,20 +72,24 @@ public class ChatService : IChatService
         };
         var (userMessage, assistantMessage) = BuildTurnMessages(conversation.Id, userId, content, reply, userCreatedAt, assistantCreatedAt);
 
-        // One SaveChanges persists the conversation AND both messages atomically. If the
-        // assistant had failed above we returned before creating anything — so a failed first
-        // turn never leaves an orphan conversation.
+        // One SaveChanges persists the conversation, both messages AND the usage row (staged
+        // by RecordCall) atomically. If the assistant had failed above we returned before
+        // creating anything — so a failed first turn never leaves an orphan conversation, and
+        // a failed call is never billed against the quota.
         _db.Conversations.Add(conversation);
         _db.ChatMessages.AddRange(userMessage, assistantMessage);
+        _aiUsage.RecordCall(userId, AiUsageLanes.Chat, reply.Usage);
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User {UserId} started conversation {ConversationId}.", userId, conversation.Id);
 
         var suggestions = await HydrateSuggestionsAsync(assistantMessage.SuggestedRecipeIds, userId, cancellationToken);
+        var budget = await _aiUsage.GetBudgetAsync(userId, cancellationToken);
         return ChatResult<StartConversationResponse>.Success(new StartConversationResponse(
             ToConversationResponse(conversation),
             ToMessageResponse(userMessage, []),
-            ToMessageResponse(assistantMessage, suggestions)));
+            ToMessageResponse(assistantMessage, suggestions),
+            ToBudgetResponse(budget)));
     }
 
     public async Task<ChatResult<TurnResponse>> SendMessageAsync(
@@ -87,6 +99,12 @@ public class ChatService : IChatService
         if (conversation is null)
         {
             return ChatResult<TurnResponse>.NotFound();
+        }
+
+        // ai-quotas: after the ownership check (404 semantics stay untouched), before spending.
+        if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
+        {
+            return ChatResult<TurnResponse>.QuotaExceeded();
         }
 
         var history = await BuildHistoryAsync(conversationId, cancellationToken);
@@ -100,15 +118,19 @@ public class ChatService : IChatService
         var assistantCreatedAt = userCreatedAt.AddTicks(10);
         var (userMessage, assistantMessage) = BuildTurnMessages(conversationId, userId, content, reply, userCreatedAt, assistantCreatedAt);
 
-        // Both messages plus the UpdatedAt bump save together — atomic, no half-turn.
+        // Both messages, the UpdatedAt bump and the usage row save together — atomic, no
+        // half-turn, no unbilled turn.
         conversation.UpdatedAt = assistantCreatedAt;
         _db.ChatMessages.AddRange(userMessage, assistantMessage);
+        _aiUsage.RecordCall(userId, AiUsageLanes.Chat, reply.Usage);
         await _db.SaveChangesAsync(cancellationToken);
 
         var suggestions = await HydrateSuggestionsAsync(assistantMessage.SuggestedRecipeIds, userId, cancellationToken);
+        var budget = await _aiUsage.GetBudgetAsync(userId, cancellationToken);
         return ChatResult<TurnResponse>.Success(new TurnResponse(
             ToMessageResponse(userMessage, []),
-            ToMessageResponse(assistantMessage, suggestions)));
+            ToMessageResponse(assistantMessage, suggestions),
+            ToBudgetResponse(budget)));
     }
 
     public async Task<ConversationListResponse> ListConversationsAsync(
@@ -374,6 +396,12 @@ public class ChatService : IChatService
         }
         return string.Concat(collapsed.AsSpan(0, TitleMaxLength).TrimEnd(), "…");
     }
+
+    // Snapshot taken AFTER the turn's SaveChanges, so the numbers already include the call
+    // the response is describing.
+    private static AiBudgetResponse ToBudgetResponse(AiBudget b) =>
+        new(b.DailyCallLimit, b.CallsUsed, b.CallsRemaining,
+            b.DailyTokenLimit, b.TokensUsed, b.TokensRemaining, b.ResetsAtUtc);
 
     private static ConversationResponse ToConversationResponse(Conversation c) =>
         new(c.Id, c.Title, c.CreatedAt, c.UpdatedAt);

@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.Chat.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
+using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -408,6 +409,100 @@ public class ChatEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         Assert.False(await db.Conversations.IgnoreQueryFilters().AnyAsync(c => c.UserId == auth.UserId));
         Assert.False(await db.ChatMessages.AnyAsync(m => m.UserId == auth.UserId));
+    }
+
+    // --- AI budget & quotas (ai-quotas, Stream B) --------------------------------------------
+    //
+    // The factory sets no AiQuota:* config, so these run on the code defaults (50 calls /
+    // 250k tokens per UTC day) — roomy enough that the rest of this suite never trips them.
+    // Exhaustion is exercised by seeding usage rows directly rather than burning 50 calls.
+
+    [Fact]
+    public async Task Turns_ReturnBudgetEnvelope_AndRecordOneUsageRowPerCall()
+    {
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var perCall = FakeChatAssistantService.Usage;
+
+        var start = await StartConversationAsync(client, "budget check turn one");
+
+        Assert.Equal(1, start.Budget.CallsUsed);
+        Assert.Equal(start.Budget.DailyCallLimit - 1, start.Budget.CallsRemaining);
+        Assert.Equal(perCall.TotalTokens, start.Budget.TokensUsed);
+        Assert.Equal(start.Budget.DailyTokenLimit - perCall.TotalTokens, start.Budget.TokensRemaining);
+        // The window is the UTC calendar day: reset is the next UTC midnight.
+        Assert.Equal(DateTime.UtcNow.Date.AddDays(1), start.Budget.ResetsAtUtc);
+
+        var turn = await SendMessageAsync(client, start.Conversation.Id, "budget check turn two");
+
+        Assert.Equal(2, turn.Budget.CallsUsed);
+        Assert.Equal(2L * perCall.TotalTokens, turn.Budget.TokensUsed);
+
+        // Accounting rows: one per call, carrying the provider-reported (fake) counts.
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var rows = await db.AiUsageRecords.Where(r => r.UserId == auth.UserId).ToListAsync();
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, r =>
+        {
+            Assert.Equal("chat", r.Lane);
+            Assert.Equal(perCall.PromptTokens, r.PromptTokens);
+            Assert.Equal(perCall.CompletionTokens, r.CompletionTokens);
+            Assert.Equal(perCall.TotalTokens, r.TotalTokens);
+        });
+    }
+
+    [Fact]
+    public async Task ExhaustedTokenBudget_Returns429_AndSpendsNothing()
+    {
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        // Put the user at the token ceiling with a single seeded row — the realistic shape
+        // (an expensive call crossed the line) without 50 round trips.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.AiUsageRecords.Add(new AiUsageRecord
+            {
+                Id = Guid.NewGuid(),
+                UserId = auth.UserId,
+                Lane = "chat",
+                PromptTokens = 200_000,
+                CompletionTokens = 50_000,
+                TotalTokens = 250_000,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await client.PostAsJsonAsync("/chat/conversations",
+            new SendMessageRequest("one more, please"), TestJson.Options);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+
+        // Refused BEFORE the provider call: no conversation, no messages, no new usage row.
+        using var assertScope = factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await assertDb.Conversations.IgnoreQueryFilters().AnyAsync(c => c.UserId == auth.UserId));
+        Assert.Equal(1, await assertDb.AiUsageRecords.CountAsync(r => r.UserId == auth.UserId));
+    }
+
+    [Fact]
+    public async Task AssistantFailure_IsNotBilledAgainstTheQuota()
+    {
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var response = await client.PostAsJsonAsync("/chat/conversations",
+            new SendMessageRequest($"please fail {FakeChatAssistantService.FailSentinel}"), TestJson.Options);
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+
+        // A failed call produced nothing and must cost nothing.
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await db.AiUsageRecords.AnyAsync(r => r.UserId == auth.UserId));
     }
 
     // --- Helpers -----------------------------------------------------------------------------

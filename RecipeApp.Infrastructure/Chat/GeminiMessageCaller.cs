@@ -35,7 +35,7 @@ public sealed class GeminiMessageCaller : IChatMessageCaller
         _options = options;
     }
 
-    public async Task<string> CreateJsonMessageAsync(
+    public async Task<ChatMessageCall> CreateJsonMessageAsync(
         string systemPrompt,
         IReadOnlyList<ChatHistoryItem> history,
         string userMessage,
@@ -84,7 +84,7 @@ public sealed class GeminiMessageCaller : IChatMessageCaller
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
 
-        return ExtractText(doc.RootElement);
+        return new ChatMessageCall(ExtractText(doc.RootElement), ExtractUsage(doc.RootElement));
     }
 
     // candidates[0].content.parts[] → first part carrying a "text" string, returned verbatim
@@ -115,4 +115,28 @@ public sealed class GeminiMessageCaller : IChatMessageCaller
 
         throw new InvalidOperationException("Gemini response contained no text part.");
     }
+
+    // usageMetadata → provider-reported token counts (ai-quotas). Absent or partial metadata
+    // degrades to null / zeroed fields rather than throwing — accounting must never turn a
+    // successful reply into a failed turn. totalTokenCount includes Gemini 3.x thinking
+    // tokens, which is exactly what a cost-oriented budget should count; when the provider
+    // omits it, prompt + completion is the honest lower bound.
+    private static ChatTokenUsage? ExtractUsage(JsonElement root)
+    {
+        if (!root.TryGetProperty("usageMetadata", out var meta)
+            || meta.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var prompt = ReadCount(meta, "promptTokenCount");
+        var completion = ReadCount(meta, "candidatesTokenCount");
+        var total = ReadCount(meta, "totalTokenCount");
+        return new ChatTokenUsage(prompt, completion, total > 0 ? total : prompt + completion);
+    }
+
+    private static int ReadCount(JsonElement meta, string name) =>
+        meta.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number
+            ? value.GetInt32()
+            : 0;
 }
