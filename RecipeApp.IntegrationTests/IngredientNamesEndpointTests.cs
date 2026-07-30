@@ -31,8 +31,15 @@ public class IngredientNamesEndpointTests(IntegrationTestFactory factory) : ICla
         Assert.Single(names!, n => n.Equals("flour", StringComparison.OrdinalIgnoreCase));
     }
 
+    // Renamed from "...are_alphabetical_when_a_prefix_is_given" (fix round 1, F1a): this
+    // test queries q= (blank), so it was never exercising the prefix branch at all — its
+    // name claimed something its body didn't test. It genuinely does check that the
+    // BLANK-q result (frequency-selected) still comes back sorted for stable display; see
+    // Ingredient_names_prefix_filter_excludes_non_matching_and_orders_alphabetically below
+    // for the actual prefix-branch test, and IngredientNamesFrequencyCapTests for the
+    // frequency-selection logic itself.
     [Fact]
-    public async Task Ingredient_names_are_alphabetical_when_a_prefix_is_given()
+    public async Task Blank_q_results_are_returned_alphabetically_sorted()
     {
         var client = await factory.CreateAuthenticatedClientAsync();
         await MealPlanTestHelper.CreateRecipeAsync(client, "C",
@@ -45,9 +52,32 @@ public class IngredientNamesEndpointTests(IntegrationTestFactory factory) : ICla
 
         Assert.NotNull(names);
         var sorted = names!.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToArray();
-        // Blank q returns "most common" names, not necessarily alphabetical by frequency
-        // selection, but the final list is still sorted for stable UI presentation.
+        // Blank q selects by "most common" (see the frequency-cap tests), but the final
+        // list handed to the client is always re-sorted alphabetically for stable display.
         Assert.Equal(sorted, names);
+    }
+
+    // fix round 1, F1b: genuinely exercises the PREFIX branch — the previous "alphabetical"
+    // test above queried q= (blank) and never touched this code path at all.
+    [Fact]
+    public async Task Ingredient_names_prefix_filter_excludes_non_matching_and_orders_alphabetically()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        await MealPlanTestHelper.CreateRecipeAsync(client, "E",
+        [
+            new RecipeIngredient { Name = "Basil", Quantity = 1m, Unit = "unit" },
+            new RecipeIngredient { Name = "Bay leaf", Quantity = 1m, Unit = "unit" },
+            new RecipeIngredient { Name = "Banana", Quantity = 1m, Unit = "unit" },
+            // Deliberately NOT matching the "Ba" prefix below — proves the filter excludes it.
+            new RecipeIngredient { Name = "Carrot", Quantity = 1m, Unit = "unit" },
+        ]);
+
+        var names = await client.GetFromJsonAsync<string[]>("/ingredients/names?q=Ba");
+
+        Assert.NotNull(names);
+        // Exactly the "Ba*" matches, in alphabetical order — nothing else in the corpus
+        // (this class's earlier tests included) starts with "Ba", and "Carrot" never appears.
+        Assert.Equal(["Banana", "Basil", "Bay leaf"], names);
     }
 
     [Fact]

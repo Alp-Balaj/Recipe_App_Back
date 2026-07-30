@@ -230,8 +230,12 @@ public class RecipeService : IRecipeService
     public async Task<List<string>> GetIngredientNamesAsync(string? prefix, CancellationToken cancellationToken = default)
     {
         // Soft-deleted recipes are already excluded by the global query filter (r => !r.IsDeleted).
+        // ThenBy(Id) is a deterministic tiebreaker: two recipes can share a CreatedAt timestamp
+        // exactly, and which one wins the scan-order "first encountered casing" for a shared
+        // ingredient name (below) must not depend on undefined ORDER BY behaviour.
         var ingredientLists = await _db.Recipes
             .OrderByDescending(r => r.CreatedAt)
+            .ThenBy(r => r.Id)
             .Take(IngredientNamesScanCap)
             .Select(r => r.Ingredients)
             .ToListAsync(cancellationToken);
