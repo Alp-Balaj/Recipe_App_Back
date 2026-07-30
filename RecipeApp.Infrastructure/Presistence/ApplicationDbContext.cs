@@ -13,6 +13,11 @@ public class ApplicationDbContext : DbContext
     public DbSet<Comment> Comments => Set<Comment>();
     public DbSet<Like> Likes => Set<Like>();
     public DbSet<SavedRecipe> SavedRecipes => Set<SavedRecipe>();
+    // open-loops slice 1: the two interactions that make CommentReceivedLike and
+    // AiRecipeCookedAndRated reachable. Both are queried directly (count subqueries on
+    // the social envelope), so both are promoted rather than left nav-only.
+    public DbSet<CommentLike> CommentLikes => Set<CommentLike>();
+    public DbSet<CookedRecipe> CookedRecipes => Set<CookedRecipe>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     // social-feed cp1: promoted from nav-only so the follow graph and feed can be queried
@@ -35,6 +40,32 @@ public class ApplicationDbContext : DbContext
 
         builder.Entity<SavedRecipe>()
             .HasKey(sr => new { sr.UserId, sr.RecipeId });
+
+        // open-loops slice 1: same composite-key idiom as Like/SavedRecipe, so the same
+        // "insert, catch 23505, treat the duplicate as the desired end state" idempotency
+        // (SocialService.SaveIgnoringDuplicateAsync) applies unchanged.
+        builder.Entity<CommentLike>()
+            .HasKey(cl => new { cl.UserId, cl.CommentId });
+
+        builder.Entity<CookedRecipe>()
+            .HasKey(cr => new { cr.UserId, cr.RecipeId });
+
+        // The composite PK leads with UserId, so neither "how many likes has this comment"
+        // nor "what do people rate this recipe" can use it. Both are correlated subqueries
+        // on the social envelope, i.e. read once per rendered card — they get their own index.
+        builder.Entity<CommentLike>()
+            .HasIndex(cl => cl.CommentId);
+
+        builder.Entity<CookedRecipe>()
+            .HasIndex(cr => cr.RecipeId);
+
+        // The 1-5 range is validated at the endpoint (RatingRequestValidator), but the
+        // constraint lives here too: the validator only guards the one write path that
+        // exists today, and a rating outside the range would silently corrupt the average.
+        builder.Entity<CookedRecipe>()
+            .ToTable(t => t.HasCheckConstraint(
+                "CK_CookedRecipes_Rating_Range",
+                "\"Rating\" IS NULL OR (\"Rating\" BETWEEN 1 AND 5)"));
 
         builder.Entity<User>()
             .Property(u => u.DietaryRestrictions)

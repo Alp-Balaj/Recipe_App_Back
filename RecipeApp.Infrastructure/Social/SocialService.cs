@@ -185,7 +185,8 @@ public class SocialService : ISocialService
             .Select(u => u.Username)
             .SingleAsync(cancellationToken);
 
-        return SocialResult<CommentResponse>.Success(ToCommentResponse(comment, username));
+        // A brand-new comment has no likes yet, so the envelope is known without a query.
+        return SocialResult<CommentResponse>.Success(ToCommentResponse(comment, username, likeCount: 0, likedByMe: false));
     }
 
     public async Task<SocialResult<CommentListResponse>> GetCommentsAsync(Guid recipeId, KeysetCursor? cursor, int limit, Guid? currentUserId, CancellationToken cancellationToken = default)
@@ -206,11 +207,20 @@ public class SocialService : ISocialService
                 || (c.CreatedAt == cursorCreatedAt && c.Id.CompareTo(cursorId) < 0));
         }
 
+        // Guest access: the caller-relative flag collapses to a constant FALSE for an
+        // anonymous caller rather than comparing against NULL (same idiom as the recipe
+        // envelope below).
+        var isAuthenticated = currentUserId is not null;
+        var callerId = currentUserId ?? Guid.Empty;
+
         var rows = await comments
             .OrderByDescending(c => c.CreatedAt)
             .ThenByDescending(c => c.Id)
             .Take(limit + 1)
-            .Select(c => new CommentResponse(c.Id, c.Content, c.CreatedAt, c.UpdatedAt, c.UserId, c.User.Username, c.RecipeId))
+            .Select(c => new CommentResponse(
+                c.Id, c.Content, c.CreatedAt, c.UpdatedAt, c.UserId, c.User.Username, c.RecipeId,
+                c.Likes.Count(),
+                isAuthenticated && c.Likes.Any(l => l.UserId == callerId)))
             .ToListAsync(cancellationToken);
 
         string? nextCursor = null;
@@ -256,7 +266,12 @@ public class SocialService : ISocialService
             .Select(u => u.Username)
             .SingleAsync(cancellationToken);
 
-        return SocialResult<CommentResponse>.Success(ToCommentResponse(comment, username));
+        // Unlike a freshly-created comment, an edited one may already carry likes — read
+        // them rather than reporting a zero the SPA would patch over the real count.
+        var likeCount = await _db.CommentLikes.CountAsync(cl => cl.CommentId == commentId, cancellationToken);
+        var likedByMe = await _db.CommentLikes.AnyAsync(cl => cl.CommentId == commentId && cl.UserId == currentUserId, cancellationToken);
+
+        return SocialResult<CommentResponse>.Success(ToCommentResponse(comment, username, likeCount, likedByMe));
     }
 
     public async Task<SocialResult<bool>> DeleteCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default)
@@ -292,6 +307,165 @@ public class SocialService : ISocialService
         return SocialResult<bool>.Success(true);
     }
 
+    // --- open-loops slice 1: comment likes ------------------------------------------------
+
+    public async Task<SocialResult<bool>> LikeCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var authorId = await VisibleCommentAuthorAsync(commentId, currentUserId, cancellationToken);
+        if (authorId is null)
+        {
+            return SocialResult<bool>.NotFound();
+        }
+
+        var alreadyLiked = await _db.CommentLikes.AnyAsync(cl => cl.UserId == currentUserId && cl.CommentId == commentId, cancellationToken);
+        if (!alreadyLiked)
+        {
+            _db.CommentLikes.Add(new CommentLike { UserId = currentUserId, CommentId = commentId });
+            // Gamification: the COMMENT's author earns CommentReceivedLike (+1) — not the
+            // recipe's author. This is the call site that makes the enum member reachable.
+            await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.CommentReceivedLike, cancellationToken);
+            await SaveIgnoringDuplicateAsync(cancellationToken);
+        }
+
+        return SocialResult<bool>.Success(true);
+    }
+
+    public async Task<SocialResult<bool>> UnlikeCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var authorId = await VisibleCommentAuthorAsync(commentId, currentUserId, cancellationToken);
+        if (authorId is null)
+        {
+            return SocialResult<bool>.NotFound();
+        }
+
+        var deleted = await _db.CommentLikes
+            .Where(cl => cl.UserId == currentUserId && cl.CommentId == commentId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        if (deleted > 0)
+        {
+            await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.CommentReceivedLike, cancellationToken);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+
+        return SocialResult<bool>.Success(true);
+    }
+
+    // --- open-loops slice 1: cooked + rated -----------------------------------------------
+
+    public async Task<SocialResult<CookedRecipeResponse>> MarkCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        if (await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken) is null)
+        {
+            return SocialResult<CookedRecipeResponse>.NotFound();
+        }
+
+        var now = DateTime.UtcNow;
+        var row = await _db.CookedRecipes
+            .SingleOrDefaultAsync(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId, cancellationToken);
+
+        if (row is null)
+        {
+            row = new CookedRecipe
+            {
+                UserId = currentUserId,
+                RecipeId = recipeId,
+                TimesCooked = 1,
+                FirstCookedAt = now,
+                LastCookedAt = now,
+            };
+            _db.CookedRecipes.Add(row);
+        }
+        else
+        {
+            row.TimesCooked += 1;
+            row.LastCookedAt = now;
+        }
+
+        // No rank award: cooking is a private act and awarding it would let anyone farm an
+        // author's rank — or their own, by cooking their own recipe — by tapping a button.
+        // The award hangs off rating, which at least carries information.
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return SocialResult<CookedRecipeResponse>.Success(ToCookedResponse(recipeId, row));
+    }
+
+    public async Task<SocialResult<CookedRecipeResponse>> RateRecipeAsync(Guid recipeId, int rating, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
+        if (authorId is null)
+        {
+            return SocialResult<CookedRecipeResponse>.NotFound();
+        }
+
+        var now = DateTime.UtcNow;
+        var row = await _db.CookedRecipes
+            .SingleOrDefaultAsync(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId, cancellationToken);
+
+        // Rating without having logged a cook is allowed — you can rate something you cooked
+        // before this feature existed. TimesCooked stays 0 to keep the two facts honest.
+        var wasUnrated = row?.Rating is null;
+        if (row is null)
+        {
+            row = new CookedRecipe
+            {
+                UserId = currentUserId,
+                RecipeId = recipeId,
+                TimesCooked = 0,
+                FirstCookedAt = now,
+                LastCookedAt = now,
+            };
+            _db.CookedRecipes.Add(row);
+        }
+
+        row.Rating = rating;
+        row.RatedAt = now;
+
+        // Gamification: AiRecipeCookedAndRated (+15) to the author, ONLY on the transition
+        // from unrated to rated. Re-rating (5 -> 1 -> 5) must not award again, or rank is
+        // farmable by toggling a star. The enum member is named for AI-generated recipes,
+        // which do not exist yet (there is no IsAiGenerated field) — when the generator
+        // lands, this award becomes conditional on that flag and non-AI recipes get their
+        // own event. Firing it for every recipe now is what makes the member reachable.
+        if (wasUnrated)
+        {
+            await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.AiRecipeCookedAndRated, cancellationToken);
+        }
+
+        await SaveIgnoringDuplicateAsync(cancellationToken);
+
+        return SocialResult<CookedRecipeResponse>.Success(ToCookedResponse(recipeId, row));
+    }
+
+    public async Task<SocialResult<CookedRecipeResponse>> ClearCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
+        if (authorId is null)
+        {
+            return SocialResult<CookedRecipeResponse>.NotFound();
+        }
+
+        var row = await _db.CookedRecipes
+            .SingleOrDefaultAsync(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId, cancellationToken);
+
+        if (row is not null)
+        {
+            var hadRating = row.Rating is not null;
+            _db.CookedRecipes.Remove(row);
+
+            // Symmetric reversal, and only when an award was actually made: a row that was
+            // never rated never awarded, so removing it must not dock the author.
+            if (hadRating)
+            {
+                await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.AiRecipeCookedAndRated, cancellationToken);
+            }
+
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+
+        return SocialResult<CookedRecipeResponse>.Success(new CookedRecipeResponse(recipeId, 0, null, null));
+    }
+
     // F1 resolution (I3 revisited for the single-recipe case, 2026-07-19): the same
     // envelope projection GetFeedAsync rides — correlated subqueries, one round trip,
     // live counts — folded into the visibility check itself so a recipe the caller can't
@@ -312,7 +486,15 @@ public class SocialService : ISocialService
                 r.Likes.Count(),
                 r.Comments.Count(),
                 isAuthenticated && r.Likes.Any(l => l.UserId == callerId),
-                isAuthenticated && r.SavedByUsers.Any(s => s.UserId == callerId)))
+                isAuthenticated && r.SavedByUsers.Any(s => s.UserId == callerId),
+                // AVG over no rows is SQL NULL, which is exactly the "nobody has rated this"
+                // signal — the cast to double? is what keeps it from collapsing to 0.
+                r.CookedBy.Where(c => c.Rating != null).Average(c => (double?)c.Rating),
+                r.CookedBy.Count(c => c.Rating != null),
+                isAuthenticated && r.CookedBy.Any(c => c.UserId == callerId),
+                // Guest callers carry Guid.Empty, which matches no row, so this is null for
+                // them without needing the isAuthenticated guard the booleans use.
+                r.CookedBy.Where(c => c.UserId == callerId).Select(c => c.Rating).FirstOrDefault()))
             .SingleOrDefaultAsync(cancellationToken);
 
         return envelope is null
@@ -661,6 +843,10 @@ public class SocialService : ISocialService
                 CommentCount = r.Comments.Count(),
                 LikedByMe = isAuthenticated && r.Likes.Any(l => l.UserId == callerIdValue),
                 SavedByMe = isAuthenticated && r.SavedByUsers.Any(s => s.UserId == callerIdValue),
+                AverageRating = r.CookedBy.Where(c => c.Rating != null).Average(c => (double?)c.Rating),
+                RatingCount = r.CookedBy.Count(c => c.Rating != null),
+                CookedByMe = isAuthenticated && r.CookedBy.Any(c => c.UserId == callerIdValue),
+                MyRating = r.CookedBy.Where(c => c.UserId == callerIdValue).Select(c => c.Rating).FirstOrDefault(),
             })
             .ToListAsync(cancellationToken);
 
@@ -679,7 +865,11 @@ public class SocialService : ISocialService
                 r.LikeCount,
                 r.CommentCount,
                 r.LikedByMe,
-                r.SavedByMe))
+                r.SavedByMe,
+                r.AverageRating,
+                r.RatingCount,
+                r.CookedByMe,
+                r.MyRating))
             .ToList();
 
         return new FeedListResponse(items, nextCursor, source);
@@ -753,6 +943,21 @@ public class SocialService : ISocialService
         }
     }
 
-    private static CommentResponse ToCommentResponse(Comment comment, string authorUsername) =>
-        new(comment.Id, comment.Content, comment.CreatedAt, comment.UpdatedAt, comment.UserId, authorUsername, comment.RecipeId);
+    // The comment-like counterpart to VisibleRecipeAuthorAsync: returns the COMMENT's author
+    // id when the caller may interact with it, else null. Visibility is the recipe's — a
+    // comment under a soft-deleted (query-filtered) or non-visible recipe reads as null, so
+    // callers turn it into NotFound. The author id is what the award/revert path needs, so
+    // one query serves both, exactly as it does for recipes.
+    private Task<Guid?> VisibleCommentAuthorAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken) =>
+        _db.Comments
+            .Where(c => c.Id == commentId
+                && (c.Recipe.Visibility == RecipeVisibility.Public || c.Recipe.CreatedByUserId == currentUserId))
+            .Select(c => (Guid?)c.UserId)
+            .SingleOrDefaultAsync(cancellationToken);
+
+    private static CookedRecipeResponse ToCookedResponse(Guid recipeId, CookedRecipe row) =>
+        new(recipeId, row.TimesCooked, row.Rating, row.TimesCooked > 0 ? row.LastCookedAt : null);
+
+    private static CommentResponse ToCommentResponse(Comment comment, string authorUsername, int likeCount, bool likedByMe) =>
+        new(comment.Id, comment.Content, comment.CreatedAt, comment.UpdatedAt, comment.UserId, authorUsername, comment.RecipeId, likeCount, likedByMe);
 }

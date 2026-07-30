@@ -39,5 +39,6 @@ public class Recipe
     public ICollection<SavedRecipe> SavedByUsers { get; set; } = [];
     public ICollection<Like> Likes { get; set; } = [];
     public ICollection<Comment> Comments { get; set; } = [];
+    public ICollection<CookedRecipe> CookedBy { get; set; } = [];
     public ICollection<MealPlanEntry> MealPlanEntries { get; set; } = [];
 }

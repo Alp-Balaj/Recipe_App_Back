@@ -30,6 +30,12 @@ public class User
     // Comments this user wrote
     public ICollection<Comment> Comments { get; set; } = [];
 
+    // Comments this user liked
+    public ICollection<CommentLike> CommentLikes { get; set; } = [];
+
+    // Recipes this user cooked (and possibly rated)
+    public ICollection<CookedRecipe> CookedRecipes { get; set; } = [];
+
     // Chat history
     public ICollection<ChatMessage> ChatMessages { get; set; } = [];
 

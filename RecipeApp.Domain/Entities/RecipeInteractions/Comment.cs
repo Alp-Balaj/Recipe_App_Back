@@ -12,4 +12,6 @@ public class Comment
 
     public Guid RecipeId { get; set; }
     public Recipe Recipe { get; set; } = null!;
+
+    public ICollection<CommentLike> Likes { get; set; } = [];
 }

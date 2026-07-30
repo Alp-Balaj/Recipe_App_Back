@@ -42,6 +42,40 @@ public interface ISocialService
     /// <summary>Allowed for the comment's author OR the recipe's author (decision I6).</summary>
     Task<SocialResult<bool>> DeleteCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default);
 
+    // --- open-loops slice 1: comment likes ------------------------------------------------
+
+    /// <summary>
+    /// Idempotent like on a comment; awards CommentReceivedLike (+1) to the comment's author
+    /// on the first like by someone else. Visibility resolves through the comment's recipe,
+    /// so a comment under a recipe the caller can't see is NotFound, never Forbidden.
+    /// </summary>
+    Task<SocialResult<bool>> LikeCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>Idempotent unlike; reverses the award only on a real like -> unlike transition.</summary>
+    Task<SocialResult<bool>> UnlikeCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    // --- open-loops slice 1: cooked + rated -----------------------------------------------
+
+    /// <summary>
+    /// Logs that the caller cooked this recipe: inserts the row with TimesCooked = 1, or
+    /// increments it and bumps LastCookedAt. Cooking alone earns the author nothing — only
+    /// rating does — so no rank event fires here.
+    /// </summary>
+    Task<SocialResult<CookedRecipeResponse>> MarkCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sets the caller's 1-5 rating, creating the row if they never logged a cook. Awards
+    /// AiRecipeCookedAndRated (+15) to the author ONLY on the null -> rated transition, so
+    /// re-rating cannot farm points.
+    /// </summary>
+    Task<SocialResult<CookedRecipeResponse>> RateRecipeAsync(Guid recipeId, int rating, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes the caller's cooked/rated row entirely (the undo path for a mis-tap), and
+    /// reverses the award if a rating had been given. Idempotent.
+    /// </summary>
+    Task<SocialResult<CookedRecipeResponse>> ClearCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
+
     /// <summary>
     /// The feed's social envelope for one recipe (F1 / I3-single-recipe revisit): author,
     /// live counts, caller-relative flags. Visibility matches GET /recipes/{id} — a recipe
