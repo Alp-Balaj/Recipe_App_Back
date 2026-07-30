@@ -30,6 +30,7 @@ public static class ChatEndpoints
             {
                 ChatOutcome.Success => Results.Ok(result.Value),
                 ChatOutcome.AssistantUnavailable => AssistantUnavailable(),
+                ChatOutcome.QuotaExceeded => QuotaExhausted(),
                 _ => Results.NotFound(),
             };
         })
@@ -82,6 +83,7 @@ public static class ChatEndpoints
             {
                 ChatOutcome.Success => Results.Ok(result.Value),
                 ChatOutcome.AssistantUnavailable => AssistantUnavailable(),
+                ChatOutcome.QuotaExceeded => QuotaExhausted(),
                 _ => Results.NotFound(),
             };
         })
@@ -107,6 +109,16 @@ public static class ChatEndpoints
 
     private static Guid GetUserId(ClaimsPrincipal user) =>
         Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    // ai-quotas: the caller's per-user daily AI budget is spent. Same 429 status the lane's
+    // per-IP rate limit uses, but with an RFC-7807 body so the client can tell "slow down"
+    // (retry in seconds) from "done for today" (the window is the UTC day, so the reset time
+    // needs no per-user data).
+    private static IResult QuotaExhausted() =>
+        Results.Problem(
+            statusCode: StatusCodes.Status429TooManyRequests,
+            title: "Daily AI budget exhausted.",
+            detail: "You have used today's AI allowance. The budget resets at 00:00 UTC.");
 
     // An LLM failure during a turn: no half-turn was persisted. Report a 502-style RFC-7807
     // problem (AddProblemDetails is registered) so the client knows to retry.

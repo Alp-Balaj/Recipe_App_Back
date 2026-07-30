@@ -24,7 +24,7 @@ public class MealPlanAssistantServiceTests
         public string? CapturedSystemPrompt { get; private set; }
         public object? CapturedSchema { get; private set; }
 
-        public Task<string> CreateJsonMessageAsync(
+        public Task<ChatMessageCall> CreateJsonMessageAsync(
             string systemPrompt,
             IReadOnlyList<ChatHistoryItem> history,
             string userMessage,
@@ -33,7 +33,7 @@ public class MealPlanAssistantServiceTests
         {
             CapturedSystemPrompt = systemPrompt;
             CapturedSchema = responseSchema;
-            return Task.FromResult(_json);
+            return Task.FromResult(new ChatMessageCall(_json, null));
         }
     }
 

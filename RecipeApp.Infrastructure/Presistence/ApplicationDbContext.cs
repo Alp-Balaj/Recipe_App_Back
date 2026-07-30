@@ -22,6 +22,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<CookedRecipe> CookedRecipes => Set<CookedRecipe>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
+    // ai-quotas (Stream B): per-call AI accounting; the daily budget aggregates these rows.
+    public DbSet<AiUsageRecord> AiUsageRecords => Set<AiUsageRecord>();
     // social-feed cp1: promoted from nav-only so the follow graph and feed can be queried
     // directly (renames the convention table UserFollow -> UserFollows, a safe RenameTable —
     // see Decisions/dbset-promotion-renames-convention-tables).
@@ -390,6 +392,18 @@ public class ApplicationDbContext : DbContext
         // Backs "this week's manual items" — the default list scope.
         builder.Entity<ShoppingListItem>()
             .HasIndex(sli => new { sli.UserId, sli.WeekStartDate });
+
+        // ai-quotas: lanes are short fixed identifiers ("chat"), compared for equality only,
+        // so a narrow bounded column is correct (same reasoning as ShoppingListMark.Key).
+        builder.Entity<AiUsageRecord>()
+            .Property(r => r.Lane)
+            .HasMaxLength(40)
+            .IsRequired();
+
+        // Backs the one query the budget makes: aggregate a user's rows for the current UTC
+        // day (UserId equality + CreatedAt range scan).
+        builder.Entity<AiUsageRecord>()
+            .HasIndex(r => new { r.UserId, r.CreatedAt });
 
         builder.Entity<ChatMessage>()
             .Property(m => m.SuggestedRecipeIds)

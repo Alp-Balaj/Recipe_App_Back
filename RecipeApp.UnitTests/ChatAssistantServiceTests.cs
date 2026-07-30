@@ -13,6 +13,9 @@ public class ChatAssistantServiceTests
     private static readonly Guid RecipeA = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid RecipeB = Guid.Parse("22222222-2222-2222-2222-222222222222");
 
+    // ai-quotas: the canned usage every fake call reports, so passthrough can be asserted.
+    private static readonly ChatTokenUsage FakeUsage = new(120, 40, 200);
+
     private sealed class FakeCaller : IChatMessageCaller
     {
         private readonly string _json;
@@ -23,7 +26,7 @@ public class ChatAssistantServiceTests
         public IReadOnlyList<ChatHistoryItem>? CapturedHistory { get; private set; }
         public object? CapturedSchema { get; private set; }
 
-        public Task<string> CreateJsonMessageAsync(
+        public Task<ChatMessageCall> CreateJsonMessageAsync(
             string systemPrompt,
             IReadOnlyList<ChatHistoryItem> history,
             string userMessage,
@@ -33,7 +36,7 @@ public class ChatAssistantServiceTests
             CapturedSystemPrompt = systemPrompt;
             CapturedHistory = history;
             CapturedSchema = responseSchema;
-            return Task.FromResult(_json);
+            return Task.FromResult(new ChatMessageCall(_json, FakeUsage));
         }
     }
 
@@ -108,6 +111,18 @@ public class ChatAssistantServiceTests
         var result = await InvokeAsync(json);
 
         Assert.Equal(new[] { RecipeA }, result.SuggestedRecipeIds);
+    }
+
+    [Fact]
+    public async Task TokenUsage_IsPassedThroughUntouched()
+    {
+        // ai-quotas: the assistant validates the model's CONTENT; the call's cost is the
+        // provider's report and must survive the trip to the accounting layer unmodified.
+        var json = $$"""{"reply":"ok","suggestedRecipeIds":["{{RecipeA}}"]}""";
+
+        var result = await InvokeAsync(json);
+
+        Assert.Equal(FakeUsage, result.Usage);
     }
 
     [Fact]

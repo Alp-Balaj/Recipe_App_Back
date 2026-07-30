@@ -63,14 +63,14 @@ public class MealPlanAssistantService : IMealPlanAssistantService
     {
         var systemPrompt = BuildSystemPrompt(openSlots, candidates, dietaryRestrictions);
 
-        var json = await _caller.CreateJsonMessageAsync(
+        var call = await _caller.CreateJsonMessageAsync(
             systemPrompt,
             Array.Empty<ChatHistoryItem>(),
             "Plan my week.",
             ResponseSchema,
             cancellationToken);
 
-        var parsed = ParseResponse(json);
+        var parsed = ParseResponse(call.Json);
 
         // Defense against hallucination: structured output guarantees the SHAPE, not semantic
         // validity. Drop any assignment whose day/mealType doesn't parse to a defined enum

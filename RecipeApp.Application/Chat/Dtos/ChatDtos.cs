@@ -21,15 +21,31 @@ public record SendMessageRequest(string Content);
 
 public record RenameConversationRequest(string Title);
 
+// The caller's remaining AI allowance for the current UTC day (ai-quotas). Rides on every
+// turn response so the frontend can surface "N calls left today" without an extra request;
+// ResetsAtUtc is when the counters clear (next UTC midnight).
+public record AiBudgetResponse(
+    int DailyCallLimit,
+    int CallsUsed,
+    int CallsRemaining,
+    long DailyTokenLimit,
+    long TokensUsed,
+    long TokensRemaining,
+    DateTime ResetsAtUtc);
+
 // POST /chat/conversations — creates the conversation, titles it from the first message, and
 // runs the first turn.
 public record StartConversationResponse(
     ConversationResponse Conversation,
     ChatMessageResponse UserMessage,
-    ChatMessageResponse AssistantMessage);
+    ChatMessageResponse AssistantMessage,
+    AiBudgetResponse Budget);
 
 // POST /chat/conversations/{id}/messages — a further turn in an existing conversation.
-public record TurnResponse(ChatMessageResponse UserMessage, ChatMessageResponse AssistantMessage);
+public record TurnResponse(
+    ChatMessageResponse UserMessage,
+    ChatMessageResponse AssistantMessage,
+    AiBudgetResponse Budget);
 
 public record ConversationListResponse(IReadOnlyList<ConversationResponse> Items, string? NextCursor);
 

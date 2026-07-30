@@ -44,9 +44,9 @@ public class ChatAssistantService : IChatAssistantService
         // cancellationToken is NAMED deliberately: the seam's 4th positional parameter is now
         // responseSchema (object?), and a CancellationToken passed positionally binds to it
         // without a compile error — it boxes into object and gets serialized as the schema.
-        var json = await _caller.CreateJsonMessageAsync(systemPrompt, history, userMessage, cancellationToken: cancellationToken);
+        var call = await _caller.CreateJsonMessageAsync(systemPrompt, history, userMessage, cancellationToken: cancellationToken);
 
-        var parsed = ParseResponse(json);
+        var parsed = ParseResponse(call.Json);
 
         // Defense against hallucinated ids: structured output guarantees the SHAPE (an array
         // of strings), not semantic validity. Guid.TryParse each returned id and drop any that
@@ -61,7 +61,9 @@ public class ChatAssistantService : IChatAssistantService
             }
         }
 
-        return new ChatAssistantResult(parsed.Reply, suggested);
+        // Token usage rides along untouched (ai-quotas): this class validates the model's
+        // CONTENT; what the call cost is the provider's report and is accounted upstream.
+        return new ChatAssistantResult(parsed.Reply, suggested, call.Usage);
     }
 
     private static RawResponse ParseResponse(string json)

@@ -10,15 +10,20 @@ namespace RecipeApp.Infrastructure.Chat;
 // real implementation (Gemini today) is swappable without touching anything above this seam.
 public interface IChatMessageCaller
 {
-    // Sends the request and returns the model's raw structured-output JSON text. With no
-    // responseSchema the output is shaped { "reply": string, "suggestedRecipeIds": string[] }
-    // (the chat lane's contract); a caller with a different output shape (meal-plan proposals)
-    // passes its own schema object in the implementation's dialect. Parsing/validation is the
-    // caller's job — this returns the text of the first content part verbatim.
-    Task<string> CreateJsonMessageAsync(
+    // Sends the request and returns the model's raw structured-output JSON text plus the
+    // provider-reported token usage (ai-quotas; Usage is null when the provider omitted it).
+    // With no responseSchema the output is shaped { "reply": string, "suggestedRecipeIds":
+    // string[] } (the chat lane's contract); a caller with a different output shape (meal-plan
+    // proposals) passes its own schema object in the implementation's dialect.
+    // Parsing/validation of the JSON is the caller's job — the text of the first content part
+    // is returned verbatim.
+    Task<ChatMessageCall> CreateJsonMessageAsync(
         string systemPrompt,
         IReadOnlyList<ChatHistoryItem> history,
         string userMessage,
         object? responseSchema = null,
         CancellationToken cancellationToken = default);
 }
+
+// What one provider call produced: the structured-output text and what it cost.
+public record ChatMessageCall(string Json, ChatTokenUsage? Usage);

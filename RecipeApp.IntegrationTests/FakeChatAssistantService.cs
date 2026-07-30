@@ -17,6 +17,10 @@ public sealed class FakeChatAssistantService : IChatAssistantService
 {
     public const string FailSentinel = "__FAIL__";
 
+    // ai-quotas: every fake call reports this fixed usage, so tests can assert exact
+    // accounting (N turns → N × these numbers) without a real provider.
+    public static readonly ChatTokenUsage Usage = new(100, 25, 150);
+
     private static readonly Regex GuidPattern = new(
         @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
         RegexOptions.Compiled);
@@ -44,6 +48,6 @@ public sealed class FakeChatAssistantService : IChatAssistantService
         }
 
         var reply = $"[fake-assistant] You said: {userMessage}";
-        return Task.FromResult(new ChatAssistantResult(reply, suggested));
+        return Task.FromResult(new ChatAssistantResult(reply, suggested, Usage));
     }
 }

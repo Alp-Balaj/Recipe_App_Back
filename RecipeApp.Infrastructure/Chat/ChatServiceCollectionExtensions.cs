@@ -41,6 +41,15 @@ public static class ChatServiceCollectionExtensions
 
         services.AddScoped<IChatAssistantService, ChatAssistantService>();
 
+        // ai-quotas: per-user daily budget over AiUsageRecord rows. Options bind eagerly (no
+        // secret involved, unlike the Gemini key) with code defaults standing in until decision
+        // D7 fixes the real ceilings; the service is scoped because it stages rows on the
+        // request's DbContext.
+        var quotaOptions = new AiQuotaOptions();
+        configuration.GetSection(AiQuotaOptions.SectionName).Bind(quotaOptions);
+        services.AddSingleton(quotaOptions);
+        services.AddScoped<IAiUsageService, AiUsageService>();
+
         // The endpoint-facing orchestrator. Depends on IChatAssistantService above (which is what
         // actually resolves the Gemini key, lazily via the factory).
         services.AddScoped<IChatService, ChatService>();
