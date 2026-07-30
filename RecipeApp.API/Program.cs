@@ -16,6 +16,7 @@ using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Common;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.Moderation.Abstractions;
+using RecipeApp.Application.Notifications.Abstractions;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Social.Abstractions;
 using RecipeApp.Domain.Enums;
@@ -24,6 +25,7 @@ using RecipeApp.Infrastructure.Chat;
 using RecipeApp.Infrastructure.Images;
 using RecipeApp.Infrastructure.MealPlanning;
 using RecipeApp.Infrastructure.Moderation;
+using RecipeApp.Infrastructure.Notifications;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
 using RecipeApp.Infrastructure.Social;
@@ -65,6 +67,13 @@ builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IReportService, ReportService>();
 builder.Services.AddScoped<IAdminService, AdminService>();
 builder.Services.AddScoped<IUserSecurityStateService, UserSecurityStateService>();
+// Stream C (AI week proposal): the assistant needs IChatMessageCaller, registered by
+// AddChatAssistant below — resolution is lazy, so order here doesn't matter.
+builder.Services.AddScoped<IMealPlanAssistantService, MealPlanAssistantService>();
+builder.Services.AddScoped<IMealPlanProposalService, MealPlanProposalService>();
+// open-loops slice 3: the READ side only — notification writes are staged inline in
+// SocialService so they share a transaction with the interaction that caused them.
+builder.Services.AddScoped<INotificationService, NotificationService>();
 
 // social-feed cp04 (decision I1): uploaded images live behind the IImageStorage seam.
 // Production (Railway is ephemeral-disk) sets ImageStorage:R2:* and stores in Cloudflare
@@ -345,6 +354,7 @@ app.MapImageEndpoints();
 app.MapMealPlanEndpoints();
 app.MapReportEndpoints();
 app.MapAdminEndpoints();
+app.MapNotificationEndpoints();
 
 // Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
 // fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.

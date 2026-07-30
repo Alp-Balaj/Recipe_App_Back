@@ -38,6 +38,8 @@ public class ApplicationDbContext : DbContext
     // queried directly by the admin service, so both are promoted DbSets.
     public DbSet<Report> Reports => Set<Report>();
     public DbSet<AuditLogEntry> AuditLog => Set<AuditLogEntry>();
+    // open-loops slice 3: the social loop's return path.
+    public DbSet<Notification> Notifications => Set<Notification>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -257,6 +259,58 @@ public class ApplicationDbContext : DbContext
         builder.Entity<Recipe>()
             .HasIndex("SearchVector")
             .HasMethod("gin");
+
+        // ── Notifications (open-loops slice 3) ───────────────────────────────────────
+
+        builder.Entity<Notification>()
+            .Property(n => n.Type)
+            .HasConversion<string>();
+
+        // The one read this table serves: "my notifications, newest first", keyset-paged.
+        // Same (owner, CreatedAt DESC, Id DESC) shape as Comment, SavedRecipe and the
+        // follow lists, so it uses the shared KeysetCursor unchanged.
+        builder.Entity<Notification>()
+            .HasIndex(n => new { n.RecipientId, n.CreatedAt, n.Id })
+            .IsDescending(false, true, true);
+
+        // Partial index for the bell's unread count — it polls, so it is the most frequent
+        // query in the app, and it only ever looks at unread rows. Postgres keeps this
+        // index small because read rows drop out of it entirely.
+        builder.Entity<Notification>()
+            .HasIndex(n => n.RecipientId)
+            .HasFilter("\"ReadAt\" IS NULL")
+            .HasDatabaseName("IX_Notifications_RecipientId_Unread");
+
+        // Two FKs to Users from one table, so the navigations must be spelled out —
+        // convention cannot guess which side is which. Restrict, not Cascade: two cascade
+        // paths into the same table is an error on SQL Server and a footgun everywhere,
+        // and matches how UserFollow already handles its self-referential pair.
+        builder.Entity<Notification>()
+            .HasOne(n => n.Recipient)
+            .WithMany()
+            .HasForeignKey(n => n.RecipientId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.Entity<Notification>()
+            .HasOne(n => n.Actor)
+            .WithMany()
+            .HasForeignKey(n => n.ActorId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        // Context FKs cascade: if the recipe or comment is hard-deleted there is nothing
+        // left to link to. (Recipes are soft-deleted in practice, so this is the safety
+        // net rather than the usual path.)
+        builder.Entity<Notification>()
+            .HasOne(n => n.Recipe)
+            .WithMany()
+            .HasForeignKey(n => n.RecipeId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        builder.Entity<Notification>()
+            .HasOne(n => n.Comment)
+            .WithMany()
+            .HasForeignKey(n => n.CommentId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         builder.Entity<UserFollow>()
             .HasKey(uf => new { uf.FollowerId, uf.FollowingId });
