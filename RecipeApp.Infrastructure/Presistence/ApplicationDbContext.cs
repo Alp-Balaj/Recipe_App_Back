@@ -239,7 +239,8 @@ public class ApplicationDbContext : DbContext
         // nothing ever asks a conversation for its recipes. Optional + SetNull, so the
         // provenance link degrades to "AI-generated, source unknown" rather than blocking
         // a delete; in practice conversations only ever soft-delete, so this is the safety
-        // net. No index: no query filters or joins on this column.
+        // net. EF indexes the FK column by convention — nothing reads it that way today,
+        // but it is what makes the SetNull cascade cheap, so it is left alone.
         builder.Entity<Recipe>()
             .HasOne<Conversation>()
             .WithMany()
