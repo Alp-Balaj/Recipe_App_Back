@@ -24,6 +24,12 @@ public interface IAiUsageService
 public static class AiUsageLanes
 {
     public const string Chat = "chat";
+
+    // stream E: the recipe generator. Added exactly as this comment anticipated — a new
+    // constant for a new feature. Nothing else about the quota system is touched by E:
+    // the generator consults GetBudgetAsync before spending and stages RecordCall on its
+    // own unit of work, like the chat lane does.
+    public const string RecipeGeneration = "recipe-generation";
 }
 
 // A user's AI budget for one UTC day. The window is the calendar day in UTC — simple to

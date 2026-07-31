@@ -435,10 +435,17 @@ public class SocialService : ISocialService
 
         // Gamification: AiRecipeCookedAndRated (+15) to the author, ONLY on the transition
         // from unrated to rated. Re-rating (5 -> 1 -> 5) must not award again, or rank is
-        // farmable by toggling a star. The enum member is named for AI-generated recipes,
-        // which do not exist yet (there is no IsAiGenerated field) — when the generator
-        // lands, this award becomes conditional on that flag and non-AI recipes get their
-        // own event. Firing it for every recipe now is what makes the member reachable.
+        // farmable by toggling a star.
+        //
+        // Stream E note (2026-07-31): Recipe.IsAiGenerated now EXISTS, so the "when the
+        // generator lands" half of this comment is spent — but the award is deliberately
+        // NOT narrowed to flagged recipes, and stream E did not narrow it. Narrowing it
+        // alone would silently strip the +15 from every hand-written recipe; doing it
+        // honestly needs a sibling RankEvent for the non-AI case, which is a change to the
+        // scoring model that no stream owns. What D1 actually required is already true:
+        // generation awards nothing on creation (RecipeGenerationService makes no rank
+        // call), and a generated recipe first scores here, when somebody cooked it and
+        // said what they thought.
         if (wasUnrated)
         {
             await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.AiRecipeCookedAndRated, cancellationToken);

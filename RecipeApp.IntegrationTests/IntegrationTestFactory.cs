@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.MealPlanning.Abstractions;
+using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Infrastructure.Persistence;
 using Testcontainers.PostgreSql;
 
@@ -77,6 +78,13 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             // under test resolves a deterministic IMealPlanAssistantService instead of Gemini.
             services.RemoveAll<IMealPlanAssistantService>();
             services.AddScoped<IMealPlanAssistantService, FakeMealPlanAssistantService>();
+
+            // Same for the recipe generator (stream E): the real RecipeGenerationService
+            // under test — quota gate, provenance, persistence, and the deliberate ABSENCE
+            // of a rank award — runs against the container DB with a deterministic draft
+            // instead of Gemini.
+            services.RemoveAll<IRecipeGenerationAssistant>();
+            services.AddScoped<IRecipeGenerationAssistant, FakeRecipeGenerationAssistant>();
 
             // Same dynamic-JSON opt-in as Program.cs/ApplicationDbContextFactory: the jsonb
             // List<> columns (Recipe.Ingredients/Steps/Tags) throw NotSupportedException at

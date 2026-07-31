@@ -35,6 +35,18 @@ public class Recipe
     public Guid CreatedByUserId { get; set; }
     public User CreatedByUser { get; set; } = null!;
 
+    // Provenance (stream E, decision D1 — 2026-07-30). A generated recipe is owned by the
+    // user who asked for it, exactly like one they typed, and is marked rather than
+    // segregated: PUT/DELETE stay owner-checked, the feed and the planner need no special
+    // case. The flag is what pays for that — it is why generation awards no RecipeCreated
+    // points (pressing "generate" must not farm rank), and it is what a reader sees on the
+    // recipe. SourceConversationId points at the chat thread the request came out of, so
+    // the provenance claim is auditable rather than a boolean assertion; null means the
+    // recipe was generated outside a conversation, and it is nullable for the same reason
+    // for AI recipes whose conversation is later hard-deleted.
+    public bool IsAiGenerated { get; set; }
+    public Guid? SourceConversationId { get; set; }
+
     // Relations
     public ICollection<SavedRecipe> SavedByUsers { get; set; } = [];
     public ICollection<Like> Likes { get; set; } = [];

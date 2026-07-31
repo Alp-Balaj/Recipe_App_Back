@@ -21,4 +21,10 @@ public record RecipeResponse(
     List<RecipeIngredient> Ingredients,
     List<RecipeStep> Steps,
     List<string> Tags,
-    Guid CreatedByUserId);
+    Guid CreatedByUserId,
+    // Provenance (stream E, decision D1). Appended, so every existing positional
+    // construction site keeps compiling; the SPA badges an AI recipe from the flag.
+    // SourceConversationId is null for a recipe generated outside a conversation (and for
+    // every recipe authored by hand).
+    bool IsAiGenerated,
+    Guid? SourceConversationId);
