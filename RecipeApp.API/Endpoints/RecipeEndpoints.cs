@@ -27,6 +27,32 @@ public static class RecipeEndpoints
         })
         .AddEndpointFilter<ValidationFilter<CreateRecipeRequest>>();
 
+        // Stream E (decision D1): generate a recipe. Registered here rather than under
+        // /chat because the RESULT is a recipe — it answers 201 Created with the same
+        // RecipeResponse every other recipe route returns, so the SPA routes straight to
+        // /recipes/{id} with no special case. Provenance (IsAiGenerated + the source
+        // conversation) rides on the row, not on a separate lane.
+        //
+        // It DOES take the chat rate-limit lane, though: this is the one recipe route that
+        // costs money per call, and RateLimitPolicies' own convention is that money-gated
+        // traffic stays isolated from the cheap DB-only budgets. The per-user daily quota
+        // (stream B) sits behind it in the service — the IP window is the outer bound, the
+        // budget is the personal one.
+        group.MapPost("/generate", async (GenerateRecipeRequest request, IRecipeGenerationService generation, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var result = await generation.GenerateRecipeAsync(request, userId, cancellationToken);
+            return result.Outcome switch
+            {
+                RecipeGenerationOutcome.Success => Results.Created($"/recipes/{result.Value!.Recipe.Id}", result.Value),
+                RecipeGenerationOutcome.AssistantUnavailable => GeneratorUnavailable(),
+                RecipeGenerationOutcome.QuotaExceeded => QuotaExhausted(),
+                _ => Results.NotFound(),
+            };
+        })
+        .AddEndpointFilter<ValidationFilter<GenerateRecipeRequest>>()
+        .RequireRateLimiting(RateLimitPolicies.Chat);
+
         // Guest access (§3.1): the two read routes are anonymous-capable — the caller id is
         // read as nullable and the services degrade to Public-only for a null caller. They
         // also pick up the IP-partitioned Social rate-limit policy (§3.4): anonymous traffic
@@ -230,4 +256,19 @@ public static class RecipeEndpoints
                   ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
         return Guid.TryParse(sub, out var id) ? id : null;
     }
+
+    // Stream E. Both mirror the chat lane's problem responses verbatim (ChatEndpoints):
+    // the two AI failure modes read the same to a client wherever they happen, so the SPA
+    // can share one handler.
+    private static IResult QuotaExhausted() =>
+        Results.Problem(
+            statusCode: StatusCodes.Status429TooManyRequests,
+            title: "Daily AI budget exhausted.",
+            detail: "You have used today's AI allowance. The budget resets at 00:00 UTC.");
+
+    private static IResult GeneratorUnavailable() =>
+        Results.Problem(
+            statusCode: StatusCodes.Status502BadGateway,
+            title: "The recipe generator is temporarily unavailable.",
+            detail: "The assistant could not write a usable recipe. Nothing was saved — please try again.");
 }

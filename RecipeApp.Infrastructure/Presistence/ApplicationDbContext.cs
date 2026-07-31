@@ -226,6 +226,26 @@ public class ApplicationDbContext : DbContext
         builder.Entity<Recipe>()
             .HasQueryFilter(r => !r.IsDeleted);
 
+        // ── Provenance of generated recipes (stream E, decision D1) ──────────────────
+        //
+        // The flag backfills to false: every recipe that existed before the generator was
+        // typed by a human.
+        builder.Entity<Recipe>()
+            .Property(r => r.IsAiGenerated)
+            .HasDefaultValue(false);
+
+        // FK with NO navigation property on Recipe. Two reasons: Recipe is a Domain POCO
+        // that should not grow a chat concern, and the relationship is one-directional —
+        // nothing ever asks a conversation for its recipes. Optional + SetNull, so the
+        // provenance link degrades to "AI-generated, source unknown" rather than blocking
+        // a delete; in practice conversations only ever soft-delete, so this is the safety
+        // net. No index: no query filters or joins on this column.
+        builder.Entity<Recipe>()
+            .HasOne<Conversation>()
+            .WithMany()
+            .HasForeignKey(r => r.SourceConversationId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         builder.Entity<Recipe>()
             .HasIndex(r => new { r.CreatedAt, r.Id })
             .IsDescending();

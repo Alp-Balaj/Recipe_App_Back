@@ -71,6 +71,11 @@ builder.Services.AddScoped<IUserSecurityStateService, UserSecurityStateService>(
 // AddChatAssistant below — resolution is lazy, so order here doesn't matter.
 builder.Services.AddScoped<IMealPlanAssistantService, MealPlanAssistantService>();
 builder.Services.AddScoped<IMealPlanProposalService, MealPlanProposalService>();
+// Stream E (AI recipe generator, decision D1): the construction seam and its orchestrator.
+// Same lazy-resolution story as stream C — IChatMessageCaller comes from AddChatAssistant
+// below, and the Gemini key is only demanded when a generation actually runs.
+builder.Services.AddScoped<IRecipeGenerationAssistant, RecipeGenerationAssistant>();
+builder.Services.AddScoped<IRecipeGenerationService, RecipeGenerationService>();
 // open-loops slice 3: the READ side only — notification writes are staged inline in
 // SocialService so they share a transaction with the interaction that caused them.
 builder.Services.AddScoped<INotificationService, NotificationService>();

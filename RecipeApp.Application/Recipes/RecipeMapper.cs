@@ -28,6 +28,8 @@ public static class RecipeMapper
             recipe.Ingredients,
             recipe.Steps,
             recipe.Tags,
-            recipe.CreatedByUserId);
+            recipe.CreatedByUserId,
+            recipe.IsAiGenerated,
+            recipe.SourceConversationId);
     }
 }
