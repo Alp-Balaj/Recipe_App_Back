@@ -80,6 +80,7 @@ builder.Services.AddScoped<IRecipeService, RecipeService>();
 // The ingredient catalogue (stream G, slice G2 — D8/D9).
 builder.Services.AddScoped<IIngredientResolver, IngredientResolver>();
 builder.Services.AddScoped<IIngredientCatalogueService, IngredientCatalogueService>();
+builder.Services.AddScoped<IRecipeInsightService, RecipeInsightService>();
 builder.Services.AddScoped<IngredientCatalogueSeeder>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();

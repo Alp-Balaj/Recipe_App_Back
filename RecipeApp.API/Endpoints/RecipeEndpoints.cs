@@ -142,6 +142,29 @@ public static class RecipeEndpoints
         .AllowAnonymous()
         .RequireRateLimiting(RateLimitPolicies.Social);
 
+        // GET /recipes/{id}/insights — stream G, slice G4.
+        //
+        // Its own route rather than fields on RecipeResponse: it costs a catalogue join
+        // that the feed, the planner and the picker would all otherwise pay for data none
+        // of them shows. Anonymous-capable like the detail read beside it; an anonymous
+        // caller gets nutrition and no dietary checks, because the restrictions checked
+        // are the CALLER's own.
+        group.MapGet("/{id:guid}/insights", async (
+            Guid id, IRecipeInsightService insights, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var userId = GetOptionalUserId(user);
+            var result = await insights.GetAsync(id, userId, cancellationToken);
+            // 404-never-403, exactly as GET /recipes/{id} does it: insights describe a
+            // recipe, so their existence must not confirm a private one's.
+            return result.Outcome switch
+            {
+                RecipeOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        })
+        .AllowAnonymous()
+        .RequireRateLimiting(RateLimitPolicies.Social);
+
         group.MapPut("/{id:guid}", async (Guid id, UpdateRecipeRequest request, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
