@@ -9,11 +9,13 @@ public class AddMealPlanEntryRequestValidator : AbstractValidator<AddMealPlanEnt
 {
     public AddMealPlanEntryRequestValidator()
     {
-        // The global JsonStringEnumConverter is registered with AllowIntegerValues (the
-        // default), so a numeric body value outside the enum's range binds silently instead
-        // of throwing at deserialization — IsInEnum() is what turns that into a 400 instead
-        // of a garbage DayOfWeek/MealType reaching the service. Malformed *string* values
-        // (e.g. "Fourthday") never reach here — they fail at JSON body binding first (400).
+        // Stream G turned OFF allowIntegerValues on the global JsonStringEnumConverter, so a
+        // numeric body value no longer binds at all — "dayOfWeek": 9 is a 400 at
+        // deserialization now, alongside malformed strings like "Fourthday".
+        //
+        // IsInEnum() stays, and is not redundant: it guards the value that arrives by a CAST
+        // rather than off the wire, which is how the unit tests reach these rules and how any
+        // future in-process caller would.
         RuleFor(x => x.DayOfWeek).IsInEnum();
         RuleFor(x => x.MealType).IsInEnum();
         RuleFor(x => x.RecipeId).NotEmpty();
