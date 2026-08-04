@@ -88,9 +88,6 @@ Console.WriteLine($"  {selected.Count:N0} kept after the {options.MaxIngredients
 
 // ── Ingredients + aliases ───────────────────────────────────────────────────────────
 var ingredients = new List<SeedIngredient>(selected.Count);
-// MatchKey is the PRIMARY KEY of IngredientAliases, so a key can belong to exactly one
-// ingredient. First writer wins, and the list is ordered most-generic-first above, so
-// the ambiguous bare head noun ("flour") lands on the most generic entry that claims it.
 var aliasOwner = new Dictionary<string, Guid>(StringComparer.Ordinal);
 
 foreach (var (name, food) in selected)
@@ -112,6 +109,51 @@ foreach (var (name, food) in selected)
         Round(food.FibreG, 2),
         food.FdcId));
 
+}
+
+// Primary claims FIRST, so the most-typed bare words land where a person means them
+// rather than wherever the genericness score happens to point (see Naming.PrimaryClaims).
+var byCanonicalName = selected.ToDictionary(
+    kv => kv.Key,
+    kv => DeterministicId(kv.Value.FdcId),
+    StringComparer.OrdinalIgnoreCase);
+
+var claimsMissingTarget = new List<string>();
+foreach (var (key, canonical) in Naming.PrimaryClaims)
+{
+    if (byCanonicalName.TryGetValue(canonical, out var claimed))
+    {
+        aliasOwner[IngredientKey.For(key)] = claimed;
+    }
+    else
+    {
+        claimsMissingTarget.Add($"{key} -> {canonical}");
+    }
+}
+
+if (claimsMissingTarget.Count > 0)
+{
+    Console.WriteLine($"  {claimsMissingTarget.Count:N0} primary claims had no target:");
+    foreach (var missing in claimsMissingTarget)
+    {
+        Console.WriteLine($"      {missing}");
+    }
+}
+
+// Aliases in a SECOND pass, in genericness order rather than the alphabetical order the
+// ingredients are emitted in.
+//
+// MatchKey is the PRIMARY KEY of IngredientAliases, so a key belongs to exactly one
+// ingredient and the first writer keeps it. Which writer is first therefore decides what
+// a bare head noun means: iterating alphabetically handed "flour" to "00 flour" (an
+// Italian pizza flour) purely because zero sorts before every letter. Iterating by
+// genericness hands it to a plain wheat flour, which is what someone typing "flour"
+// means. The two orders are separated here so neither has to compromise — the seed file
+// stays alphabetical and reviewable, the claims stay sensible.
+foreach (var (name, food) in selected.OrderBy(kv => Naming.GenericnessScore(kv.Value))
+                                     .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
+{
+    var id = DeterministicId(food.FdcId);
     foreach (var alias in Naming.DatasetAliases(food.Segments, name))
     {
         var key = IngredientKey.For(alias);

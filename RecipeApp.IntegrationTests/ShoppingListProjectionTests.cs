@@ -7,6 +7,7 @@ using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
 
@@ -127,29 +128,92 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         Assert.Equal(2, salt.Parts.Count);
     }
 
-    // The honest half of the same rule: mass and volume are both convertible but do not
-    // convert to EACH OTHER without the ingredient's density, so one group can carry two
-    // totals. Density-aware collapsing is slice G3's, off the catalogue.
+    // The honest half of the same rule BEFORE the catalogue existed: mass and volume are
+    // both convertible but do not convert to EACH OTHER without a density, so a group
+    // measured both ways carries two totals.
+    //
+    // Slice G3 closes that gap for RESOLVED ingredients — see the two tests below — but
+    // this case is permanent for the unresolved ones, which D8 guarantees will always
+    // exist. "zzzz" is a name no catalogue knows, on purpose.
     [Fact]
-    public async Task A_group_measured_by_both_mass_and_volume_reports_two_totals()
+    public async Task An_unresolved_group_measured_by_both_mass_and_volume_reports_two_totals()
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
         var weekStart = NextMonday();
 
-        var byWeight = await CreateRecipeAsync(client, "Weighed", [("Milk", 300m, UnitOfMeasure.Gram)]);
-        var byVolume = await CreateRecipeAsync(client, "Poured", [("milk", 2m, UnitOfMeasure.Cup)]);
+        var byWeight = await CreateRecipeAsync(client, "Weighed", [("Zzzz goop", 300m, UnitOfMeasure.Gram)]);
+        var byVolume = await CreateRecipeAsync(client, "Poured", [("zzzz goop", 2m, UnitOfMeasure.Cup)]);
 
         var planId = await CreatePlanAsync(client, weekStart);
         await AddEntryAsync(client, planId, "Monday", "Dinner", byWeight);
         await AddEntryAsync(client, planId, "Tuesday", "Dinner", byVolume);
 
         var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
-        var milk = Assert.Single(week.Groups, g => g.DisplayName is "Milk" or "milk");
+        var goop = Assert.Single(week.Groups, g => g.DisplayName is "Zzzz goop" or "zzzz goop");
 
-        Assert.Equal(2, milk.Totals.Count);
-        Assert.Contains(milk.Totals, t => t.Unit == UnitOfMeasure.Gram && t.Quantity == 300m);
+        Assert.Equal(2, goop.Totals.Count);
+        Assert.Contains(goop.Totals, t => t.Unit == UnitOfMeasure.Gram && t.Quantity == 300m);
         // 2 cups at the 240 ml convention = 480 ml, which has not earned promotion to litres.
-        Assert.Contains(milk.Totals, t => t.Unit == UnitOfMeasure.Millilitre && t.Quantity == 480m);
+        Assert.Contains(goop.Totals, t => t.Unit == UnitOfMeasure.Millilitre && t.Quantity == 480m);
+        // Unresolved, so keyed by the NAME, not by a catalogue id.
+        Assert.DoesNotContain(ShoppingListKeys.IngredientPrefix, goop.Key);
+    }
+
+    // ── Slice G3: the catalogue's payoff on this surface ───────────────────────────
+
+    [Fact]
+    public async Task A_resolved_group_collapses_volume_into_mass_using_its_density()
+    {
+        // The line the plan promised: "2 cups + 300 g of flour collapses to one number".
+        // It needs three things that arrived in three different slices — a typed unit
+        // (G1), a resolved ingredient (G2), and that ingredient's density (G2's ingest).
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        var byWeight = await CreateRecipeAsync(client, "Weighed", [("Flour", 300m, UnitOfMeasure.Gram)]);
+        var byVolume = await CreateRecipeAsync(client, "Poured", [("flour", 2m, UnitOfMeasure.Cup)]);
+
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", byWeight);
+        await AddEntryAsync(client, planId, "Tuesday", "Dinner", byVolume);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        var flour = Assert.Single(week.Groups, g => g.DisplayName is "Flour" or "flour");
+
+        // ONE total, in mass. The exact figure depends on the catalogue's density for
+        // flour, so the assertion is on the shape and the floor: 300 g plus 480 ml of
+        // anything food-like is comfortably more than 300 g and less than 300 g + 480 g.
+        var total = Assert.Single(flour.Totals);
+        Assert.Equal(UnitDimension.Mass, Units.DimensionOf(total.Unit));
+        var grams = total.Unit == UnitOfMeasure.Kilogram ? total.Quantity * 1000m : total.Quantity;
+        Assert.InRange(grams, 301m, 780m);
+    }
+
+    [Fact]
+    public async Task Two_spellings_of_one_resolved_ingredient_are_a_single_row()
+    {
+        // The other half of G3's key change, and the one no normalisation could ever
+        // have done: "prawns" and "shrimp" produce different IngredientKeys, so before
+        // the catalogue they were permanently two rows on a shopping list.
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        var a = await CreateRecipeAsync(client, "Curry", [("Prawns", 300m, UnitOfMeasure.Gram)]);
+        var b = await CreateRecipeAsync(client, "Paella", [("shrimp", 200m, UnitOfMeasure.Gram)]);
+
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", a);
+        await AddEntryAsync(client, planId, "Tuesday", "Dinner", b);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        var seafood = week.Groups
+            .Where(g => g.Key.StartsWith(ShoppingListKeys.IngredientPrefix, StringComparison.Ordinal))
+            .Where(g => g.Parts.Count == 2)
+            .ToList();
+
+        var group = Assert.Single(seafood);
+        Assert.Equal(500m, Assert.Single(group.Totals).Quantity);
+        Assert.Equal(2, group.Dishes.Count);
     }
 
     [Fact]

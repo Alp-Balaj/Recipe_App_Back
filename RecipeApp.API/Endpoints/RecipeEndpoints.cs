@@ -169,32 +169,27 @@ public static class RecipeEndpoints
             };
         });
 
-        // task-10 (meal-planning-week-shopping-rework): recipe-form autocomplete. A shared
-        // corpus, but only over the recipes the CALLER MAY SEE — Public plus their own, the
-        // same visibility rule 1 predicate the list routes use. The original spec said "all
-        // non-deleted recipes"; that was wrong, and it made every user's private recipes'
-        // ingredient names readable by every authenticated caller. Public recipes dominate the
-        // corpus, so autocomplete still converges — the feature is unharmed.
+        // GET /ingredients/names was RETIRED by stream G, slice G3.
         //
-        // No AllowAnonymous (the global auth fallback applies, same as the write routes above),
-        // so this keeps the parsing caller-id shape /mine uses rather than the nullable
-        // GetOptionalUserId of the two anonymous-capable reads. On its own Meal rate-limit lane
-        // per the plan.
-        app.MapGet("/ingredients/names", async (string? q, IRecipeService recipeService, ClaimsPrincipal user, CancellationToken cancellationToken) =>
-        {
-            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
-            var names = await recipeService.GetIngredientNamesAsync(q, userId, cancellationToken);
-            return Results.Ok(names);
-        })
-        .RequireRateLimiting(RateLimitPolicies.Meal);
+        // It answered the recipe form's autocomplete by scanning the 500 most recent
+        // recipes' jsonb and offering back whatever people had already typed — the best
+        // available answer when the only vocabulary was the corpus itself. Its own
+        // comment conceded what it bought: it "only slows the corpus from diverging
+        // further". GET /ingredients replaces it with a curated set of 1,500 canonical
+        // ingredients that the WRITE path then actually resolves against, so a suggestion
+        // is now a promise rather than a hint.
+        //
+        // It also carried a visibility rule, because it read names out of RECIPES and had
+        // to not leak a private one. The catalogue belongs to nobody, so its replacement
+        // needs no caller at all — see /ingredients below.
 
         // GET /ingredients — the catalogue (stream G, slice G2).
         //
         // AllowAnonymous, and it is the first read in this codebase that is genuinely
         // unscoped. Every other list applies a visibility rule because its rows belong to
         // someone; a catalogue row belongs to nobody and is identical for every caller.
-        // Contrast /ingredients/names directly above, which is caller-scoped precisely
-        // because it reads names out of RECIPES and must not leak a private one.
+        // Contrast the retired /ingredients/names, which had to be caller-scoped
+        // precisely because it read names out of RECIPES and could leak a private one.
         //
         // Social rate-limit lane, matching the other anonymous-capable reads.
         app.MapGet("/ingredients", async (

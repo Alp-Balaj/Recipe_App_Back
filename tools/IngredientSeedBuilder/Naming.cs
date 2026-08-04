@@ -330,6 +330,44 @@ public static class Naming
     }
 
     /// <summary>
+    /// The bare head nouns people type most, claimed EXPLICITLY.
+    ///
+    /// A bare "flour" or "milk" is ambiguous — the catalogue holds dozens of each — and
+    /// whichever entry claims the key first keeps it, because MatchKey is a primary key.
+    /// Genericness ordering picks the shortest DESCRIPTION, which is not the same as the
+    /// most expected ingredient: it handed "flour" to 00 flour (an Italian pizza flour,
+    /// one segment) and "milk" to sheep milk. Neither is what someone typing the word
+    /// means.
+    ///
+    /// Applied BEFORE the dataset's own aliases so these win. Kept short on purpose —
+    /// it is a list of genuinely ambiguous everyday words, not a second naming system.
+    /// </summary>
+    public static readonly (string Key, string CanonicalName)[] PrimaryClaims =
+    [
+        ("flour", "White wheat flour"),
+        ("milk", "3.25% milkfat milk whole"),
+        ("whole milk", "3.25% milkfat milk whole"),
+        ("rice", "White rice"),
+        ("sugar", "Granulated sugars"),
+        ("oil", "Vegetable oil"),
+        ("vinegar", "Distilled vinegar"),
+        ("wine", "Cooking wine"),
+        ("yogurt", "Plain yogurt"),
+        ("cream", "Heavy cream"),
+        ("cheese", "Cheddar cheese"),
+        ("onion", "Onions"),
+        ("potato", "Flesh and skin potatoes"),
+        ("potatoes", "Flesh and skin potatoes"),
+        ("tomato", "Red tomatoes"),
+        ("tomatoes", "Red tomatoes"),
+        ("egg", "Egg whole"),
+        ("eggs", "Egg whole"),
+        ("butter", "Butter"),
+        ("salt", "Table salt"),
+        ("pepper", "Black pepper"),
+    ];
+
+    /// <summary>
     /// Regional and everyday spellings that no rule could derive from the dataset,
     /// mapped to the canonical name the ingest produces. FDC is a US database written
     /// in US English; the app's users are not.
@@ -345,7 +383,6 @@ public static class Naming
         // British / Commonwealth
         ("plain flour", "Wheat flour"),
         ("all-purpose flour", "Wheat flour"),
-        ("wholemeal flour", "Whole wheat flour"),
         ("cornflour", "Cornstarch"),
         ("beef mince", "Ground beef"),
         ("minced beef", "Ground beef"),
@@ -394,6 +431,13 @@ public static class Naming
         ("rocket", "Arugula"),
         ("swede", "Rutabagas"),
         ("soured cream", "Sour cream"),
+        ("tomato paste", "Paste tomato"),
+        ("tomato puree", "Puree tomato"),
+        ("plain flour", "White wheat flour"),
+        ("all-purpose flour", "White wheat flour"),
+        ("bread flour", "Bread wheat flours"),
+        ("wholemeal flour", "Whole wheat flour"),
+        ("whole wheat flour", "Whole wheat flour"),
 
         // Added after the corpus pass reported them unresolved against the real recipe
         // database — D9's loop closing. Each is a spelling a user actually wrote.

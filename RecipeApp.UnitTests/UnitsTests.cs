@@ -65,6 +65,19 @@ public class UnitsTests
         Assert.Throws<ArgumentOutOfRangeException>(() => Units.BaseUnitOf(UnitDimension.Imprecise));
     }
 
+    [Fact]
+    public void FormatBase_drops_false_precision_on_a_large_base_figure()
+    {
+        // A density-derived total ("573.98 g of flour") carries decimals no shop and no
+        // scale will honour — they exist only because a cup measure was multiplied by a
+        // density. Whole units above 10; below that the fraction IS the quantity.
+        Assert.Equal("574 g", Units.FormatBase(573.984m, UnitDimension.Mass));
+        Assert.Equal("2.5 g", Units.FormatBase(2.5m, UnitDimension.Mass));
+        Assert.Equal("458 ml", Units.FormatBase(457.6m, UnitDimension.Volume));
+        // kg and l keep theirs — there the decimal is real information.
+        Assert.Equal("1.57 kg", Units.FormatBase(1573.98m, UnitDimension.Mass));
+    }
+
     [Theory]
     [InlineData(1500, UnitDimension.Mass, "1.5 kg")]
     [InlineData(999, UnitDimension.Mass, "999 g")]
