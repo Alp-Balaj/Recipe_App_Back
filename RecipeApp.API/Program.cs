@@ -77,6 +77,10 @@ builder.Services.AddScoped<IPasswordHasher, PasswordHasher>();
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
+// The ingredient catalogue (stream G, slice G2 — D8/D9).
+builder.Services.AddScoped<IIngredientResolver, IngredientResolver>();
+builder.Services.AddScoped<IIngredientCatalogueService, IngredientCatalogueService>();
+builder.Services.AddScoped<IngredientCatalogueSeeder>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();
 builder.Services.AddScoped<IShoppingListService, ShoppingListService>();
@@ -280,6 +284,29 @@ builder.Services.AddAuthorization(options =>
 });
 
 var app = builder.Build();
+
+// The ingredient catalogue is reference data the application needs, not sample data, so
+// it loads at startup rather than from tools/seed. Idempotent, and safe to run on every
+// boot: Railway applies migrations in a PRE-DEPLOY step (see DEPLOY.md), so the tables
+// exist by the time this runs.
+//
+// A failure here is logged and swallowed. An empty catalogue degrades the app to exactly
+// its pre-G2 behaviour — every ingredient resolves to null, which is a legal state by
+// D8 — and that is a far better outcome than an API that will not start because a
+// reference table could not be filled.
+using (var startupScope = app.Services.CreateScope())
+{
+    try
+    {
+        await startupScope.ServiceProvider.GetRequiredService<IngredientCatalogueSeeder>().SeedAsync();
+    }
+    catch (Exception ex)
+    {
+        startupScope.ServiceProvider
+            .GetRequiredService<ILogger<Program>>()
+            .LogError(ex, "Ingredient catalogue seeding failed — ingredients will not resolve.");
+    }
+}
 
 // Railway (publish cp1) terminates TLS at its edge and proxies over http, so trust the
 // edge's X-Forwarded-For/-Proto: without this every client shares the proxy's IP (one

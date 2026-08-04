@@ -14,17 +14,24 @@ namespace RecipeApp.Infrastructure.Recipes;
 public class RecipeService : IRecipeService
 {
     private readonly ApplicationDbContext _db;
+    private readonly IIngredientResolver _ingredientResolver;
     private readonly ILogger<RecipeService> _logger;
 
-    public RecipeService(ApplicationDbContext db, ILogger<RecipeService> logger)
+    public RecipeService(ApplicationDbContext db, IIngredientResolver ingredientResolver, ILogger<RecipeService> logger)
     {
         _db = db;
+        _ingredientResolver = ingredientResolver;
         _logger = logger;
     }
 
     public async Task<RecipeResponse> CreateRecipeAsync(CreateRecipeRequest request, Guid createdByUserId, CancellationToken cancellationToken = default)
     {
         var recipe = ToRecipe(request, createdByUserId);
+
+        // Resolution runs on WRITE (stream G, D8) — before the Add, so the ids are part
+        // of the same jsonb document the insert writes rather than a second UPDATE.
+        await _ingredientResolver.ResolveAsync(recipe.Ingredients, cancellationToken);
+
         _db.Recipes.Add(recipe);
 
         // Gamification: publishing a recipe awards the author RecipeCreated (+20). The rank
@@ -201,6 +208,12 @@ public class RecipeService : IRecipeService
         recipe.Steps = request.Steps;
         recipe.Tags = request.Tags;
         recipe.UpdatedAt = DateTime.UtcNow;
+
+        // Resolution runs on WRITE (stream G, D8), on update as well as create: an
+        // author correcting "flor" to "flour" gains the catalogue id, and one changing
+        // "flour" to "gochujang" loses it. Never throws, never drops a line, never
+        // rewrites Name — see IIngredientResolver.
+        await _ingredientResolver.ResolveAsync(recipe.Ingredients, cancellationToken);
 
         await _db.SaveChangesAsync(cancellationToken);
 

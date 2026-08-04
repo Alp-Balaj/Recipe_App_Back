@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ONE-SHOT TOOL (stream G, slice G2). Deliberately NOT in RecipeApp.slnx: it is
+    run by hand when the catalogue needs regenerating, and its output — the seed
+    file — is what the application consumes. Nothing in the build, the test run
+    or the deploy touches USDA data.
+
+    It is a C# project rather than a script beside tools/seed/seed.mjs for one
+    reason: it must key aliases with the REAL IngredientKey. Reimplementing that
+    normalisation in JavaScript would put a second copy of subtle, test-pinned
+    rules (the prep-word list, the singulariser, the parenthetical stripping) in
+    a place no test covers — and a drift between the two would show up as
+    ingredients that silently stop resolving.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>RecipeApp.Tools.IngredientSeedBuilder</RootNamespace>
+    <!-- Directory.Build.props at the repo root turns warnings into errors for the
+         shipped projects; this one is throwaway tooling and stays out of that. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\RecipeApp.Application\RecipeApp.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Only to read the existing recipe corpus for aliases (D9). Raw SQL, not EF:
+         the tool must run against a database whose schema is mid-migration. -->
+    <PackageReference Include="Npgsql" Version="9.0.2" />
+  </ItemGroup>
+
+</Project>
