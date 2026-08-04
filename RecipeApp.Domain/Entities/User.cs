@@ -26,7 +26,9 @@ public class User
     // The visibility applied by default to recipes this user creates (edited from
     // account settings — Edit profile). Stored as text, backfilled to Public.
     public RecipeVisibility DefaultRecipeVisibility { get; set; } = RecipeVisibility.Public;
-    public List<string> DietaryRestrictions { get; set; } = [];
+    // Typed in stream G (D10). These reach every AI system prompt as an absolute constraint,
+    // so a free-text typo was a restriction the model was asked to honour and could not.
+    public List<DietaryRestriction> DietaryRestrictions { get; set; } = [];
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Recipes this user created

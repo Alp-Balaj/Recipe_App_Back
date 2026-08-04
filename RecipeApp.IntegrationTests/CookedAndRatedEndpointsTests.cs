@@ -330,11 +330,11 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
         CookTimeMinutes: 90,
         Servings: 6,
         Difficulty: DifficultyLevel.Medium,
-        CuisineType: "Italian",
+        CuisineType: Cuisine.Italian,
         CaloriesPerServing: 480,
         ImageUrl: null,
         Visibility: visibility,
-        Ingredients: [new RecipeIngredient { Name = "beef mince", Quantity = 500m, Unit = "g" }],
+        Ingredients: [new RecipeIngredient { Name = "beef mince", Quantity = 500m, Unit = UnitOfMeasure.Gram }],
         Steps: [new RecipeStep { StepNumber = 1, Description = "Brown, simmer, wait." }],
-        Tags: ["pasta"]);
+        Tags: [RecipeTag.Pasta]);
 }

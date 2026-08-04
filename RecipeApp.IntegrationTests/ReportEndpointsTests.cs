@@ -159,13 +159,13 @@ public class ReportEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
             CookTimeMinutes: 20,
             Servings: 2,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "Italian",
+            CuisineType: Cuisine.Italian,
             CaloriesPerServing: 300,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: [new RecipeIngredient { Name = "potato", Quantity = 400m, Unit = "g" }],
+            Ingredients: [new RecipeIngredient { Name = "potato", Quantity = 400m, Unit = UnitOfMeasure.Gram }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Boil and shape." }],
-            Tags: ["comfort"]);
+            Tags: [RecipeTag.Comfort]);
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options))!;

@@ -11,8 +11,14 @@ using RecipeApp.Infrastructure.Persistence;
 namespace RecipeApp.IntegrationTests;
 
 // Tests in this class share one database (sequential within the class, own container via
-// the class fixture), so every test scopes its assertions with unique marker tags/cuisines
-// or walks all pages and asserts id presence/absence — never "the list contains only X".
+// the class fixture), so every test scopes its assertions to rows it seeded itself, or walks
+// all pages and asserts id presence/absence — never "the list contains only X".
+//
+// HOW that scoping works changed with stream G. Tags used to be free text, so a test could
+// mint a tag nobody else would ever use and filter on it. A curated vocabulary has no such
+// spare values — RecipeTag.Soup belongs to every test that wants it. The replacement is a
+// unique nonsense word in the TITLE plus ?search= (the full-text index covers titles), which
+// isolates just as tightly and no longer depends on a field being unconstrained.
 public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFixture<IntegrationTestFactory>
 {
     [Fact]
@@ -20,15 +26,15 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
-        var marker = UniqueTag();
+        var marker = UniqueMarker();
 
         var seeded = new List<RecipeResponse>();
         for (var i = 1; i <= 7; i++)
         {
-            seeded.Add(await SeedRecipeAsync(client, title: $"Walk {i}", tags: [marker, "walk"]));
+            seeded.Add(await SeedRecipeAsync(client, title: $"{marker} Walk {i}", tags: [RecipeTag.Quick]));
         }
 
-        var pages = await WalkAllPagesAsync(client, $"/recipes?tags={marker}&limit=3");
+        var pages = await WalkAllPagesAsync(client, $"/recipes?search={marker}&limit=3");
 
         Assert.Equal(3, pages.Count);
         Assert.Equal([3, 3, 1], pages.Select(p => p.Items.Count));
@@ -44,10 +50,10 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
 
         // Items are the full RecipeResponse (Decisions §4) — ingredients/steps included.
         var newest = pages[0].Items[0];
-        Assert.Equal("Walk 7", newest.Title);
+        Assert.Equal($"{marker} Walk 7", newest.Title);
         Assert.NotEmpty(newest.Ingredients);
         Assert.NotEmpty(newest.Steps);
-        Assert.Contains(marker, newest.Tags);
+        Assert.Contains(RecipeTag.Quick, newest.Tags);
     }
 
     [Fact]
@@ -55,36 +61,57 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
-        var marker = UniqueTag();
+        var marker = UniqueMarker();
 
         for (var i = 0; i < 3; i++)
         {
-            await SeedRecipeAsync(client, tags: [marker]);
+            await SeedRecipeAsync(client, title: $"{marker} Fit {i}");
         }
 
-        var page = await GetListAsync(client, $"/recipes?tags={marker}&limit=3");
+        var page = await GetListAsync(client, $"/recipes?search={marker}&limit=3");
 
         Assert.Equal(3, page.Items.Count);
         Assert.Null(page.NextCursor);
     }
 
     [Fact]
-    public async Task ListRecipes_CuisineFilter_IsCaseInsensitiveExactMatch()
+    public async Task ListRecipes_CuisineFilter_MatchesEnumMemberCaseInsensitively()
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
-        var suffix = Guid.NewGuid().ToString("N");
+        var marker = UniqueMarker();
 
-        var fusion = await SeedRecipeAsync(client, cuisineType: $"Fusion{suffix}");
-        await SeedRecipeAsync(client, cuisineType: $"Other{suffix}");
+        var thai = await SeedRecipeAsync(client, title: $"{marker} Thai", cuisineType: Cuisine.Thai);
+        await SeedRecipeAsync(client, title: $"{marker} Greek", cuisineType: Cuisine.Greek);
 
-        // Different casing than stored — must still match exactly one recipe.
-        var matched = await GetListAsync(client, $"/recipes?cuisine=fUsIoN{suffix.ToUpperInvariant()}");
-        Assert.Equal([fusion.Id], matched.Items.Select(r => r.Id));
+        // Different casing than the member name — Enum.TryParse(ignoreCase) still matches.
+        var matched = await GetListAsync(client, $"/recipes?search={marker}&cuisine=tHaI");
+        Assert.Equal([thai.Id], matched.Items.Select(r => r.Id));
+    }
 
-        // Substring of a stored cuisine — exact match only, so nothing comes back.
-        var substring = await GetListAsync(client, $"/recipes?cuisine=usion{suffix}");
-        Assert.Empty(substring.Items);
+    // Stream G: what used to be a silent empty page is now a 400. Before the cuisine column
+    // was typed, ?cuisine=Klingon matched no rows and returned 200 — a client typo and "we
+    // have none of those" were the same response.
+    [Fact]
+    public async Task ListRecipes_UnknownCuisine_ReturnsBadRequest()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var response = await client.GetAsync("/recipes?cuisine=Klingon");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ListRecipes_UnknownTag_ReturnsBadRequest()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var response = await client.GetAsync("/recipes?tags=NotATag");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
@@ -92,12 +119,12 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
-        var marker = UniqueTag();
+        var marker = UniqueMarker();
 
-        await SeedRecipeAsync(client, tags: [marker], difficulty: DifficultyLevel.Easy);
-        var hard = await SeedRecipeAsync(client, tags: [marker], difficulty: DifficultyLevel.Hard);
+        await SeedRecipeAsync(client, title: $"{marker} Easy", difficulty: DifficultyLevel.Easy);
+        var hard = await SeedRecipeAsync(client, title: $"{marker} Hard", difficulty: DifficultyLevel.Hard);
 
-        var page = await GetListAsync(client, $"/recipes?tags={marker}&difficulty=Hard");
+        var page = await GetListAsync(client, $"/recipes?search={marker}&difficulty=Hard");
 
         Assert.Equal([hard.Id], page.Items.Select(r => r.Id));
     }
@@ -107,20 +134,19 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
-        var tag1 = UniqueTag();
-        var tag2 = UniqueTag();
+        var marker = UniqueMarker();
 
-        var onlyTag1 = await SeedRecipeAsync(client, tags: [tag1]);
-        await SeedRecipeAsync(client, tags: [tag2]);
-        var both = await SeedRecipeAsync(client, tags: [tag1, tag2]);
+        var onlySoup = await SeedRecipeAsync(client, title: $"{marker} Soup", tags: [RecipeTag.Soup]);
+        await SeedRecipeAsync(client, title: $"{marker} Vegan", tags: [RecipeTag.Vegan]);
+        var both = await SeedRecipeAsync(client, title: $"{marker} Both", tags: [RecipeTag.Soup, RecipeTag.Vegan]);
 
         // Match-ALL: requesting both tags returns only the recipe carrying both.
-        var bothPage = await GetListAsync(client, $"/recipes?tags={tag1}&tags={tag2}");
+        var bothPage = await GetListAsync(client, $"/recipes?search={marker}&tags=Soup&tags=Vegan");
         Assert.Equal([both.Id], bothPage.Items.Select(r => r.Id));
 
         // A single tag still matches every recipe carrying it.
-        var tag1Page = await GetListAsync(client, $"/recipes?tags={tag1}");
-        Assert.Equal(new HashSet<Guid> { onlyTag1.Id, both.Id }, tag1Page.Items.Select(r => r.Id).ToHashSet());
+        var soupPage = await GetListAsync(client, $"/recipes?search={marker}&tags=Soup");
+        Assert.Equal(new HashSet<Guid> { onlySoup.Id, both.Id }, soupPage.Items.Select(r => r.Id).ToHashSet());
     }
 
     // Visibility rule 1 (recipe-management plan): the caller's own non-public recipes
@@ -153,10 +179,10 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
-        var marker = UniqueTag();
+        var marker = UniqueMarker();
 
-        var kept = await SeedRecipeAsync(client, tags: [marker]);
-        var deleted = await SeedRecipeAsync(client, tags: [marker]);
+        var kept = await SeedRecipeAsync(client, title: $"{marker} Kept");
+        var deleted = await SeedRecipeAsync(client, title: $"{marker} Deleted");
 
         // No DELETE endpoint until checkpoint 05 — soft-delete the row directly.
         using (var scope = factory.Services.CreateScope())
@@ -168,7 +194,7 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
             await db.SaveChangesAsync();
         }
 
-        var page = await GetListAsync(client, $"/recipes?tags={marker}");
+        var page = await GetListAsync(client, $"/recipes?search={marker}");
 
         Assert.Equal([kept.Id], page.Items.Select(r => r.Id));
     }
@@ -257,7 +283,7 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
     {
         var client = factory.CreateClient();
         var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
-        var marker = UniqueTag();
+        var marker = UniqueMarker();
 
         // Microsecond-precise (no sub-microsecond ticks), so every row stores the exact same
         // instant and the keyset predicate must fall through to the Id tie-break.
@@ -271,7 +297,7 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
                 var recipe = new Recipe
                 {
                     Id = Guid.NewGuid(),
-                    Title = $"Tie {i}",
+                    Title = $"{marker} Tie {i}",
                     Description = "Seeded with an identical CreatedAt to exercise the keyset tie-break.",
                     PrepTimeMinutes = 1,
                     CookTimeMinutes = 1,
@@ -280,9 +306,9 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
                     Visibility = RecipeVisibility.Public,
                     CreatedAt = sharedCreatedAt,
                     CreatedByUserId = auth.UserId,
-                    Ingredients = [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = "cup" }],
+                    Ingredients = [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = UnitOfMeasure.Cup }],
                     Steps = [new RecipeStep { StepNumber = 1, Description = "Combine." }],
-                    Tags = [marker],
+                    Tags = [],
                 };
                 db.Recipes.Add(recipe);
                 seededIds.Add(recipe.Id);
@@ -292,7 +318,7 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
 
         // limit=2 forces at least three pages, so the cursor crosses the equal-CreatedAt
         // boundary twice — exactly where a missing tie-break would skip or duplicate a row.
-        var walkedIds = (await WalkAllPagesAsync(client, $"/recipes?tags={marker}&limit=2"))
+        var walkedIds = (await WalkAllPagesAsync(client, $"/recipes?search={marker}&limit=2"))
             .SelectMany(p => p.Items)
             .Select(r => r.Id)
             .ToList();
@@ -313,7 +339,14 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
         }
     }
 
-    private static string UniqueTag() => $"list-{Guid.NewGuid():N}";
+    // A nonsense word no other test will produce, safe to drop into a title and match with
+    // ?search=. Letters only: the tsvector pipeline indexes it as a single lexeme, and the
+    // english stemmer leaves a word with no recognisable suffix alone.
+    private static string UniqueMarker()
+    {
+        var bytes = Guid.NewGuid().ToByteArray();
+        return "mk" + string.Concat(bytes.Take(10).Select(b => (char)('a' + b % 26)));
+    }
 
     private static async Task<RecipeListResponse> GetListAsync(HttpClient client, string url)
     {
@@ -354,8 +387,8 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
     private static async Task<RecipeResponse> SeedRecipeAsync(
         HttpClient client,
         string title = "List Test Recipe",
-        List<string>? tags = null,
-        string? cuisineType = null,
+        List<RecipeTag>? tags = null,
+        Cuisine? cuisineType = null,
         DifficultyLevel difficulty = DifficultyLevel.Easy,
         RecipeVisibility visibility = RecipeVisibility.Public)
     {
@@ -370,7 +403,7 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
             CaloriesPerServing: null,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = "cup" }],
+            Ingredients: [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = UnitOfMeasure.Cup }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Combine and serve." }],
             Tags: tags ?? []);
 

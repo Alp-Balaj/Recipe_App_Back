@@ -18,12 +18,24 @@ public class CreateRecipeRequestValidator : AbstractValidator<CreateRecipeReques
         RuleFor(x => x.Visibility).IsInEnum();
         RuleFor(x => x.CaloriesPerServing).GreaterThanOrEqualTo(0).When(x => x.CaloriesPerServing is not null);
 
+        // Stream G: the typed vocabularies. IsInEnum is doing real work here rather than
+        // restating the type — the global JsonStringEnumConverter is registered with integer
+        // values allowed, so a client posting "cuisineType": 999 binds to an undefined enum
+        // value without complaint and would otherwise reach jsonb. (Same reasoning as
+        // CreateReportRequestValidator's note.) A null cuisine is legal: "no particular
+        // cuisine" is an answer.
+        RuleFor(x => x.CuisineType).IsInEnum().When(x => x.CuisineType is not null);
+        RuleForEach(x => x.Tags).IsInEnum();
+
         RuleFor(x => x.Ingredients).NotEmpty();
         RuleForEach(x => x.Ingredients).ChildRules(ingredient =>
         {
             ingredient.RuleFor(i => i.Name).NotEmpty();
             ingredient.RuleFor(i => i.Quantity).GreaterThan(0);
-            ingredient.RuleFor(i => i.Unit).NotEmpty();
+            // Was NotEmpty() on a free-text string. The unit is now a closed vocabulary, so
+            // "what is a valid unit" is a question the type answers and this only has to
+            // catch the undefined-value case above.
+            ingredient.RuleFor(i => i.Unit).IsInEnum();
         });
 
         RuleFor(x => x.Steps).NotEmpty();

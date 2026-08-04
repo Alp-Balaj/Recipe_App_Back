@@ -681,7 +681,8 @@ public class SocialService : ISocialService
             followingCount,
             recipeCount,
             followedByMe,
-            user.DefaultRecipeVisibility));
+            user.DefaultRecipeVisibility,
+            user.DietaryRestrictions));
     }
 
     public async Task<SocialResult<UserProfileResponse>> UpdateProfileAsync(UpdateProfileRequest request, Guid currentUserId, CancellationToken cancellationToken = default)
@@ -713,6 +714,12 @@ public class SocialService : ISocialService
         user.Bio = string.IsNullOrWhiteSpace(request.Bio) ? null : request.Bio.Trim();
         user.ProfileImageUrl = string.IsNullOrWhiteSpace(request.ProfileImageUrl) ? null : request.ProfileImageUrl.Trim();
         user.DefaultRecipeVisibility = request.DefaultRecipeVisibility;
+        // Distinct(), because the list reaches the AI prompts as a comma-joined sentence and
+        // "Vegan, Vegan" reads as emphasis the user did not intend. A new list rather than a
+        // mutation of the request's: the entity must not alias a DTO the caller still holds.
+        user.DietaryRestrictions = request.DietaryRestrictions is null
+            ? []
+            : request.DietaryRestrictions.Distinct().ToList();
 
         try
         {

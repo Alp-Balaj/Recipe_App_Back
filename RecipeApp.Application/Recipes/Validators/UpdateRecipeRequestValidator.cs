@@ -20,12 +20,17 @@ public class UpdateRecipeRequestValidator : AbstractValidator<UpdateRecipeReques
         RuleFor(x => x.Visibility).IsInEnum();
         RuleFor(x => x.CaloriesPerServing).GreaterThanOrEqualTo(0).When(x => x.CaloriesPerServing is not null);
 
+        // Stream G's typed vocabularies — see CreateRecipeRequestValidator for why IsInEnum
+        // is not redundant with the CLR type.
+        RuleFor(x => x.CuisineType).IsInEnum().When(x => x.CuisineType is not null);
+        RuleForEach(x => x.Tags).IsInEnum();
+
         RuleFor(x => x.Ingredients).NotEmpty();
         RuleForEach(x => x.Ingredients).ChildRules(ingredient =>
         {
             ingredient.RuleFor(i => i.Name).NotEmpty();
             ingredient.RuleFor(i => i.Quantity).GreaterThan(0);
-            ingredient.RuleFor(i => i.Unit).NotEmpty();
+            ingredient.RuleFor(i => i.Unit).IsInEnum();
         });
 
         RuleFor(x => x.Steps).NotEmpty();

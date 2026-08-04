@@ -22,11 +22,8 @@ public class ApplicationDbContextFactory : IDesignTimeDbContextFactory<Applicati
             ?? throw new InvalidOperationException(
                 "ConnectionStrings:DefaultConnection not configured — set via user-secrets or ConnectionStrings__DefaultConnection env var.");
 
-        var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
-        dataSourceBuilder.EnableDynamicJson();
-
         var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
-        optionsBuilder.UseNpgsql(dataSourceBuilder.Build());
+        optionsBuilder.UseNpgsql(RecipeAppDataSource.Build(connectionString));
 
         return new ApplicationDbContext(optionsBuilder.Options);
     }

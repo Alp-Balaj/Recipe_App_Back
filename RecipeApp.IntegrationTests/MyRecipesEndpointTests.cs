@@ -130,12 +130,15 @@ public class MyRecipesEndpointTests(IntegrationTestFactory factory) : IClassFixt
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
-        var marker = $"mine-{Guid.NewGuid():N}";
-        var italian = await SeedAsync(client, "Filterable Italian", cuisine: "Italian", tags: [marker]);
-        await SeedAsync(client, "Filterable Thai", cuisine: "Thai", tags: [marker]);
+        // Scoped by a unique title word + ?search= rather than a unique tag: stream G's tag
+        // vocabulary is closed, so there is no spare tag value to mint. See the same note in
+        // RecipeListEndpointsTests.
+        var marker = "mk" + string.Concat(Guid.NewGuid().ToByteArray().Take(10).Select(b => (char)('a' + b % 26)));
+        var italian = await SeedAsync(client, $"{marker} Italian", cuisine: Cuisine.Italian);
+        await SeedAsync(client, $"{marker} Thai", cuisine: Cuisine.Thai);
 
         var byCuisine = await client.GetFromJsonAsync<RecipeListResponse>(
-            $"/recipes/mine?tags={marker}&cuisine=italian", TestJson.Options);
+            $"/recipes/mine?search={marker}&cuisine=italian", TestJson.Options);
 
         var item = Assert.Single(byCuisine!.Items);
         Assert.Equal(italian.Id, item.Id);
@@ -194,8 +197,8 @@ public class MyRecipesEndpointTests(IntegrationTestFactory factory) : IClassFixt
         HttpClient client,
         string title,
         RecipeVisibility visibility = RecipeVisibility.Public,
-        string? cuisine = "Test",
-        List<string>? tags = null)
+        Cuisine? cuisine = Cuisine.Other,
+        List<RecipeTag>? tags = null)
     {
         var request = new CreateRecipeRequest(
             Title: title,
@@ -208,9 +211,9 @@ public class MyRecipesEndpointTests(IntegrationTestFactory factory) : IClassFixt
             CaloriesPerServing: 300,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: [new RecipeIngredient { Name = "Salt", Quantity = 1m, Unit = "pinch" }],
+            Ingredients: [new RecipeIngredient { Name = "Salt", Quantity = 1m, Unit = UnitOfMeasure.Pinch }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Season and serve." }],
-            Tags: tags ?? ["mine-test"]);
+            Tags: tags ?? []);
 
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();

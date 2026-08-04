@@ -32,8 +32,8 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         var weekStart = NextMonday();
 
         // Two different dishes that both want flour, spelled differently.
-        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, "cups"), ("Egg", 3m, "count")]);
-        var bread = await CreateRecipeAsync(client, "Bread", [("flour", 500m, "g")]);
+        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup), ("Egg", 3m, UnitOfMeasure.Piece)]);
+        var bread = await CreateRecipeAsync(client, "Bread", [("flour", 500m, UnitOfMeasure.Gram)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddEntryAsync(client, planId, "Monday", "Dinner", pasta);
         await AddEntryAsync(client, planId, "Tuesday", "Dinner", bread);
@@ -63,9 +63,9 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
 
         // A fractional decimal actually exercises invariant-culture rendering (a
         // current-culture regression would render "2,5 cups" on a comma-decimal server).
-        // CreateRecipeRequestValidator requires a non-empty Unit, so there is no
-        // blank/absent-unit case to cover here.
-        var recipe = await CreateRecipeAsync(client, "Pancakes", [("Flour", 2.5m, "cups"), ("Eggs", 3m, "count")]);
+        // Stream G: the unit is a closed vocabulary now, so there is no blank/absent-unit
+        // case to cover — a unit outside UnitOfMeasure cannot be posted at all.
+        var recipe = await CreateRecipeAsync(client, "Pancakes", [("Flour", 2.5m, UnitOfMeasure.Cup), ("Eggs", 3m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddEntryAsync(client, planId, "Monday", "Breakfast", recipe);
 
@@ -74,12 +74,82 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         var flour = Assert.Single(week.Groups, g => g.DisplayName == "Flour");
         Assert.Equal("2.5 cups", Assert.Single(flour.Parts).Quantity);
 
-        // Integral quantity: pins whether an integer-valued decimal.ToString(InvariantCulture)
-        // renders as "3" or "3.0" for this codebase's actual call sites (a C# `3m` literal has
-        // scale 0, and round-tripping it through System.Text.Json as the test does here
-        // preserves that scale).
+        // Integral quantity renders without a trailing ".0", and the unit word pluralises:
+        // Units.Format applies the "0.##" format and appends an "s" to the count units above
+        // 1, so this reads as a shopping list rather than as a database row.
         var eggs = Assert.Single(week.Groups, g => g.DisplayName == "Eggs");
-        Assert.Equal("3 count", Assert.Single(eggs.Parts).Quantity);
+        Assert.Equal("3 pcs", Assert.Single(eggs.Parts).Quantity);
+    }
+
+    // Stream G, slice G1: the summation the projection could not do before units were typed.
+    [Fact]
+    public async Task Totals_sum_within_a_dimension_and_never_across_one()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        // Flour twice in DIFFERENT mass units — the case a string unit made unsummable.
+        var bread = await CreateRecipeAsync(client, "Bread", [("Flour", 500m, UnitOfMeasure.Gram)]);
+        var cake = await CreateRecipeAsync(client, "Cake", [("flour", 1m, UnitOfMeasure.Kilogram)]);
+        // Garlic in cloves: countable, so it sums — but only with other cloves.
+        var soup = await CreateRecipeAsync(client, "Soup",
+            [("Garlic", 2m, UnitOfMeasure.Clove), ("Salt", 1m, UnitOfMeasure.Pinch)]);
+        var stew = await CreateRecipeAsync(client, "Stew",
+            [("garlic", 3m, UnitOfMeasure.Clove), ("Salt", 1m, UnitOfMeasure.Pinch)]);
+
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", bread);
+        await AddEntryAsync(client, planId, "Tuesday", "Dinner", cake);
+        await AddEntryAsync(client, planId, "Wednesday", "Dinner", soup);
+        await AddEntryAsync(client, planId, "Thursday", "Dinner", stew);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+
+        // 500 g + 1 kg = 1500 g, promoted to kg because it earned the larger unit.
+        var flour = Assert.Single(week.Groups, g => g.DisplayName is "Flour" or "flour");
+        var flourTotal = Assert.Single(flour.Totals);
+        Assert.Equal(UnitOfMeasure.Kilogram, flourTotal.Unit);
+        Assert.Equal(1.5m, flourTotal.Quantity);
+        Assert.Equal("1.5 kg", flourTotal.Display);
+        // The per-dish breakdown still reads in the units each recipe was WRITTEN in.
+        Assert.Equal(["500 g", "1 kg"], flour.Parts.Select(p => p.Quantity).Order().Reverse());
+
+        var garlic = Assert.Single(week.Groups, g => g.DisplayName is "Garlic" or "garlic");
+        var garlicTotal = Assert.Single(garlic.Totals);
+        Assert.Equal(UnitOfMeasure.Clove, garlicTotal.Unit);
+        Assert.Equal(5m, garlicTotal.Quantity);
+        Assert.Equal("5 cloves", garlicTotal.Display);
+
+        // Two pinches of salt are not "2 pinches" of anything a shop sells — imprecise parts
+        // produce NO total, and the group falls back to listing its parts.
+        var salt = Assert.Single(week.Groups, g => g.DisplayName == "Salt");
+        Assert.Empty(salt.Totals);
+        Assert.Equal(2, salt.Parts.Count);
+    }
+
+    // The honest half of the same rule: mass and volume are both convertible but do not
+    // convert to EACH OTHER without the ingredient's density, so one group can carry two
+    // totals. Density-aware collapsing is slice G3's, off the catalogue.
+    [Fact]
+    public async Task A_group_measured_by_both_mass_and_volume_reports_two_totals()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        var byWeight = await CreateRecipeAsync(client, "Weighed", [("Milk", 300m, UnitOfMeasure.Gram)]);
+        var byVolume = await CreateRecipeAsync(client, "Poured", [("milk", 2m, UnitOfMeasure.Cup)]);
+
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", byWeight);
+        await AddEntryAsync(client, planId, "Tuesday", "Dinner", byVolume);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        var milk = Assert.Single(week.Groups, g => g.DisplayName is "Milk" or "milk");
+
+        Assert.Equal(2, milk.Totals.Count);
+        Assert.Contains(milk.Totals, t => t.Unit == UnitOfMeasure.Gram && t.Quantity == 300m);
+        // 2 cups at the 240 ml convention = 480 ml, which has not earned promotion to litres.
+        Assert.Contains(milk.Totals, t => t.Unit == UnitOfMeasure.Millilitre && t.Quantity == 480m);
     }
 
     [Fact]
@@ -89,8 +159,8 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         // projection never sees those ingredients and the slot simply reads empty.
         var client = await _factory.CreateAuthenticatedClientAsync();
         var weekStart = NextMonday();
-        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, "cups")]);
-        var soup = await CreateRecipeAsync(client, "Soup", [("Carrot", 3m, "count")]);
+        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup)]);
+        var soup = await CreateRecipeAsync(client, "Soup", [("Carrot", 3m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddEntryAsync(client, planId, "Monday", "Dinner", pasta);
         await AddEntryAsync(client, planId, "Tuesday", "Dinner", soup);
@@ -113,7 +183,7 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         // the projection must preserve that. Two dinners need two dinners' worth.
         var client = await _factory.CreateAuthenticatedClientAsync();
         var weekStart = NextMonday();
-        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, "cups")]);
+        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddEntryAsync(client, planId, "Monday", "Dinner", pasta);
         await AddEntryAsync(client, planId, "Thursday", "Dinner", pasta);
@@ -137,8 +207,8 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         var client = await _factory.CreateAuthenticatedClientAsync();
         var weekStart = NextMonday();
         var lasagne = await CreateRecipeAsync(client, "Lasagne",
-            [("Pasta Sheets", 250m, "g"), ("Mince", 500m, "g")]);
-        var salad = await CreateRecipeAsync(client, "Salad", [("Lettuce", 1m, "head")]);
+            [("Pasta Sheets", 250m, UnitOfMeasure.Gram), ("Mince", 500m, UnitOfMeasure.Gram)]);
+        var salad = await CreateRecipeAsync(client, "Salad", [("Lettuce", 1m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
 
         await AddEntryAsync(client, planId, "Monday", "Dinner", lasagne);
@@ -157,8 +227,8 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
         var weekStart = NextMonday();
-        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, "cups")]);
-        var soup = await CreateRecipeAsync(client, "Soup", [("Carrot", 3m, "count")]);
+        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup)]);
+        var soup = await CreateRecipeAsync(client, "Soup", [("Carrot", 3m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddEntryAsync(client, planId, "Monday", "Dinner", pasta);
 
@@ -190,7 +260,7 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         var client = _factory.CreateClient();
         var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
         var weekStart = NextMonday();
-        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, "cups")]);
+        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddEntryAsync(client, planId, "Monday", "Dinner", pasta);
 
@@ -224,7 +294,7 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         var client = await _factory.CreateAuthenticatedClientAsync();
         var thisWeek = NextMonday();
         var nextWeek = thisWeek.AddDays(7);
-        var pasta = await CreateRecipeAsync(client, "Pasta", [("Olive oil", 1m, "tbsp")]);
+        var pasta = await CreateRecipeAsync(client, "Pasta", [("Olive oil", 1m, UnitOfMeasure.Tablespoon)]);
 
         foreach (var week in new[] { thisWeek, nextWeek })
         {
@@ -253,7 +323,7 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
         var weekStart = NextMonday();
-        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, "cups")]);
+        var pasta = await CreateRecipeAsync(client, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup)]);
         var planId = await CreatePlanAsync(client, weekStart);
         var entryId = await AddEntryAsync(client, planId, "Monday", "Dinner", pasta);
 
@@ -480,12 +550,12 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         var weekStart = NextMonday();
 
         var ownerClient = await _factory.CreateAuthenticatedClientAsync();
-        var ownerRecipe = await CreateRecipeAsync(ownerClient, "Pasta", [("Flour", 2m, "cups")]);
+        var ownerRecipe = await CreateRecipeAsync(ownerClient, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup)]);
         var ownerPlan = await CreatePlanAsync(ownerClient, weekStart);
         await AddEntryAsync(ownerClient, ownerPlan, "Monday", "Dinner", ownerRecipe);
 
         var otherClient = await _factory.CreateAuthenticatedClientAsync();
-        var otherRecipe = await CreateRecipeAsync(otherClient, "Pasta", [("Flour", 2m, "cups")]);
+        var otherRecipe = await CreateRecipeAsync(otherClient, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup)]);
         var otherPlan = await CreatePlanAsync(otherClient, weekStart);
         await AddEntryAsync(otherClient, otherPlan, "Monday", "Dinner", otherRecipe);
 
@@ -709,9 +779,9 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
         var weekStart = NextMonday();
-        var toast = await CreateRecipeAsync(client, "Toast", [("Butter", 1m, "tbsp")]);
-        var sandwich = await CreateRecipeAsync(client, "Sandwich", [("Butter", 2m, "tbsp")]);
-        var mash = await CreateRecipeAsync(client, "Mash", [("Butter", 3m, "tbsp")]);
+        var toast = await CreateRecipeAsync(client, "Toast", [("Butter", 1m, UnitOfMeasure.Tablespoon)]);
+        var sandwich = await CreateRecipeAsync(client, "Sandwich", [("Butter", 2m, UnitOfMeasure.Tablespoon)]);
+        var mash = await CreateRecipeAsync(client, "Mash", [("Butter", 3m, UnitOfMeasure.Tablespoon)]);
         var planId = await CreatePlanAsync(client, weekStart);
 
         // Added out of order on purpose, all on the same day.
@@ -754,7 +824,7 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
 
     private static DateTime CurrentMonday() => MealPlanTestHelper.NextMonday().AddDays(-7);
 
-    private static async Task<Guid> CreateRecipeAsync(HttpClient client, string title, (string Name, decimal Qty, string Unit)[] ingredients)
+    private static async Task<Guid> CreateRecipeAsync(HttpClient client, string title, (string Name, decimal Qty, UnitOfMeasure Unit)[] ingredients)
     {
         var recipe = await MealPlanTestHelper.CreateRecipeAsync(
             client,

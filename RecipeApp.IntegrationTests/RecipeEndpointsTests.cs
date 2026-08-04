@@ -41,13 +41,13 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         var ingredient = Assert.Single(stored.Ingredients);
         Assert.Equal("flour", ingredient.Name);
         Assert.Equal(2.5m, ingredient.Quantity);
-        Assert.Equal("cups", ingredient.Unit);
+        Assert.Equal(UnitOfMeasure.Cup, ingredient.Unit);
 
         Assert.Equal(2, stored.Steps.Count);
         Assert.Equal("Mix the flour with water.", stored.Steps[0].Description);
         Assert.Equal(600, stored.Steps[1].TimerSeconds);
 
-        Assert.Equal(new List<string> { "vegan", "quick" }, stored.Tags);
+        Assert.Equal(new List<RecipeTag> { RecipeTag.Vegan, RecipeTag.Quick }, stored.Tags);
     }
 
     [Fact]
@@ -228,13 +228,13 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         var ingredient = Assert.Single(stored.Ingredients);
         Assert.Equal("rye flour", ingredient.Name);
         Assert.Equal(3m, ingredient.Quantity);
-        Assert.Equal("cups", ingredient.Unit);
+        Assert.Equal(UnitOfMeasure.Cup, ingredient.Unit);
 
         var step = Assert.Single(stored.Steps);
         Assert.Equal("Knead the rye dough and bake.", step.Description);
         Assert.Equal(1200, step.TimerSeconds);
 
-        Assert.Equal(new List<string> { "hearty", "baked" }, stored.Tags);
+        Assert.Equal(new List<RecipeTag> { RecipeTag.Comfort, RecipeTag.Baking }, stored.Tags);
     }
 
     // Visible-but-not-owned is a 403; the recipe's existence is already public knowledge.
@@ -512,17 +512,17 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         CookTimeMinutes: 15,
         Servings: 4,
         Difficulty: DifficultyLevel.Easy,
-        CuisineType: "Mediterranean",
+        CuisineType: Cuisine.Mediterranean,
         CaloriesPerServing: 180,
         ImageUrl: null,
         Visibility: RecipeVisibility.Public,
-        Ingredients: [new RecipeIngredient { Name = "flour", Quantity = 2.5m, Unit = "cups" }],
+        Ingredients: [new RecipeIngredient { Name = "flour", Quantity = 2.5m, Unit = UnitOfMeasure.Cup }],
         Steps:
         [
             new RecipeStep { StepNumber = 1, Description = "Mix the flour with water." },
             new RecipeStep { StepNumber = 2, Description = "Rest the dough.", TimerSeconds = 600 },
         ],
-        Tags: ["vegan", "quick"]);
+        Tags: [RecipeTag.Vegan, RecipeTag.Quick]);
 
     // Every field differs from ValidCreateRecipeRequest so the full-replace assertions
     // can't pass by accident.
@@ -533,11 +533,11 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         CookTimeMinutes: 40,
         Servings: 6,
         Difficulty: DifficultyLevel.Medium,
-        CuisineType: "Nordic",
+        CuisineType: Cuisine.Nordic,
         CaloriesPerServing: 250,
         ImageUrl: "https://example.test/rye.jpg",
         Visibility: RecipeVisibility.Public,
-        Ingredients: [new RecipeIngredient { Name = "rye flour", Quantity = 3m, Unit = "cups" }],
+        Ingredients: [new RecipeIngredient { Name = "rye flour", Quantity = 3m, Unit = UnitOfMeasure.Cup }],
         Steps: [new RecipeStep { StepNumber = 1, Description = "Knead the rye dough and bake.", TimerSeconds = 1200 }],
-        Tags: ["hearty", "baked"]);
+        Tags: [RecipeTag.Comfort, RecipeTag.Baking]);
 }

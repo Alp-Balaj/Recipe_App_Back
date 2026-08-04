@@ -85,12 +85,13 @@ public class RecipeService : IRecipeService
             recipes = recipes.Where(r => r.CreatedByUserId == ownerId);
         }
 
-        if (!string.IsNullOrEmpty(query.Cuisine))
+        if (query.Cuisine is Cuisine cuisine)
         {
-            // Case-insensitive exact match (Decisions §3) — lower() equality, not ILIKE,
-            // so % and _ in user input can't act as wildcards.
-            var cuisine = query.Cuisine.ToLowerInvariant();
-            recipes = recipes.Where(r => r.CuisineType != null && r.CuisineType.ToLower() == cuisine);
+            // Plain equality since stream G. The old lower()-equality dance (and its note
+            // about % and _ not acting as wildcards) existed because the column was free
+            // text; a typed enum has no case to normalise and no user input to neutralise —
+            // the endpoint already rejected anything that is not a member.
+            recipes = recipes.Where(r => r.CuisineType == cuisine);
         }
 
         if (query.Difficulty is not null)
@@ -99,7 +100,9 @@ public class RecipeService : IRecipeService
         }
 
         // Match-ALL tags (Decisions §3): each Contains translates to jsonb containment
-        // ("Tags" @> to_jsonb(@tag)), AND-composed across the requested tags.
+        // ("Tags" @> to_jsonb(@tag)), AND-composed across the requested tags. The containment
+        // operand is now the enum's NAME, which is what the curated vocabulary buys — the
+        // case-sensitivity of this comparison used to make "Vegan" and "vegan" two facets.
         foreach (var tag in query.Tags)
         {
             recipes = recipes.Where(r => r.Tags.Contains(tag));

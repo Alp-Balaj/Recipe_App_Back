@@ -227,13 +227,13 @@ public class FollowAndProfileEndpointsTests(IntegrationTestFactory factory) : IC
             CookTimeMinutes: 25,
             Servings: 2,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "French",
+            CuisineType: Cuisine.French,
             CaloriesPerServing: 150,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: [new RecipeIngredient { Name = "onion", Quantity = 2m, Unit = "pieces" }],
+            Ingredients: [new RecipeIngredient { Name = "onion", Quantity = 2m, Unit = UnitOfMeasure.Piece }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Simmer everything." }],
-            Tags: ["soup"]);
+            Tags: [RecipeTag.Soup]);
 
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();

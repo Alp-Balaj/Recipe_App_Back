@@ -45,8 +45,8 @@ public record GeneratedRecipeDraft(
     int CookTimeMinutes,
     int Servings,
     DifficultyLevel Difficulty,
-    string? CuisineType,
+    Cuisine? CuisineType,
     int? CaloriesPerServing,
     List<RecipeIngredient> Ingredients,
     List<RecipeStep> Steps,
-    List<string> Tags);
+    List<RecipeTag> Tags);

@@ -15,7 +15,9 @@ public class Recipe
     public int TotalTimeMinutes => PrepTimeMinutes + CookTimeMinutes;
     public int Servings { get; set; }
     public DifficultyLevel Difficulty { get; set; }
-    public string? CuisineType { get; set; }
+    // Typed in stream G (D10). Nullable still means "belongs to no particular cuisine",
+    // which is a different answer from Cuisine.Other ("a real cuisine, not on the list").
+    public Cuisine? CuisineType { get; set; }
     public int? CaloriesPerServing { get; set; }
     public string? ImageUrl { get; set; }
     public RecipeVisibility Visibility { get; set; } = RecipeVisibility.Public;
@@ -29,7 +31,9 @@ public class Recipe
     // Structured data (stored as jsonb)
     public List<RecipeIngredient> Ingredients { get; set; } = [];
     public List<RecipeStep> Steps { get; set; } = [];
-    public List<string> Tags { get; set; } = [];
+    // Curated vocabulary since stream G (D10): tag filtering on GET /recipes is match-ALL
+    // and case-sensitive, which free-text tags could never satisfy honestly.
+    public List<RecipeTag> Tags { get; set; } = [];
 
     // Owner
     public Guid CreatedByUserId { get; set; }

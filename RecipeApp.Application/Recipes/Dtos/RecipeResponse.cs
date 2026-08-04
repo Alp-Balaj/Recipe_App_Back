@@ -12,7 +12,7 @@ public record RecipeResponse(
     int TotalTimeMinutes,
     int Servings,
     DifficultyLevel Difficulty,
-    string? CuisineType,
+    Cuisine? CuisineType,
     int? CaloriesPerServing,
     string? ImageUrl,
     RecipeVisibility Visibility,
@@ -20,7 +20,7 @@ public record RecipeResponse(
     DateTime? UpdatedAt,
     List<RecipeIngredient> Ingredients,
     List<RecipeStep> Steps,
-    List<string> Tags,
+    List<RecipeTag> Tags,
     Guid CreatedByUserId,
     // Provenance (stream E, decision D1). Appended, so every existing positional
     // construction site keeps compiling; the SPA badges an AI recipe from the flag.

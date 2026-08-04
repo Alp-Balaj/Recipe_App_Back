@@ -36,7 +36,27 @@ builder.Services.AddOpenApi();
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    // allowIntegerValues: false — tightened by stream G, and worth the note.
+    //
+    // The converter has always WRITTEN enums as names; what it also did, by default, was
+    // ACCEPT them as integers on the way in. So `"unit": 7` bound silently to whatever
+    // UnitOfMeasure sits at ordinal 7, and IsInEnum() then passed because 7 is a defined
+    // member — the guard only ever caught out-of-RANGE numbers like 99.
+    //
+    // That was survivable while enums were scalar columns. It is not now: G puts enums
+    // inside jsonb, where the whole point (see RecipeAppDataSource) is that the member NAME
+    // is the persisted contract and the ordinal is not stable across an enum edit. Accepting
+    // an ordinal at the boundary would reintroduce exactly the coupling the storage change
+    // removed — a client payload that means Tablespoon today and something else after a
+    // member is appended, with a row written from it either way.
+    //
+    // Names-only was already the documented wire contract (Recipe_App_Front/src/api/types.ts
+    // describes every enum as a PascalCase name) and is what the SPA has always sent, so this
+    // closes a gap between the contract and the code rather than narrowing the contract.
+    // IsInEnum() stays on every validator: it still guards values that arrive by a CAST
+    // rather than by deserialization.
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(
+        namingPolicy: null, allowIntegerValues: false));
 });
 
 // Secrets live outside the repo (audit fix 1): user-secrets in local dev, env vars elsewhere.
@@ -44,9 +64,9 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
     ?? throw new InvalidOperationException(
         "ConnectionStrings:DefaultConnection not configured — set via user-secrets or ConnectionStrings__DefaultConnection env var.");
 
-var npgsqlDataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
-npgsqlDataSourceBuilder.EnableDynamicJson();
-var npgsqlDataSource = npgsqlDataSourceBuilder.Build();
+// Configured centrally (RecipeAppDataSource) so the jsonb string-enum contract cannot be
+// forgotten at one of the three call sites — see that class for why it matters.
+var npgsqlDataSource = RecipeAppDataSource.Build(connectionString);
 
 builder.Services.AddDbContext<ApplicationDbContext>(options => options.UseNpgsql(npgsqlDataSource));
 

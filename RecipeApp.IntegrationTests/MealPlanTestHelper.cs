@@ -62,13 +62,13 @@ internal static class MealPlanTestHelper
             CookTimeMinutes: 20,
             Servings: 4,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "Test",
+            CuisineType: Cuisine.Other,
             CaloriesPerServing: 210,
             ImageUrl: null,
             Visibility: visibility,
             Ingredients: ingredients,
             Steps: [new RecipeStep { StepNumber = 1, Description = "Combine and cook." }],
-            Tags: ["test"]);
+            Tags: [RecipeTag.Dinner]);
 
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();

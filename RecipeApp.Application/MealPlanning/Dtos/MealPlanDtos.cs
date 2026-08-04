@@ -99,8 +99,28 @@ public enum ShoppingListScope { Week, All }
 
 public enum ShoppingListGroupOrigin { Derived, Manual }
 
-/// <summary>One dish's contribution to a group. Quantity stays a display string — grouped, never summed.</summary>
+/// <summary>
+/// One dish's contribution to a group. Quantity is a display string — the per-dish breakdown
+/// answers "what is this for", and it stays itemised even when the group also carries a total.
+/// </summary>
 public record ShoppingListPartResponse(string Quantity, string DishTitle);
+
+/// <summary>
+/// A summed quantity within one group (stream G). Before units were typed this could not
+/// exist: "2 cups" and "300 g" were strings and the projection's own comment conceded it
+/// could "never sum anything".
+///
+/// A group carries one total per SUMMATION BUCKET, and there can legitimately be more than
+/// one. Everything mass-dimensioned collapses into a single figure and everything
+/// volume-dimensioned into another, because those dimensions convert; each count unit forms
+/// its own bucket, because 2 cloves and 1 can are not 3 of anything; and imprecise parts
+/// (a pinch, a dash) produce no total at all, so a group of nothing but seasoning shows an
+/// empty list here and its Parts alone.
+///
+/// Crossing mass and volume for one ingredient needs its density and arrives in G3 — until
+/// then "2 cups + 300 g of flour" is honestly two totals rather than dishonestly one.
+/// </summary>
+public record ShoppingListTotalResponse(decimal Quantity, UnitOfMeasure Unit, string Display);
 
 /// <summary>
 /// One shopping-list line. <c>ManualItemId</c> is set only when Origin is Manual — it is the
@@ -113,7 +133,11 @@ public record ShoppingListGroupResponse(
     IReadOnlyList<string> Dishes,
     bool IsPurchased,
     ShoppingListGroupOrigin Origin,
-    Guid? ManualItemId);
+    Guid? ManualItemId,
+    // Appended last, per this file's convention, so existing positional constructions keep
+    // compiling. Always empty for a Manual group: a manual row's quantity is free text the
+    // user typed ("2 big bags"), never a typed measurement, so there is nothing to add up.
+    IReadOnlyList<ShoppingListTotalResponse> Totals);
 
 public record ShoppingListWeekResponse(
     DateTime WeekStartDate,

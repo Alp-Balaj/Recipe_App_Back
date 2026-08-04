@@ -612,11 +612,11 @@ public class SocialInteractionEndpointsTests(IntegrationTestFactory factory) : I
         CookTimeMinutes: 20,
         Servings: 4,
         Difficulty: DifficultyLevel.Easy,
-        CuisineType: "Italian",
+        CuisineType: Cuisine.Italian,
         CaloriesPerServing: 210,
         ImageUrl: null,
         Visibility: visibility,
-        Ingredients: [new RecipeIngredient { Name = "flour", Quantity = 3m, Unit = "cups" }],
+        Ingredients: [new RecipeIngredient { Name = "flour", Quantity = 3m, Unit = UnitOfMeasure.Cup }],
         Steps: [new RecipeStep { StepNumber = 1, Description = "Mix, rest, bake." }],
-        Tags: ["bread"]);
+        Tags: [RecipeTag.Bread]);
 }

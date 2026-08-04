@@ -13,9 +13,12 @@ namespace RecipeApp.Application.Recipes.Dtos;
 // happen to fall inside a page of everyone's. Optional and last, so every existing
 // positional construction keeps compiling as the unfiltered global list.
 public record RecipeListQuery(
-    string? Cuisine,
+    // Typed in stream G. The endpoint parses the query string into these — an unparseable
+    // ?cuisine= or ?tags= is a 400 there rather than a filter that silently matches nothing,
+    // which is what the old case-insensitive string compare did.
+    Cuisine? Cuisine,
     DifficultyLevel? Difficulty,
-    IReadOnlyList<string> Tags,
+    IReadOnlyList<RecipeTag> Tags,
     RecipeListCursor? Cursor,
     int Limit,
     Guid? OwnedByUserId = null,

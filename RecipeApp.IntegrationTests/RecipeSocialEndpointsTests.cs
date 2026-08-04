@@ -205,13 +205,13 @@ public class RecipeSocialEndpointsTests(IntegrationTestFactory factory) : IClass
             CookTimeMinutes: 10,
             Servings: 2,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "Italian",
+            CuisineType: Cuisine.Italian,
             CaloriesPerServing: 410,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: [new RecipeIngredient { Name = "gnocchi", Quantity = 500m, Unit = "g" }],
+            Ingredients: [new RecipeIngredient { Name = "gnocchi", Quantity = 500m, Unit = UnitOfMeasure.Gram }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Boil until they float." }],
-            Tags: ["italian"]);
+            Tags: [RecipeTag.Pasta]);
 
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();

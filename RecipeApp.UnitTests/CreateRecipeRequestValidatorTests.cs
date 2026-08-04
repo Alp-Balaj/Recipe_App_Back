@@ -18,13 +18,13 @@ public class CreateRecipeRequestValidatorTests
         CookTimeMinutes: 10,
         Servings: 2,
         Difficulty: DifficultyLevel.Easy,
-        CuisineType: "Italian",
+        CuisineType: Cuisine.Italian,
         CaloriesPerServing: 300,
         ImageUrl: null,
         Visibility: RecipeVisibility.Public,
-        Ingredients: [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = "cup" }],
+        Ingredients: [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = UnitOfMeasure.Cup }],
         Steps: [new RecipeStep { StepNumber = 1, Description = "Combine." }],
-        Tags: ["quick"]);
+        Tags: [RecipeTag.Quick]);
 
     [Fact]
     public void Validate_WellFormedRequest_IsValid()
@@ -125,7 +125,7 @@ public class CreateRecipeRequestValidatorTests
     {
         var result = _validator.Validate(Valid() with
         {
-            Ingredients = [new RecipeIngredient { Name = "salt", Quantity = 0m, Unit = "tsp" }],
+            Ingredients = [new RecipeIngredient { Name = "salt", Quantity = 0m, Unit = UnitOfMeasure.Teaspoon }],
         });
 
         Assert.False(result.IsValid);

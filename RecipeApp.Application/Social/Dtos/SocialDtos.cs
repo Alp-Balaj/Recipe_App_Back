@@ -53,7 +53,14 @@ public record UserProfileResponse(
     int FollowingCount,
     int RecipeCount,
     bool FollowedByMe,
-    RecipeVisibility DefaultRecipeVisibility);
+    RecipeVisibility DefaultRecipeVisibility,
+    // Stream G (D10). User.DietaryRestrictions has existed since the initial migration and
+    // was consumed by all three AI prompts, but NO endpoint ever read or wrote it — so in
+    // practice it was empty for every user and the "your restrictions are absolute" line in
+    // every system prompt was addressing an empty list. Typing the field without giving it
+    // a way in would have kept it that way, so it rides the profile pair that already
+    // carries DefaultRecipeVisibility, the other account-level setting.
+    IReadOnlyList<DietaryRestriction> DietaryRestrictions);
 
 // Body of PUT /users/me — the caller updating their own account (account settings /
 // Edit profile). Username must stay unique; Bio/ProfileImageUrl clear to null when empty.
@@ -61,7 +68,12 @@ public record UpdateProfileRequest(
     string Username,
     string? Bio,
     string? ProfileImageUrl,
-    RecipeVisibility DefaultRecipeVisibility);
+    RecipeVisibility DefaultRecipeVisibility,
+    // Appended last with a default so the record's existing positional constructions keep
+    // compiling. Absent means "no change requested"? No — PUT is a full replace here, like
+    // every other field on this record, so an omitted list CLEARS the restrictions. The
+    // default exists for the compiler, not as merge semantics.
+    List<DietaryRestriction>? DietaryRestrictions = null);
 
 // The feed's social envelope around each recipe (social-feed plan, cp03). Counts are
 // live-computed correlated subqueries — no denormalized counters until measured slow.

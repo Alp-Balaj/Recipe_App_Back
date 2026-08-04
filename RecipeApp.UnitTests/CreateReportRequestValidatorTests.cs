@@ -29,8 +29,9 @@ public class CreateReportRequestValidatorTests
         Assert.False(_validator.Validate(Valid() with { TargetId = Guid.Empty }).IsValid);
     }
 
-    // Numeric enum values outside the range bind silently (JsonStringEnumConverter only
-    // guards the string form), so IsInEnum is what turns them into a 400.
+    // Stream G turned off allowIntegerValues, so a numeric value on the WIRE no longer
+    // binds at all. IsInEnum still earns its place for the cast path these tests use —
+    // (ReportTargetType)99 never went through a deserializer.
     [Fact]
     public void Undefined_target_type_fails()
     {

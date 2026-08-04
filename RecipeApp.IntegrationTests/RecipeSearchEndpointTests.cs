@@ -60,7 +60,7 @@ public class RecipeSearchEndpointTests(IntegrationTestFactory factory) : IClassF
             client,
             title: "Nothing distinctive here",
             description: "Nor here.",
-            ingredients: [new RecipeIngredient { Name = token, Quantity = 1m, Unit = "tsp" }]);
+            ingredients: [new RecipeIngredient { Name = token, Quantity = 1m, Unit = UnitOfMeasure.Teaspoon }]);
 
         var page = await SearchAsync(client, token);
 
@@ -240,13 +240,13 @@ public class RecipeSearchEndpointTests(IntegrationTestFactory factory) : IClassF
             CookTimeMinutes: 20,
             Servings: 4,
             Difficulty: difficulty,
-            CuisineType: "Italian",
+            CuisineType: Cuisine.Italian,
             CaloriesPerServing: 210,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: ingredients ?? [new RecipeIngredient { Name = "flour", Quantity = 3m, Unit = "cups" }],
+            Ingredients: ingredients ?? [new RecipeIngredient { Name = "flour", Quantity = 3m, Unit = UnitOfMeasure.Cup }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Mix, rest, bake." }],
-            Tags: ["bread"]);
+            Tags: [RecipeTag.Bread]);
 
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();

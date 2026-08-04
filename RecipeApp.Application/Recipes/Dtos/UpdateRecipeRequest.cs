@@ -13,10 +13,10 @@ public record UpdateRecipeRequest(
     int CookTimeMinutes,
     int Servings,
     DifficultyLevel Difficulty,
-    string? CuisineType,
+    Cuisine? CuisineType,
     int? CaloriesPerServing,
     string? ImageUrl,
     RecipeVisibility Visibility,
     List<RecipeIngredient> Ingredients,
     List<RecipeStep> Steps,
-    List<string> Tags);
+    List<RecipeTag> Tags);
