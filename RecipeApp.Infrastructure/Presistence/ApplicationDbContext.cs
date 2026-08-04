@@ -12,6 +12,9 @@ public class ApplicationDbContext : DbContext
 
     public DbSet<User> Users => Set<User>();
     public DbSet<Recipe> Recipes => Set<Recipe>();
+    // The ingredient catalogue (stream G, slice G2).
+    public DbSet<Ingredient> Ingredients => Set<Ingredient>();
+    public DbSet<IngredientAlias> IngredientAliases => Set<IngredientAlias>();
     public DbSet<Comment> Comments => Set<Comment>();
     public DbSet<Like> Likes => Set<Like>();
     public DbSet<SavedRecipe> SavedRecipes => Set<SavedRecipe>();
@@ -281,6 +284,41 @@ public class ApplicationDbContext : DbContext
         builder.Entity<Recipe>()
             .HasIndex(r => new { r.CreatedAt, r.Id })
             .IsDescending();
+
+        // ── The ingredient catalogue (stream G, slice G2 — D9) ───────────────────────
+        //
+        // Two tables and no change to Recipes: RecipeIngredient.IngredientId lives
+        // inside the existing jsonb column, so it needs no schema at all. That is also
+        // why it is not a real FK — see the property's own note.
+        builder.Entity<Ingredient>()
+            .HasIndex(i => i.Name)
+            .IsUnique();
+
+        // Browsing GET /ingredients is by category then name.
+        builder.Entity<Ingredient>()
+            .HasIndex(i => new { i.Category, i.Name });
+
+        // Provenance is unique too: two catalogue rows describing the same FDC food
+        // would be a seeding bug, and this is where it would surface.
+        builder.Entity<Ingredient>()
+            .HasIndex(i => i.FdcId)
+            .IsUnique();
+
+        // MatchKey AS THE PRIMARY KEY. Resolution becomes one indexed PK lookup, and
+        // "no two ingredients claim the same spelling" becomes a database guarantee
+        // rather than a convention the seeder is trusted to keep (see IngredientAlias).
+        builder.Entity<IngredientAlias>()
+            .HasKey(a => a.MatchKey);
+
+        builder.Entity<IngredientAlias>()
+            .Property(a => a.MatchKey)
+            .HasMaxLength(120);
+
+        builder.Entity<IngredientAlias>()
+            .HasOne(a => a.Ingredient)
+            .WithMany(i => i.Aliases)
+            .HasForeignKey(a => a.IngredientId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         // ── Full-text search (open-loops slice 2) ────────────────────────────────────
         //

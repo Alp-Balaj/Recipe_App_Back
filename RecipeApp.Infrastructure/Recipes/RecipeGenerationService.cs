@@ -33,17 +33,20 @@ public class RecipeGenerationService : IRecipeGenerationService
     private readonly ApplicationDbContext _db;
     private readonly IRecipeGenerationAssistant _assistant;
     private readonly IAiUsageService _aiUsage;
+    private readonly IIngredientResolver _ingredientResolver;
     private readonly ILogger<RecipeGenerationService> _logger;
 
     public RecipeGenerationService(
         ApplicationDbContext db,
         IRecipeGenerationAssistant assistant,
         IAiUsageService aiUsage,
+        IIngredientResolver ingredientResolver,
         ILogger<RecipeGenerationService> logger)
     {
         _db = db;
         _assistant = assistant;
         _aiUsage = aiUsage;
+        _ingredientResolver = ingredientResolver;
         _logger = logger;
     }
 
@@ -110,6 +113,13 @@ public class RecipeGenerationService : IRecipeGenerationService
         // One SaveChanges commits the recipe and its usage row together: a generated recipe
         // always carries its cost, and a failed generation (which returned above) is never
         // billed. NOTE THE ABSENCE — no RankingService call. See the class comment.
+        // Stream G, slice G2: a generated recipe resolves on exactly the same terms as a
+        // typed one. The generator invents names freely (its trust boundary is RANGE
+        // testing, not membership — see RecipeGenerationAssistant), so a miss here is
+        // entirely expected and leaves the id null, exactly as it would for a human who
+        // typed something the catalogue has never heard of.
+        await _ingredientResolver.ResolveAsync(recipe.Ingredients, cancellationToken);
+
         _db.Recipes.Add(recipe);
         _aiUsage.RecordCall(userId, AiUsageLanes.RecipeGeneration, generated.Usage);
         await _db.SaveChangesAsync(cancellationToken);

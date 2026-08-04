@@ -106,6 +106,13 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         using var scope = Services.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         await dbContext.Database.MigrateAsync();
+
+        // The ingredient catalogue (stream G, slice G2). Seeded HERE rather than relied
+        // on from Program.cs: the host is built before this method runs, so the startup
+        // seeder fires against a database that has no tables yet, logs its failure and
+        // returns. Without this the catalogue would be empty for every test and the
+        // resolver would appear to work while resolving nothing.
+        await scope.ServiceProvider.GetRequiredService<IngredientCatalogueSeeder>().SeedAsync();
     }
 
     async Task IAsyncLifetime.DisposeAsync()

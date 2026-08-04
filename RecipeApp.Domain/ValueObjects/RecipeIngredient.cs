@@ -22,4 +22,22 @@ public class RecipeIngredient
     public string Name { get; set; } = null!;       // "flour"
     public decimal Quantity { get; set; }            // 2.5
     public UnitOfMeasure Unit { get; set; }          // UnitOfMeasure.Cup
+
+    /// <summary>
+    /// The catalogue entry this line resolved to, or NULL (stream G, slice G2).
+    ///
+    /// Null is a legal, expected, permanent state — not a migration artefact. D8 is
+    /// "resolve, don't constrain": the resolver runs on write, looks the name's
+    /// <c>IngredientKey</c> up in <c>IngredientAliases</c>, and sets this on a hit. A
+    /// miss leaves it null and the recipe saves anyway, which is the property
+    /// IngredientNameField documents and the reason a user can type "gochujang" and a
+    /// generator can invent one.
+    ///
+    /// NOT a foreign key at the database level, and cannot be: this lives inside a
+    /// jsonb document, where Postgres has no referential integrity to offer. The
+    /// consequence is that a deleted catalogue row would leave dangling ids — which is
+    /// why the seeder never deletes, only upserts, and why ids are derived from the FDC
+    /// id rather than generated fresh.
+    /// </summary>
+    public Guid? IngredientId { get; set; }
 }

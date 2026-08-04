@@ -16,6 +16,13 @@ public static class RecipeEndpoints
     private const int DefaultPageSize = 20;
     private const int MaxPageSize = 50;
 
+    // GET /ingredients pages differently from the recipe list, and on purpose. The
+    // catalogue is a BOUNDED reference set (1,500 rows) that a client caches whole, not
+    // a growing feed to keyset through — so the ceiling is high enough to fetch the lot
+    // in a few calls and the default is sized for a picker's dropdown.
+    private const int DefaultIngredientPageSize = 25;
+    private const int MaxIngredientPageSize = 200;
+
     public static void MapRecipeEndpoints(this WebApplication app)
     {
         var group = app.MapGroup("/recipes");
@@ -180,6 +187,28 @@ public static class RecipeEndpoints
             return Results.Ok(names);
         })
         .RequireRateLimiting(RateLimitPolicies.Meal);
+
+        // GET /ingredients — the catalogue (stream G, slice G2).
+        //
+        // AllowAnonymous, and it is the first read in this codebase that is genuinely
+        // unscoped. Every other list applies a visibility rule because its rows belong to
+        // someone; a catalogue row belongs to nobody and is identical for every caller.
+        // Contrast /ingredients/names directly above, which is caller-scoped precisely
+        // because it reads names out of RECIPES and must not leak a private one.
+        //
+        // Social rate-limit lane, matching the other anonymous-capable reads.
+        app.MapGet("/ingredients", async (
+            string? q,
+            int? limit,
+            IIngredientCatalogueService catalogue,
+            CancellationToken cancellationToken) =>
+        {
+            var effectiveLimit = limit is > 0 ? Math.Min(limit.Value, MaxIngredientPageSize) : DefaultIngredientPageSize;
+            var response = await catalogue.SearchAsync(q, effectiveLimit, cancellationToken);
+            return Results.Ok(response);
+        })
+        .AllowAnonymous()
+        .RequireRateLimiting(RateLimitPolicies.Social);
     }
 
     // Shared wire-level parsing for the two list routes (GET /recipes and GET /recipes/mine),
