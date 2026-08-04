@@ -13,6 +13,25 @@ public static class ShoppingListKeys
 {
     public const string ManualPrefix = "manual:";
 
+    /// <summary>
+    /// The key space for a RESOLVED ingredient (stream G, slice G3). A derived group is
+    /// keyed by its catalogue id when every line in it resolved, and by
+    /// <see cref="IngredientKey"/> when it did not.
+    ///
+    /// This is the payoff of the catalogue on this surface. Two recipes writing "prawns"
+    /// and "shrimp" produce different IngredientKeys and were therefore two shopping-list
+    /// rows that no normalisation could ever merge — the key space was the spellings
+    /// themselves. Keyed by id they are one row, because resolution already decided they
+    /// are one ingredient.
+    ///
+    /// The unresolved path is unchanged and permanent, not transitional: D8 guarantees an
+    /// ingredient can always fail to resolve, so IngredientKey remains the fallback key
+    /// forever. That is the upgrade its own doc comment sanctions.
+    /// </summary>
+    public const string IngredientPrefix = "ing:";
+
+    public static string ForIngredient(Guid ingredientId) => $"{IngredientPrefix}{ingredientId}";
+
     public static string ForManual(Guid manualItemId) => $"{ManualPrefix}{manualItemId}";
 
     /// <summary>

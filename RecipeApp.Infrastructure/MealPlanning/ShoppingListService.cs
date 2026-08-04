@@ -162,7 +162,9 @@ public class ShoppingListService : IShoppingListService
         // Quantity and Unit are carried as VALUES now, not as a pre-rendered string (stream
         // G). The display string is derived at the end; keeping the number means the group
         // can add its parts up, which is the whole point of the slice.
-        var parts = new List<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, string Dish)>();
+        // IngredientId rides along since slice G3: it decides the group's KEY (an id
+        // beats a spelling) and unlocks the density that lets mass and volume merge.
+        var parts = new List<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, Guid? IngredientId, string Dish)>();
 
         if (plan is not null)
         {
@@ -197,10 +199,15 @@ public class ShoppingListService : IShoppingListService
                 foreach (var ingredient in recipe.Ingredients)
                 {
                     parts.Add((
-                        IngredientKey.For(ingredient.Name),
+                        // Slice G3: the catalogue id when the line resolved, the name's
+                        // key when it did not. "prawns" and "shrimp" become ONE row.
+                        ingredient.IngredientId is Guid resolved
+                            ? ShoppingListKeys.ForIngredient(resolved)
+                            : IngredientKey.For(ingredient.Name),
                         ingredient.Name,
                         ingredient.Quantity,
                         ingredient.Unit,
+                        ingredient.IngredientId,
                         recipe.Title));
                 }
             }
@@ -217,6 +224,21 @@ public class ShoppingListService : IShoppingListService
             .Where(i => i.UserId == userId && i.MealPlanId == null && i.WeekStartDate == weekStart)
             .OrderBy(i => i.CreatedAt)
             .ToListAsync(ct);
+
+        // Densities for every ingredient this week resolved to — one query, then a
+        // dictionary lookup per group. Only the resolved ones have a density to fetch,
+        // which is exactly why the catalogue had to exist before this could work.
+        var ingredientIds = parts
+            .Where(p => p.IngredientId is not null)
+            .Select(p => p.IngredientId!.Value)
+            .Distinct()
+            .ToList();
+
+        var densities = ingredientIds.Count == 0
+            ? []
+            : await _db.Ingredients
+                .Where(i => ingredientIds.Contains(i.Id) && i.GramsPerMillilitre != null)
+                .ToDictionaryAsync(i => i.Id, i => i.GramsPerMillilitre!.Value, ct);
 
         var markByKey = marks
             .Where(m => m.WeekStartDate == weekStart)
@@ -239,7 +261,7 @@ public class ShoppingListService : IShoppingListService
                 mark?.IsPurchased ?? false,
                 ShoppingListGroupOrigin.Derived,
                 null,
-                SumWithinDimensions(group)));
+                SumWithinDimensions(group, DensityFor(group, densities))));
         }
 
         // Manual rows stay one group each, keyed for tick storage but never merged into a
@@ -275,6 +297,31 @@ public class ShoppingListService : IShoppingListService
     }
 
     /// <summary>
+    /// The density to use when collapsing a group's volume into its mass, or null.
+    ///
+    /// Null in two cases, and the second is the interesting one:
+    ///
+    ///   * the group did not resolve, so there is no catalogue row to ask;
+    ///   * the group resolved to an ingredient USDA published no volume portion for.
+    ///
+    /// Both stay null rather than falling back to water's 1.0 g/ml. A wrong density is
+    /// worse than two totals: two totals are a shopper reading "300 g + 2 cups", which
+    /// is exactly what the recipes said, while a guessed one silently reports a single
+    /// confident number that is wrong by however much flour differs from water (about
+    /// 40%). The group having MIXED ingredient ids cannot happen — a resolved group is
+    /// keyed BY the id, so every part in it shares one.
+    /// </summary>
+    private static decimal? DensityFor(
+        IEnumerable<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, Guid? IngredientId, string Dish)> parts,
+        IReadOnlyDictionary<Guid, double> densities)
+    {
+        var id = parts.Select(p => p.IngredientId).FirstOrDefault(i => i is not null);
+        return id is Guid resolved && densities.TryGetValue(resolved, out var density)
+            ? (decimal)density
+            : null;
+    }
+
+    /// <summary>
     /// The summation (stream G, slice G1). One total per bucket, where a bucket is:
     ///
     ///   • a CONVERTIBLE dimension — every mass part folds into one gram figure, every volume
@@ -292,7 +339,8 @@ public class ShoppingListService : IShoppingListService
     /// reasoning as the group ordering itself.
     /// </summary>
     private static List<ShoppingListTotalResponse> SumWithinDimensions(
-        IEnumerable<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, string Dish)> parts)
+        IEnumerable<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, Guid? IngredientId, string Dish)> parts,
+        decimal? gramsPerMillilitre)
     {
         var convertible = new Dictionary<UnitDimension, decimal>();
         var counted = new Dictionary<UnitOfMeasure, decimal>();
@@ -303,7 +351,19 @@ public class ShoppingListService : IShoppingListService
 
             if (Units.IsConvertible(dimension) && Units.ToBase(part.Quantity, part.Unit) is decimal inBase)
             {
-                convertible[dimension] = convertible.GetValueOrDefault(dimension) + inBase;
+                // Slice G3, and the whole reason the catalogue carries a density: with
+                // one, volume becomes mass and "2 cups of flour" finally adds to "300 g
+                // of flour". Without one the two stay separate, which is the honest
+                // answer rather than a guess — see DensityFor.
+                if (dimension == UnitDimension.Volume && gramsPerMillilitre is decimal density)
+                {
+                    convertible[UnitDimension.Mass] =
+                        convertible.GetValueOrDefault(UnitDimension.Mass) + (inBase * density);
+                }
+                else
+                {
+                    convertible[dimension] = convertible.GetValueOrDefault(dimension) + inBase;
+                }
             }
             else if (dimension == UnitDimension.Count)
             {

@@ -280,7 +280,18 @@ public static class Units
             _ => BaseUnitOf(dimension),
         };
 
-        return Format(Round(FromBase(baseQuantity, promoted)), promoted);
+        var converted = FromBase(baseQuantity, promoted);
+
+        // Whole grams / millilitres once the figure is big enough for the fraction to be
+        // noise. This is a SHOPPING list: "573.98 g of flour" is a false precision that
+        // only exists because a density was applied to a cup measure, and no shop and no
+        // scale will honour the .98. The decimals stay below 10, where they are the whole
+        // quantity ("2.5 g of yeast"), and on kg/l, where they carry real information.
+        var rounded = promoted is UnitOfMeasure.Gram or UnitOfMeasure.Millilitre && converted >= 10m
+            ? Math.Round(converted, 0, MidpointRounding.AwayFromZero)
+            : Round(converted);
+
+        return Format(rounded, promoted);
     }
 
     /// <summary>
