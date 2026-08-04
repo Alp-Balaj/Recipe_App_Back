@@ -77,8 +77,11 @@ public class ApplicationDbContext : DbContext
                 "CK_CookedRecipes_Rating_Range",
                 "\"Rating\" IS NULL OR (\"Rating\" BETWEEN 1 AND 5)"));
 
+        // Same primitive-collection rule as Recipe.Tags — see the long note beside it for why
+        // the data source's converter does not reach this column.
         builder.Entity<User>()
-            .Property(u => u.DietaryRestrictions)
+            .PrimitiveCollection(u => u.DietaryRestrictions)
+            .ElementType(e => e.HasConversion<string>())
             .HasColumnType("jsonb");
 
         builder.Entity<User>()
@@ -207,8 +210,24 @@ public class ApplicationDbContext : DbContext
             .Property(r => r.Steps)
             .HasColumnType("jsonb");
 
+        // Tags is a PRIMITIVE COLLECTION (List<enum>), and that distinction decides who
+        // serializes it. Npgsql's dynamic JSON — where RecipeAppDataSource's string-enum
+        // converter lives — only handles the complex jsonb columns like Ingredients. EF Core
+        // claims primitive collections for itself and writes them with its own JSON writer,
+        // which renders an enum as its ORDINAL and never consults the data source options.
+        //
+        // The result was the exact failure sharp edge 1 describes, in the one place the
+        // central converter could not reach: Ingredients landed as {"Unit":"Cup"} while Tags
+        // landed as [23, 34]. Both round-tripped perfectly, so nothing failed — until a member
+        // is appended to RecipeTag and every stored recipe quietly re-reads as a different set.
+        //
+        // ElementType().HasConversion<string>() is the primitive-collection equivalent of the
+        // HasConversion<string>() every scalar enum column already carries.
+        // JsonbEnumEncodingTests asserts on the raw jsonb, which is the only test shape that
+        // can tell these two encodings apart.
         builder.Entity<Recipe>()
-            .Property(r => r.Tags)
+            .PrimitiveCollection(r => r.Tags)
+            .ElementType(e => e.HasConversion<string>())
             .HasColumnType("jsonb");
 
         builder.Entity<Recipe>()
@@ -217,6 +236,18 @@ public class ApplicationDbContext : DbContext
 
         builder.Entity<Recipe>()
             .Property(r => r.Visibility)
+            .HasConversion<string>();
+
+        // ── Typed vocabularies (stream G, D10) ──────────────────────────────────────
+        //
+        // CuisineType is a SCALAR column, so EF's own conversion covers it — same idiom as
+        // Difficulty and Visibility above. The nullable enum keeps a null column meaning
+        // "no particular cuisine". The three jsonb collections (Ingredients' Unit, Tags,
+        // User.DietaryRestrictions) get no conversion here and cannot: EF does not reach
+        // inside a jsonb document. Npgsql serializes those, and RecipeAppDataSource is where
+        // their string encoding is configured.
+        builder.Entity<Recipe>()
+            .Property(r => r.CuisineType)
             .HasConversion<string>();
 
         builder.Entity<Recipe>()

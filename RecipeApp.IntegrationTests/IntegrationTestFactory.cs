@@ -86,12 +86,13 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             services.RemoveAll<IRecipeGenerationAssistant>();
             services.AddScoped<IRecipeGenerationAssistant, FakeRecipeGenerationAssistant>();
 
-            // Same dynamic-JSON opt-in as Program.cs/ApplicationDbContextFactory: the jsonb
-            // List<> columns (Recipe.Ingredients/Steps/Tags) throw NotSupportedException at
-            // SaveChangesAsync without it. A plain UseNpgsql(connectionString) is not enough.
-            var dataSourceBuilder = new NpgsqlDataSourceBuilder(_dbContainer.GetConnectionString());
-            dataSourceBuilder.EnableDynamicJson();
-            var dataSource = dataSourceBuilder.Build();
+            // Built through the shared configurator, exactly like Program.cs and the
+            // design-time factory. Two things ride on that: the dynamic-JSON opt-in (the jsonb
+            // List<> columns throw NotSupportedException at SaveChangesAsync without it) and
+            // the string-enum converter. The second is why the tests must not hand-roll their
+            // own builder — a test DB that writes integer enums into jsonb would round-trip
+            // its own writes happily and prove nothing about production's encoding.
+            var dataSource = RecipeAppDataSource.Build(_dbContainer.GetConnectionString());
 
             services.AddDbContext<ApplicationDbContext>(options =>
                 options.UseNpgsql(dataSource));

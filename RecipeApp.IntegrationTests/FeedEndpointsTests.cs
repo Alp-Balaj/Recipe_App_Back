@@ -280,13 +280,13 @@ public class FeedEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
             CookTimeMinutes: 10,
             Servings: 3,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "Mexican",
+            CuisineType: Cuisine.Mexican,
             CaloriesPerServing: 320,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: [new RecipeIngredient { Name = "tortilla", Quantity = 6m, Unit = "pieces" }],
+            Ingredients: [new RecipeIngredient { Name = "tortilla", Quantity = 6m, Unit = UnitOfMeasure.Piece }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Assemble the tacos." }],
-            Tags: ["mexican"]);
+            Tags: [RecipeTag.Dinner]);
 
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();

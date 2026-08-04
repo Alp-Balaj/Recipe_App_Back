@@ -411,9 +411,9 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
 
         // Shared: flour (both). Unique to Tagine: 3 spices. So 5 distinct, 1 shared,
         // and Tagine is the outlier with 3 ingredients nothing else uses.
-        var bread = await CreateInsightRecipeAsync(client, "Bread", [("Flour", 500m, "g"), ("Yeast", 7m, "g")]);
+        var bread = await CreateInsightRecipeAsync(client, "Bread", [("Flour", 500m, UnitOfMeasure.Gram), ("Yeast", 7m, UnitOfMeasure.Gram)]);
         var tagine = await CreateInsightRecipeAsync(client, "Tagine",
-            [("Flour", 2m, "cups"), ("Cumin", 1m, "tsp"), ("Saffron", 1m, "pinch"), ("Harissa", 2m, "tbsp")]);
+            [("Flour", 2m, UnitOfMeasure.Cup), ("Cumin", 1m, UnitOfMeasure.Teaspoon), ("Saffron", 1m, UnitOfMeasure.Pinch), ("Harissa", 2m, UnitOfMeasure.Tablespoon)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddInsightEntryAsync(client, planId, "Monday", "Dinner", bread);
         await AddInsightEntryAsync(client, planId, "Tuesday", "Dinner", tagine);
@@ -435,8 +435,8 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var client = await factory.CreateAuthenticatedClientAsync();
         var weekStart = MealPlanTestHelper.NextMonday();
 
-        var pasta = await CreateInsightRecipeAsync(client, "Pasta", [("Flour", 2m, "cups"), ("Egg", 3m, "count")]);
-        var bread = await CreateInsightRecipeAsync(client, "Bread", [("flour", 500m, "g"), ("egg", 1m, "count")]);
+        var pasta = await CreateInsightRecipeAsync(client, "Pasta", [("Flour", 2m, UnitOfMeasure.Cup), ("Egg", 3m, UnitOfMeasure.Piece)]);
+        var bread = await CreateInsightRecipeAsync(client, "Bread", [("flour", 500m, UnitOfMeasure.Gram), ("egg", 1m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddInsightEntryAsync(client, planId, "Monday", "Dinner", pasta);
         await AddInsightEntryAsync(client, planId, "Tuesday", "Dinner", bread);
@@ -456,8 +456,8 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var client = await factory.CreateAuthenticatedClientAsync();
         var weekStart = MealPlanTestHelper.NextMonday();
 
-        var apple = await CreateInsightRecipeAsync(client, "Apple Pie", [("Apple", 1m, "kg"), ("Cinnamon", 1m, "tsp")]);
-        var banana = await CreateInsightRecipeAsync(client, "Banana Bread", [("Banana", 1m, "kg"), ("Walnut", 1m, "cup")]);
+        var apple = await CreateInsightRecipeAsync(client, "Apple Pie", [("Apple", 1m, UnitOfMeasure.Kilogram), ("Cinnamon", 1m, UnitOfMeasure.Teaspoon)]);
+        var banana = await CreateInsightRecipeAsync(client, "Banana Bread", [("Banana", 1m, UnitOfMeasure.Kilogram), ("Walnut", 1m, UnitOfMeasure.Cup)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddInsightEntryAsync(client, planId, "Monday", "Dinner", apple);
         await AddInsightEntryAsync(client, planId, "Tuesday", "Dinner", banana);
@@ -478,7 +478,7 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var client = await factory.CreateAuthenticatedClientAsync();
         var weekStart = MealPlanTestHelper.NextMonday();
 
-        var tagine = await CreateInsightRecipeAsync(client, "Tagine", [("Cumin", 1m, "tsp"), ("Saffron", 1m, "pinch")]);
+        var tagine = await CreateInsightRecipeAsync(client, "Tagine", [("Cumin", 1m, UnitOfMeasure.Teaspoon), ("Saffron", 1m, UnitOfMeasure.Pinch)]);
         var planId = await CreatePlanAsync(client, weekStart);
         await AddInsightEntryAsync(client, planId, "Monday", "Dinner", tagine);
         await AddInsightEntryAsync(client, planId, "Thursday", "Dinner", tagine);
@@ -542,7 +542,7 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
             client, planId, Enum.Parse<DayOfWeek>(day), Enum.Parse<MealType>(meal), recipeId)).Id;
 
     private static async Task<Guid> CreateInsightRecipeAsync(
-        HttpClient client, string title, (string Name, decimal Qty, string Unit)[] ingredients)
+        HttpClient client, string title, (string Name, decimal Qty, UnitOfMeasure Unit)[] ingredients)
     {
         var recipe = await MealPlanTestHelper.CreateRecipeAsync(
             client,
@@ -587,11 +587,11 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         CookTimeMinutes: 20,
         Servings: 4,
         Difficulty: DifficultyLevel.Easy,
-        CuisineType: "Italian",
+        CuisineType: Cuisine.Italian,
         CaloriesPerServing: 210,
         ImageUrl: null,
         Visibility: visibility,
-        Ingredients: [new RecipeIngredient { Name = "flour", Quantity = 3m, Unit = "cups" }],
+        Ingredients: [new RecipeIngredient { Name = "flour", Quantity = 3m, Unit = UnitOfMeasure.Cup }],
         Steps: [new RecipeStep { StepNumber = 1, Description = "Mix, rest, bake." }],
-        Tags: ["bread"]);
+        Tags: [RecipeTag.Bread]);
 }

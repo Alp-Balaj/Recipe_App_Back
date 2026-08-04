@@ -1,4 +1,5 @@
-using System.Globalization;
+using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using RecipeApp.Application.MealPlanning;
@@ -158,7 +159,10 @@ public class ShoppingListService : IShoppingListService
             .Select(p => new { p.Id })
             .FirstOrDefaultAsync(ct);
 
-        var parts = new List<(string Key, string RawName, string Quantity, string Dish)>();
+        // Quantity and Unit are carried as VALUES now, not as a pre-rendered string (stream
+        // G). The display string is derived at the end; keeping the number means the group
+        // can add its parts up, which is the whole point of the slice.
+        var parts = new List<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, string Dish)>();
 
         if (plan is not null)
         {
@@ -195,7 +199,8 @@ public class ShoppingListService : IShoppingListService
                     parts.Add((
                         IngredientKey.For(ingredient.Name),
                         ingredient.Name,
-                        FormatQuantity(ingredient.Quantity, ingredient.Unit),
+                        ingredient.Quantity,
+                        ingredient.Unit,
                         recipe.Title));
                 }
             }
@@ -229,11 +234,12 @@ public class ShoppingListService : IShoppingListService
             groups.Add(new ShoppingListGroupResponse(
                 group.Key,
                 IngredientKey.DisplayNameFor(group.Select(p => p.RawName)),
-                group.Select(p => new ShoppingListPartResponse(p.Quantity, p.Dish)).ToList(),
+                group.Select(p => new ShoppingListPartResponse(Units.Format(p.Quantity, p.Unit), p.Dish)).ToList(),
                 group.Select(p => p.Dish).Distinct(StringComparer.Ordinal).ToList(),
                 mark?.IsPurchased ?? false,
                 ShoppingListGroupOrigin.Derived,
-                null));
+                null,
+                SumWithinDimensions(group)));
         }
 
         // Manual rows stay one group each, keyed for tick storage but never merged into a
@@ -250,7 +256,10 @@ public class ShoppingListService : IShoppingListService
                 [],
                 mark?.IsPurchased ?? false,
                 ShoppingListGroupOrigin.Manual,
-                item.Id));
+                item.Id,
+                // A manual row's quantity is free text ("a couple of bags"), deliberately —
+                // it is a note to self, not a measurement. Nothing to sum.
+                []));
         }
 
         var ordered = groups
@@ -263,6 +272,68 @@ public class ShoppingListService : IShoppingListService
             ordered,
             ordered.Count(g => g.IsPurchased),
             ordered.Count);
+    }
+
+    /// <summary>
+    /// The summation (stream G, slice G1). One total per bucket, where a bucket is:
+    ///
+    ///   • a CONVERTIBLE dimension — every mass part folds into one gram figure, every volume
+    ///     part into one millilitre figure, regardless of which unit each was written in;
+    ///   • a single COUNT unit — cloves sum with cloves, cans with cans, and never with each
+    ///     other, because there is no rate between them;
+    ///   • nothing at all for IMPRECISE parts — a pinch plus a dash is not two of anything,
+    ///     and a shopper acting on an invented number is worse off than one reading "a pinch".
+    ///
+    /// A group with a single part still gets a total, and that is deliberate: the total is
+    /// where the list states a quantity in the unit you BUY in ("1.2 kg"), while the parts
+    /// stay in the units each recipe was WRITTEN in ("3 cups", "450 g"). Both are wanted.
+    ///
+    /// Ordered by dimension then unit so a group's totals are stable across reads — the same
+    /// reasoning as the group ordering itself.
+    /// </summary>
+    private static List<ShoppingListTotalResponse> SumWithinDimensions(
+        IEnumerable<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, string Dish)> parts)
+    {
+        var convertible = new Dictionary<UnitDimension, decimal>();
+        var counted = new Dictionary<UnitOfMeasure, decimal>();
+
+        foreach (var part in parts)
+        {
+            var dimension = Units.DimensionOf(part.Unit);
+
+            if (Units.IsConvertible(dimension) && Units.ToBase(part.Quantity, part.Unit) is decimal inBase)
+            {
+                convertible[dimension] = convertible.GetValueOrDefault(dimension) + inBase;
+            }
+            else if (dimension == UnitDimension.Count)
+            {
+                counted[part.Unit] = counted.GetValueOrDefault(part.Unit) + part.Quantity;
+            }
+            // Imprecise falls through deliberately — see the summary.
+        }
+
+        var totals = new List<ShoppingListTotalResponse>();
+
+        foreach (var (dimension, total) in convertible.OrderBy(e => e.Key))
+        {
+            // Reported in the unit FormatBase promoted to, so Quantity and Display agree —
+            // a client that formats the number itself must not end up rendering "1500 kg".
+            var promoted = dimension == UnitDimension.Mass && total >= 1000m ? UnitOfMeasure.Kilogram
+                : dimension == UnitDimension.Volume && total >= 1000m ? UnitOfMeasure.Litre
+                : Units.BaseUnitOf(dimension);
+
+            totals.Add(new ShoppingListTotalResponse(
+                Units.Round(Units.FromBase(total, promoted)),
+                promoted,
+                Units.FormatBase(total, dimension)));
+        }
+
+        foreach (var (unit, total) in counted.OrderBy(e => e.Key))
+        {
+            totals.Add(new ShoppingListTotalResponse(Units.Round(total), unit, Units.Format(total, unit)));
+        }
+
+        return totals;
     }
 
     /// <summary>
@@ -339,9 +410,7 @@ public class ShoppingListService : IShoppingListService
         return DateTime.SpecifyKind(today.AddDays(-daysSinceMonday), DateTimeKind.Utc);
     }
 
-    // Was copied (not moved) from MealPlanService while the generate endpoint still existed;
-    // that original went with it (Task 4), so this is now the only copy. Decimal rendered
-    // invariant-culture so the string is deterministic regardless of server locale.
-    private static string FormatQuantity(decimal quantity, string unit) =>
-        $"{quantity.ToString(CultureInfo.InvariantCulture)} {unit}".Trim();
+    // FormatQuantity (a decimal and a free-text unit joined by a space) retired with stream
+    // G. Units.Format replaces it: it owns pluralisation, the invariant-culture decimal, and
+    // the ToTaste case where a quantity should not be printed at all.
 }

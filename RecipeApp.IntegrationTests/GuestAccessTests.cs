@@ -286,13 +286,13 @@ public class GuestAccessTests(IntegrationTestFactory factory) : IClassFixture<In
             CookTimeMinutes: 10,
             Servings: 2,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "Fusion",
+            CuisineType: Cuisine.Other,
             CaloriesPerServing: 400,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: [new RecipeIngredient { Name = "rice", Quantity = 200m, Unit = "g" }],
+            Ingredients: [new RecipeIngredient { Name = "rice", Quantity = 200m, Unit = UnitOfMeasure.Gram }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Cook the rice." }],
-            Tags: ["bowl"]);
+            Tags: [RecipeTag.Salad]);
 
     private static async Task<RecipeResponse> CreateRecipeAsync(HttpClient client, RecipeVisibility visibility = RecipeVisibility.Public)
     {

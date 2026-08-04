@@ -44,9 +44,9 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
     ?? throw new InvalidOperationException(
         "ConnectionStrings:DefaultConnection not configured — set via user-secrets or ConnectionStrings__DefaultConnection env var.");
 
-var npgsqlDataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
-npgsqlDataSourceBuilder.EnableDynamicJson();
-var npgsqlDataSource = npgsqlDataSourceBuilder.Build();
+// Configured centrally (RecipeAppDataSource) so the jsonb string-enum contract cannot be
+// forgotten at one of the three call sites — see that class for why it matters.
+var npgsqlDataSource = RecipeAppDataSource.Build(connectionString);
 
 builder.Services.AddDbContext<ApplicationDbContext>(options => options.UseNpgsql(npgsqlDataSource));
 

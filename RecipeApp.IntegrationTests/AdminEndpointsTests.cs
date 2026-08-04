@@ -323,13 +323,13 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
             CookTimeMinutes: 40,
             Servings: 4,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "French",
+            CuisineType: Cuisine.French,
             CaloriesPerServing: 350,
             ImageUrl: null,
             Visibility: visibility,
-            Ingredients: [new RecipeIngredient { Name = "carrot", Quantity = 200m, Unit = "g" }],
+            Ingredients: [new RecipeIngredient { Name = "carrot", Quantity = 200m, Unit = UnitOfMeasure.Gram }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Simmer slowly." }],
-            Tags: ["stew"]);
+            Tags: [RecipeTag.Stew]);
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options))!;

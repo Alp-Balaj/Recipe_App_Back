@@ -1,3 +1,4 @@
+using RecipeApp.Domain.Enums;
 using System.Net.Http.Json;
 using RecipeApp.Domain.ValueObjects;
 
@@ -28,12 +29,12 @@ public class IngredientNamesFrequencyCapTests(IntegrationTestFactory factory) : 
         {
             await MealPlanTestHelper.CreateRecipeAsync(client, $"Common-{i}",
             [
-                new RecipeIngredient { Name = "Zzz Common Grain", Quantity = 1m, Unit = "unit" },
+                new RecipeIngredient { Name = "Zzz Common Grain", Quantity = 1m, Unit = UnitOfMeasure.Piece },
             ]);
         }
 
         var rareIngredients = Enumerable.Range(1, 20)
-            .Select(i => new RecipeIngredient { Name = $"Rare Item {i:D2}", Quantity = 1m, Unit = "unit" })
+            .Select(i => new RecipeIngredient { Name = $"Rare Item {i:D2}", Quantity = 1m, Unit = UnitOfMeasure.Piece })
             .ToList();
         await MealPlanTestHelper.CreateRecipeAsync(client, "Rares", rareIngredients);
 

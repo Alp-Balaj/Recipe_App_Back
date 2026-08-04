@@ -7,6 +7,7 @@ using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.Chat;
@@ -270,7 +271,11 @@ public class ChatService : IChatService
 
         try
         {
-            return await _assistant.GetReplyAsync(content, history, candidates, dietaryRestrictions, cancellationToken);
+            // Stream G: the restrictions are typed now, so they reach the prompt as words
+            // ("gluten free") rather than as enum member names. The assistant contract stays
+            // string-based — what a prompt needs is prose, not a vocabulary it must decode.
+            return await _assistant.GetReplyAsync(
+                content, history, candidates, dietaryRestrictions.Select(Vocabulary.Describe).ToList(), cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -293,8 +298,10 @@ public class ChatService : IChatService
 
         return recipes
             .Select(r => new ChatCandidateRecipe(
-                r.Id, r.Title, r.Description, r.CuisineType, r.Difficulty,
-                r.TotalTimeMinutes, r.CaloriesPerServing, r.Tags))
+                r.Id, r.Title, r.Description,
+                r.CuisineType is Cuisine c ? Vocabulary.Describe(c) : null, r.Difficulty,
+                r.TotalTimeMinutes, r.CaloriesPerServing,
+                r.Tags.Select(Vocabulary.Describe).ToList()))
             .ToList();
     }
 

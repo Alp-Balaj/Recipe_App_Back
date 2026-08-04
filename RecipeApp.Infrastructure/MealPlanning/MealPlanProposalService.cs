@@ -6,6 +6,7 @@ using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.MealPlanning;
@@ -87,10 +88,15 @@ public class MealPlanProposalService : IMealPlanProposalService
             return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(request.WeekStartDate, []));
         }
 
+        // Stream G touches this service ONLY here and at the restriction list below, and only
+        // to adapt to the retyped columns — the proposal service is out of G's scope, so its
+        // grounding, slot logic and propose-mode contract are unchanged.
         var candidates = recipes
             .Select(r => new ChatCandidateRecipe(
-                r.Id, r.Title, r.Description, r.CuisineType, r.Difficulty,
-                r.TotalTimeMinutes, r.CaloriesPerServing, r.Tags))
+                r.Id, r.Title, r.Description,
+                r.CuisineType is Cuisine c ? Vocabulary.Describe(c) : null, r.Difficulty,
+                r.TotalTimeMinutes, r.CaloriesPerServing,
+                r.Tags.Select(Vocabulary.Describe).ToList()))
             .ToList();
 
         var dietaryRestrictions = await _db.Users
@@ -101,7 +107,8 @@ public class MealPlanProposalService : IMealPlanProposalService
         IReadOnlyList<ProposedSlotAssignment> assignments;
         try
         {
-            assignments = await _assistant.ProposeWeekAsync(openSlots, candidates, dietaryRestrictions, cancellationToken);
+            assignments = await _assistant.ProposeWeekAsync(
+                openSlots, candidates, dietaryRestrictions.Select(Vocabulary.Describe).ToList(), cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

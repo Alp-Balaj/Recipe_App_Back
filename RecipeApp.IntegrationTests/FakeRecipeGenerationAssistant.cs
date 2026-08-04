@@ -12,8 +12,12 @@ namespace RecipeApp.IntegrationTests;
 //
 //   * The draft echoes the prompt into the title, so a test can assert its own generation
 //     came back on a shared database.
-//   * The dietary restrictions and the conversation history length are echoed into tags,
-//     which is how the tests prove the orchestrator actually loaded and forwarded them.
+//   * The dietary restrictions and the conversation history length are echoed into the
+//     DESCRIPTION, which is how the tests prove the orchestrator actually loaded and
+//     forwarded them. Stream G moved that echo off Tags: a curated vocabulary has no member
+//     meaning "history-2", and inventing one to serve a test fixture would put a value in
+//     the product's enum that no recipe should ever carry. Description stays free text, so
+//     it is the right place for a fixture to smuggle a signal through.
 //   * A prompt containing "__FAIL__" throws, exercising the 502 path with nothing persisted.
 //
 // Note what it does NOT do: it returns an already-clean draft. The salvaging of a messy
@@ -34,21 +38,22 @@ public sealed class FakeRecipeGenerationAssistant : IRecipeGenerationAssistant
             throw new InvalidOperationException("Simulated recipe generator failure.");
         }
 
-        var tags = new List<string> { $"history-{history.Count}" };
-        tags.AddRange(dietaryRestrictions);
+        // Still a pure function of the inputs — no mutable state, safe under the shared
+        // TestServer (see the class note).
+        var restrictions = dietaryRestrictions.Count == 0 ? "none" : string.Join('/', dietaryRestrictions);
 
         var draft = new GeneratedRecipeDraft(
             Title: $"Generated: {request}",
-            Description: "A recipe invented for the integration suite.",
+            Description: $"A recipe invented for the integration suite. history-{history.Count} restrictions-{restrictions}",
             PrepTimeMinutes: 5,
             CookTimeMinutes: 10,
             Servings: 2,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "Test",
+            CuisineType: Cuisine.Other,
             CaloriesPerServing: 320,
-            Ingredients: [new RecipeIngredient { Name = "generated ingredient", Quantity = 1m, Unit = "pcs" }],
+            Ingredients: [new RecipeIngredient { Name = "generated ingredient", Quantity = 1m, Unit = UnitOfMeasure.Piece }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Cook the generated ingredient." }],
-            Tags: tags);
+            Tags: [RecipeTag.Dinner]);
 
         return Task.FromResult(new GeneratedRecipe(draft, new ChatTokenUsage(120, 240, 360)));
     }

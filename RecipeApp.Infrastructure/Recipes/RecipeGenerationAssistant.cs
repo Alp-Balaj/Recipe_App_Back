@@ -4,6 +4,7 @@ using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Chat;
 
@@ -54,24 +55,35 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
     private const int MaxTimeMinutes = 24 * 60;
     private const int MaxServings = 100;
     private const int MaxCaloriesPerServing = 20_000;
-    private const int MaxCuisineLength = 60;
     private const int MaxIngredients = 60;
     private const int MaxIngredientNameLength = 100;
-    private const int MaxUnitLength = 30;
     private const decimal MaxQuantity = 100_000m;
     private const int MaxSteps = 40;
     private const int MaxStepDescriptionLength = 1000;
     private const int MaxTimerSeconds = 24 * 60 * 60;
     private const int MaxTags = 10;
-    private const int MaxTagLength = 40;
 
-    // The human write path requires Quantity > 0 and a non-empty Unit, so a generated
-    // ingredient that has neither cannot be stored as-is. Dropping the ingredient would
-    // silently corrupt the recipe (a missing "salt" is worse than an approximate one), so
-    // the two get a neutral default instead. Stream G: "pcs" is the count-dimension
-    // fallback — it is the value the unit enum's mapping needs to recognise.
+    // MaxCuisineLength, MaxUnitLength and MaxTagLength went with stream G's typing: a closed
+    // vocabulary has no length to bound. Their replacement is membership — a value that is
+    // not a member is dropped, which is a stronger guarantee than "at most 60 characters of
+    // anything".
+
+    // The human write path requires Quantity > 0 and a valid Unit, so a generated ingredient
+    // that has neither cannot be stored as-is. Dropping the ingredient would silently corrupt
+    // the recipe (a missing "salt" is worse than an approximate one), so the two get a neutral
+    // default instead. Piece is the count-dimension neutral: it asserts nothing about mass or
+    // volume, so an ingredient that lands on it is simply never summed with anything, which is
+    // the honest outcome when the model failed to say how much.
     private const decimal FallbackQuantity = 1m;
-    private const string FallbackUnit = "pcs";
+    private const UnitOfMeasure FallbackUnit = UnitOfMeasure.Piece;
+
+    // ── The vocabularies, as the schema and the prompt need them ────────────────────────
+    // Enumerated from the enums themselves rather than written out, so a member appended to
+    // UnitOfMeasure/Cuisine/RecipeTag reaches the model on the next call with no edit here.
+    // That is the property that keeps the prompt honest as the vocabulary grows.
+    private static readonly string[] UnitNames = Enum.GetNames<UnitOfMeasure>();
+    private static readonly string[] CuisineNames = Enum.GetNames<Cuisine>();
+    private static readonly string[] TagNames = Enum.GetNames<RecipeTag>();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -83,6 +95,14 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
     // (UPPERCASE type enums, no additionalProperties). Everything scalar arrives as STRING
     // or NUMBER and is re-validated below — the schema buys shape, not meaning, and a
     // looser schema costs nothing because the normalisers are the real guard.
+    //
+    // STREAM G tightens exactly three fields with an `enum` constraint: unit, cuisineType
+    // and tags. This is the one place where the schema can buy MEANING and not just shape,
+    // because those three now have a closed set of legal values and the dialect can express
+    // it. Constraining them at the decoder is worth more than any amount of prompt wording —
+    // "cups" cannot come back at all. The normalisers below still re-validate every one of
+    // them: the schema is the provider's promise, not ours, and stream E's whole trust
+    // boundary rests on never treating a model response as pre-validated.
     private static readonly object ResponseSchema = new
     {
         type = "OBJECT",
@@ -94,7 +114,7 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
             cookTimeMinutes = new { type = "NUMBER" },
             servings = new { type = "NUMBER" },
             difficulty = new { type = "STRING" },
-            cuisineType = new { type = "STRING" },
+            cuisineType = new { type = "STRING", @enum = CuisineNames },
             caloriesPerServing = new { type = "NUMBER" },
             ingredients = new
             {
@@ -106,7 +126,7 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
                     {
                         name = new { type = "STRING" },
                         quantity = new { type = "NUMBER" },
-                        unit = new { type = "STRING" },
+                        unit = new { type = "STRING", @enum = UnitNames },
                     },
                     required = new[] { "name", "quantity", "unit" },
                 },
@@ -125,7 +145,7 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
                     required = new[] { "description" },
                 },
             },
-            tags = new { type = "ARRAY", items = new { type = "STRING" } },
+            tags = new { type = "ARRAY", items = new { type = "STRING", @enum = TagNames } },
         },
         required = new[] { "title", "description", "prepTimeMinutes", "cookTimeMinutes", "servings", "difficulty", "ingredients", "steps" },
     };
@@ -214,11 +234,17 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
         sb.AppendLine($"- prepTimeMinutes / cookTimeMinutes: whole minutes, 0 or more, each at most {MaxTimeMinutes}. Use 0 for cookTimeMinutes when nothing is cooked.");
         sb.AppendLine($"- servings: a whole number of people the quantities below feed, 1 to {MaxServings}.");
         sb.AppendLine("- difficulty: exactly one of \"Easy\", \"Medium\", \"Hard\".");
-        sb.AppendLine("- cuisineType: one word or short phrase (\"Italian\", \"Thai\"); omit it when the dish belongs to no particular cuisine.");
+        // Stream G: the three closed vocabularies are spelled out in full. The schema already
+        // constrains the decoder to these, so the prompt is not what enforces them — what it
+        // buys is a model that PLANS around the vocabulary instead of writing a recipe and
+        // then having a value forced into a nearby member. "Omit rather than approximate" is
+        // stated for the same reason: a wrong Cuisine is worse than a null one, because the
+        // cuisine filter is how people find dishes.
+        sb.AppendLine($"- cuisineType: EXACTLY one of [{string.Join(", ", CuisineNames)}]. Omit it entirely when the dish belongs to no particular cuisine — do not force a near match, and use Other only for a real cuisine missing from that list.");
         sb.AppendLine("- caloriesPerServing: your best estimate per serving, or omit it when you cannot estimate honestly. Never guess wildly.");
-        sb.AppendLine("- ingredients: every ingredient needed, each with a name, a quantity GREATER THAN ZERO, and a unit (\"g\", \"ml\", \"tbsp\", \"cloves\", \"pcs\"). Quantities must match the servings figure. Do not put the quantity or the unit inside the name.");
+        sb.AppendLine($"- ingredients: every ingredient needed, each with a name, a quantity GREATER THAN ZERO, and a unit that is EXACTLY one of [{string.Join(", ", UnitNames)}]. Quantities must match the servings figure. Do not put the quantity or the unit inside the name. Prefer Gram and Millilitre for anything weighed or poured; use Piece, Clove, Slice, Can, Package or Bunch for whole items; use Pinch, Dash, Splash, Handful or ToTaste only where a real cook would not measure.");
         sb.AppendLine("- steps: the method in order, one instruction per step. Do not number them yourself. Set timerSeconds only on a step with a real unattended wait; omit it otherwise.");
-        sb.AppendLine($"- tags: up to {MaxTags} short lowercase keywords (\"vegetarian\", \"one-pot\").");
+        sb.AppendLine($"- tags: up to {MaxTags}, each EXACTLY one of [{string.Join(", ", TagNames)}]. Pick only the ones that are genuinely true of the dish; an empty list is fine. Never invent a tag outside that list.");
         sb.AppendLine();
         sb.AppendLine("If the request is not about food at all, still return a sensible recipe that is as close to the request as a cooking app can honestly get.");
 
@@ -300,7 +326,12 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
             ClampInt(raw.CookTimeMinutes, 0, MaxTimeMinutes) ?? 0,
             ClampInt(raw.Servings, 1, MaxServings) ?? 1,
             difficulty,
-            Clip(raw.CuisineType, MaxCuisineLength) is { Length: > 0 } cuisine ? cuisine : null,
+            // Stream G: same IsDefined discipline as difficulty above, but the failure mode
+            // differs — an unparseable difficulty falls back to Medium because Recipe.Difficulty
+            // is not nullable and every recipe has one, whereas an unparseable cuisine becomes
+            // NULL. "No particular cuisine" is a true statement about a dish; "Italian" when
+            // the model said "Sicilian" is not.
+            NormaliseCuisine(raw.CuisineType),
             // Calories are the one field where a wrong number is worse than no number: they
             // feed the day page's totals and the week's calorie ribbon. A zero or negative
             // estimate is the model declining, so it drops to null instead of clamping up
@@ -334,14 +365,18 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
                 continue;
             }
 
-            var unit = Clip(item?.Unit, MaxUnitLength);
             var quantity = item?.Quantity is decimal q && q > 0m ? Math.Min(q, MaxQuantity) : FallbackQuantity;
+
+            // Units.TryParse accepts the member name the schema asks for AND the spellings a
+            // model reaches for anyway ("cups", "tbsp."). An unrecognised spelling falls back
+            // to Piece rather than being approximated — see the FallbackUnit note.
+            var unit = Units.TryParse(item?.Unit, out var parsedUnit) ? parsedUnit : FallbackUnit;
 
             result.Add(new RecipeIngredient
             {
                 Name = name,
                 Quantity = quantity,
-                Unit = string.IsNullOrWhiteSpace(unit) ? FallbackUnit : unit,
+                Unit = unit,
             });
         }
 
@@ -385,18 +420,21 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
         return result;
     }
 
-    private static List<string> NormaliseTags(List<string?>? raw)
+    // Stream G: membership replaces clipping. A tag outside the curated vocabulary is
+    // DROPPED, not coerced — there is no near-miss rule that could turn "comforting" into
+    // Comfort without also turning "spicy-ish" into Spicy on a dish that isn't.
+    //
+    // The old case-insensitive dedupe is gone with the strings it protected against: two
+    // spellings of one tag can no longer exist, so a HashSet<RecipeTag> is the whole story.
+    private static List<RecipeTag> NormaliseTags(List<string?>? raw)
     {
-        var result = new List<string>();
+        var result = new List<RecipeTag>();
         if (raw is null)
         {
             return result;
         }
 
-        // Case-insensitive dedupe, original casing preserved: tag FILTERING is
-        // case-sensitive (GET /recipes), so "Vegan" and "vegan" on one recipe would be two
-        // separate facets of the same idea.
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<RecipeTag>();
         foreach (var item in raw)
         {
             if (result.Count >= MaxTags)
@@ -404,8 +442,7 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
                 break;
             }
 
-            var tag = Clip(item, MaxTagLength);
-            if (!string.IsNullOrWhiteSpace(tag) && seen.Add(tag))
+            if (Vocabulary.TryParseMember<RecipeTag>(item, out var tag) && seen.Add(tag))
             {
                 result.Add(tag);
             }
@@ -413,6 +450,9 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
 
         return result;
     }
+
+    private static Cuisine? NormaliseCuisine(string? raw) =>
+        Vocabulary.TryParseMember<Cuisine>(raw, out var cuisine) ? cuisine : null;
 
     // Trim, then cut to length. Null-safe, and returns "" rather than null so the callers
     // can use one IsNullOrWhiteSpace test for "absent" and "blank" alike.

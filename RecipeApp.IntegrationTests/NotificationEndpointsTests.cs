@@ -355,13 +355,13 @@ public class NotificationEndpointsTests(IntegrationTestFactory factory) : IClass
             CookTimeMinutes: 40,
             Servings: 6,
             Difficulty: DifficultyLevel.Medium,
-            CuisineType: "British",
+            CuisineType: Cuisine.British,
             CaloriesPerServing: 520,
             ImageUrl: null,
             Visibility: RecipeVisibility.Public,
-            Ingredients: [new RecipeIngredient { Name = "butter", Quantity = 200m, Unit = "g" }],
+            Ingredients: [new RecipeIngredient { Name = "butter", Quantity = 200m, Unit = UnitOfMeasure.Gram }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Rub, roll, bake." }],
-            Tags: ["baking"]);
+            Tags: [RecipeTag.Baking]);
 
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();

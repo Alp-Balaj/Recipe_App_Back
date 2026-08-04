@@ -17,7 +17,7 @@ public class MealPlanProposalEndpointsTests(IntegrationTestFactory factory) : IC
     private readonly IntegrationTestFactory _factory = factory;
 
     private static List<RecipeIngredient> Ingredients() =>
-        [new RecipeIngredient { Name = "Test ingredient", Quantity = 1m, Unit = "piece" }];
+        [new RecipeIngredient { Name = "Test ingredient", Quantity = 1m, Unit = UnitOfMeasure.Piece }];
 
     [Fact]
     public async Task ProposeWeek_WithoutToken_Returns401()

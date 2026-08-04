@@ -6,6 +6,7 @@ using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.Recipes;
@@ -86,7 +87,11 @@ public class RecipeGenerationService : IRecipeGenerationService
         try
         {
             generated = await _assistant.GenerateAsync(
-                request.Prompt, history, author.DietaryRestrictions, cancellationToken);
+                request.Prompt, history,
+                // Typed since stream G, described as words for the prompt — same treatment
+                // the chat and propose-week lanes give them.
+                author.DietaryRestrictions.Select(Vocabulary.Describe).ToList(),
+                cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

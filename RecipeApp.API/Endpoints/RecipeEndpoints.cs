@@ -5,6 +5,7 @@ using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 
 namespace RecipeApp.API.Endpoints;
 
@@ -217,6 +218,43 @@ public static class RecipeEndpoints
             difficultyFilter = parsedDifficulty;
         }
 
+        // cuisine and tags get the same treatment since stream G, for the same reason and
+        // one more. Before typing, an unrecognised ?cuisine=Klingon simply matched no rows —
+        // a 200 with an empty list, indistinguishable from "we have no Klingon recipes". Now
+        // it is a 400 that names the problem, so a client bug surfaces as a client bug.
+        Cuisine? cuisineFilter = null;
+        if (!string.IsNullOrEmpty(cuisine))
+        {
+            if (!Vocabulary.TryParseMember<Cuisine>(cuisine, out var parsedCuisine))
+            {
+                error = Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["cuisine"] = [$"'{cuisine}' is not a valid cuisine."],
+                });
+                return false;
+            }
+            cuisineFilter = parsedCuisine;
+        }
+
+        var tagFilters = new List<RecipeTag>();
+        foreach (var tag in tags ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(tag))
+            {
+                continue;
+            }
+
+            if (!Vocabulary.TryParseMember<RecipeTag>(tag, out var parsedTag))
+            {
+                error = Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["tags"] = [$"'{tag}' is not a valid tag."],
+                });
+                return false;
+            }
+            tagFilters.Add(parsedTag);
+        }
+
         RecipeListCursor? decodedCursor = null;
         if (!string.IsNullOrEmpty(cursor) && !RecipeListCursor.TryDecode(cursor, out decodedCursor))
         {
@@ -243,7 +281,7 @@ public static class RecipeEndpoints
         // whitespace-only term collapses to null so it does not become a no-op predicate.
         var searchTerm = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
 
-        query = new RecipeListQuery(cuisine, difficultyFilter, tags ?? [], decodedCursor, effectiveLimit, ownedByUserId, searchTerm);
+        query = new RecipeListQuery(cuisineFilter, difficultyFilter, tagFilters, decodedCursor, effectiveLimit, ownedByUserId, searchTerm);
         return true;
     }
 

@@ -92,7 +92,7 @@ public class RecipeGenerationEndpointTests(IntegrationTestFactory factory) : ICl
         Assert.Equal(0, await GetRankFromDbAsync(auth.UserId));
 
         await MealPlanTestHelper.CreateRecipeAsync(
-            client, "Typed By Hand", [new() { Name = "flour", Quantity = 1m, Unit = "cup" }]);
+            client, "Typed By Hand", [new() { Name = "flour", Quantity = 1m, Unit = UnitOfMeasure.Cup }]);
 
         Assert.Equal(RecipeCreated, await GetRankFromDbAsync(auth.UserId));
     }
@@ -148,9 +148,10 @@ public class RecipeGenerationEndpointTests(IntegrationTestFactory factory) : ICl
         var result = await GenerateAsync(client, Request(conversationId: conversation.Id));
 
         Assert.Equal(conversation.Id, result.Recipe.SourceConversationId);
-        // The fake echoes the history length into a tag: the first turn persisted a user
-        // and an assistant message, so the generator saw both.
-        Assert.Contains("history-2", result.Recipe.Tags);
+        // The fake echoes the history length into the description: the first turn persisted
+        // a user and an assistant message, so the generator saw both. (It was a tag until
+        // stream G closed the tag vocabulary — see FakeRecipeGenerationAssistant.)
+        Assert.Contains("history-2", result.Recipe.Description);
     }
 
     [Fact]

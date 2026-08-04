@@ -14,5 +14,9 @@ public class UpdateProfileRequestValidator : AbstractValidator<UpdateProfileRequ
         RuleFor(x => x.Bio).MaximumLength(160).When(x => x.Bio is not null);
         RuleFor(x => x.ProfileImageUrl).MaximumLength(2048).When(x => x.ProfileImageUrl is not null);
         RuleFor(x => x.DefaultRecipeVisibility).IsInEnum();
+        // Stream G: each restriction must be a known member. Undefined values would sail
+        // through model binding (the JsonStringEnumConverter allows integers) and land in
+        // jsonb, then reach an AI system prompt as a meaningless constraint.
+        RuleForEach(x => x.DietaryRestrictions).IsInEnum().When(x => x.DietaryRestrictions is not null);
     }
 }

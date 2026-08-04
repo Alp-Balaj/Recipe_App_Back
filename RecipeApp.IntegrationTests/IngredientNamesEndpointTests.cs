@@ -15,12 +15,12 @@ public class IngredientNamesEndpointTests(IntegrationTestFactory factory) : ICla
         var client = await factory.CreateAuthenticatedClientAsync();
         await MealPlanTestHelper.CreateRecipeAsync(client, "A",
         [
-            new RecipeIngredient { Name = "Flour", Quantity = 1m, Unit = "cup" },
-            new RecipeIngredient { Name = "Flaked almonds", Quantity = 1m, Unit = "cup" },
+            new RecipeIngredient { Name = "Flour", Quantity = 1m, Unit = UnitOfMeasure.Cup },
+            new RecipeIngredient { Name = "Flaked almonds", Quantity = 1m, Unit = UnitOfMeasure.Cup },
         ]);
         await MealPlanTestHelper.CreateRecipeAsync(client, "B",
         [
-            new RecipeIngredient { Name = "flour", Quantity = 2m, Unit = "cups" },
+            new RecipeIngredient { Name = "flour", Quantity = 2m, Unit = UnitOfMeasure.Cup },
         ]);
 
         var names = await client.GetFromJsonAsync<string[]>("/ingredients/names?q=fl");
@@ -45,8 +45,8 @@ public class IngredientNamesEndpointTests(IntegrationTestFactory factory) : ICla
         var client = await factory.CreateAuthenticatedClientAsync();
         await MealPlanTestHelper.CreateRecipeAsync(client, "C",
         [
-            new RecipeIngredient { Name = "Zucchini", Quantity = 1m, Unit = "unit" },
-            new RecipeIngredient { Name = "Aubergine", Quantity = 1m, Unit = "unit" },
+            new RecipeIngredient { Name = "Zucchini", Quantity = 1m, Unit = UnitOfMeasure.Piece },
+            new RecipeIngredient { Name = "Aubergine", Quantity = 1m, Unit = UnitOfMeasure.Piece },
         ]);
 
         var names = await client.GetFromJsonAsync<string[]>("/ingredients/names?q=");
@@ -66,11 +66,11 @@ public class IngredientNamesEndpointTests(IntegrationTestFactory factory) : ICla
         var client = await factory.CreateAuthenticatedClientAsync();
         await MealPlanTestHelper.CreateRecipeAsync(client, "E",
         [
-            new RecipeIngredient { Name = "Basil", Quantity = 1m, Unit = "unit" },
-            new RecipeIngredient { Name = "Bay leaf", Quantity = 1m, Unit = "unit" },
-            new RecipeIngredient { Name = "Banana", Quantity = 1m, Unit = "unit" },
+            new RecipeIngredient { Name = "Basil", Quantity = 1m, Unit = UnitOfMeasure.Piece },
+            new RecipeIngredient { Name = "Bay leaf", Quantity = 1m, Unit = UnitOfMeasure.Piece },
+            new RecipeIngredient { Name = "Banana", Quantity = 1m, Unit = UnitOfMeasure.Piece },
             // Deliberately NOT matching the "Ba" prefix below — proves the filter excludes it.
-            new RecipeIngredient { Name = "Carrot", Quantity = 1m, Unit = "unit" },
+            new RecipeIngredient { Name = "Carrot", Quantity = 1m, Unit = UnitOfMeasure.Piece },
         ]);
 
         var names = await client.GetFromJsonAsync<string[]>("/ingredients/names?q=Ba");
@@ -87,7 +87,7 @@ public class IngredientNamesEndpointTests(IntegrationTestFactory factory) : ICla
         var client = await factory.CreateAuthenticatedClientAsync();
         var created = await MealPlanTestHelper.CreateRecipeAsync(client, "D",
         [
-            new RecipeIngredient { Name = "Unobtainium root", Quantity = 1m, Unit = "unit" },
+            new RecipeIngredient { Name = "Unobtainium root", Quantity = 1m, Unit = UnitOfMeasure.Piece },
         ]);
 
         var beforeDelete = await client.GetFromJsonAsync<string[]>("/ingredients/names?q=Unobtainium");
@@ -113,11 +113,11 @@ public class IngredientNamesEndpointTests(IntegrationTestFactory factory) : ICla
         var otherClient = await factory.CreateAuthenticatedClientAsync();
         await MealPlanTestHelper.CreateRecipeAsync(otherClient, "Other user's secret",
         [
-            new RecipeIngredient { Name = "Xyzzy privateleek", Quantity = 1m, Unit = "unit" },
+            new RecipeIngredient { Name = "Xyzzy privateleek", Quantity = 1m, Unit = UnitOfMeasure.Piece },
         ], RecipeVisibility.Private);
         await MealPlanTestHelper.CreateRecipeAsync(otherClient, "Other user's shared dish",
         [
-            new RecipeIngredient { Name = "Xyzzy publicleek", Quantity = 1m, Unit = "unit" },
+            new RecipeIngredient { Name = "Xyzzy publicleek", Quantity = 1m, Unit = UnitOfMeasure.Piece },
         ], RecipeVisibility.Public);
 
         // A different authenticated user — owns neither recipe.

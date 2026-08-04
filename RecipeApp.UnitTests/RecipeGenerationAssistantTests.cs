@@ -81,13 +81,13 @@ public class RecipeGenerationAssistantTests
         Assert.Equal(15, draft.CookTimeMinutes);
         Assert.Equal(2, draft.Servings);
         Assert.Equal(DifficultyLevel.Easy, draft.Difficulty);
-        Assert.Equal("British", draft.CuisineType);
+        Assert.Equal(Cuisine.British, draft.CuisineType);
         Assert.Equal(420, draft.CaloriesPerServing);
         Assert.Equal(2, draft.Ingredients.Count);
         Assert.Equal("cod fillet", draft.Ingredients[0].Name);
         Assert.Equal(2m, draft.Ingredients[0].Quantity);
-        Assert.Equal("pcs", draft.Ingredients[0].Unit);
-        Assert.Equal(["fish", "quick"], draft.Tags);
+        Assert.Equal(UnitOfMeasure.Piece, draft.Ingredients[0].Unit);
+        Assert.Equal([RecipeTag.Quick], draft.Tags);
         Assert.Equal(300, draft.Steps[1].TimerSeconds);
     }
 
@@ -266,7 +266,7 @@ public class RecipeGenerationAssistantTests
         var ingredient = Assert.Single(draft.Ingredients);
         Assert.Equal("salt", ingredient.Name);
         Assert.Equal(1m, ingredient.Quantity);
-        Assert.Equal("pcs", ingredient.Unit);
+        Assert.Equal(UnitOfMeasure.Piece, ingredient.Unit);
     }
 
     [Fact]
@@ -307,7 +307,10 @@ public class RecipeGenerationAssistantTests
     {
         // Tag FILTERING is case-sensitive on GET /recipes, so "Vegan" and "vegan" on one
         // recipe would split one idea across two facets.
-        var many = string.Join(",", Enumerable.Range(1, 15).Select(i => $"\"tag{i}\""));
+        // 15 real members, so the cap (10) is what trims the list rather than the
+        // vocabulary check. "vegan" repeats Vegan in another casing and "  " is blank —
+        // neither may occupy a slot.
+        var many = string.Join(",", Enum.GetNames<RecipeTag>().Skip(1).Take(15).Select(n => $"\"{n}\""));
         var json = $$"""
             { "title": "Soup", "description": "d",
               "tags": ["Vegan","vegan","  ", {{many}}],
@@ -318,8 +321,10 @@ public class RecipeGenerationAssistantTests
         var draft = await DraftAsync(json);
 
         Assert.Equal(10, draft.Tags.Count);
-        Assert.Equal("Vegan", draft.Tags[0]);
-        Assert.DoesNotContain("vegan", draft.Tags);
+        Assert.Equal(RecipeTag.Vegan, draft.Tags[0]);
+        // Parsed case-insensitively into ONE member, so the duplicate cost no slot — the
+        // property the old string version had to spell out as a case-insensitive dedupe.
+        Assert.Single(draft.Tags, t => t == RecipeTag.Vegan);
     }
 
     [Fact]

@@ -600,11 +600,11 @@ public class ChatEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
             CookTimeMinutes: 10,
             Servings: 2,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: "Test",
+            CuisineType: Cuisine.Other,
             CaloriesPerServing: 120,
             ImageUrl: null,
             Visibility: RecipeVisibility.Public,
-            Ingredients: [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = "cup" }],
+            Ingredients: [new RecipeIngredient { Name = "water", Quantity = 1m, Unit = UnitOfMeasure.Cup }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Combine and serve." }],
             Tags: []);
 
