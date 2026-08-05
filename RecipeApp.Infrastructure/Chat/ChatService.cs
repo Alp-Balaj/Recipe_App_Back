@@ -9,6 +9,7 @@ using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
+using RecipeApp.Infrastructure.Recipes;
 
 namespace RecipeApp.Infrastructure.Chat;
 
@@ -284,13 +285,16 @@ public class ChatService : IChatService
         }
     }
 
-    // Candidate set: visibility rule 1 (Public OR own), most-recent CandidateLimit, mapped to the
-    // compact projection the assistant grounds on. Same visibility predicate + ordering as the
-    // recipe list; materialized before mapping so TotalTimeMinutes (a computed property) is used.
+    // Candidate set: visibility rule 1, most-recent CandidateLimit, mapped to the compact
+    // projection the assistant grounds on. Literally the same predicate as the recipe list —
+    // the shared RecipeVisibilityPolicy — so the assistant can only ever ground on recipes
+    // this user could open themselves, and a FriendsOnly recipe enters the candidate set on
+    // exactly the mutual-follow terms every other read path uses. Materialized before mapping
+    // so TotalTimeMinutes (a computed property) is used.
     private async Task<IReadOnlyList<ChatCandidateRecipe>> BuildCandidatesAsync(Guid userId, CancellationToken cancellationToken)
     {
         var recipes = await _db.Recipes
-            .Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == userId)
+            .Where(RecipeVisibilityPolicy.VisibleTo(userId))
             .OrderByDescending(r => r.CreatedAt)
             .ThenByDescending(r => r.Id)
             .Take(CandidateLimit)
@@ -333,8 +337,11 @@ public class ChatService : IChatService
         return HydrateFrom(ids, visibleById);
     }
 
-    // One query for every requested id that is still visible to the caller (Public OR own; the
-    // global filter drops soft-deleted rows). Returned keyed by id for order-preserving mapping.
+    // One query for every requested id that is STILL visible to the caller (the shared
+    // RecipeVisibilityPolicy; the global filter drops soft-deleted rows). Re-checked on every
+    // read rather than trusted from the stored suggestion, so a recipe that has since gone
+    // Private — or whose author's mutual follow has since broken — silently drops out of an
+    // old conversation instead of leaking. Returned keyed by id for order-preserving mapping.
     private async Task<Dictionary<Guid, Recipe>> LoadVisibleRecipesAsync(
         IEnumerable<Guid> ids, Guid userId, CancellationToken cancellationToken)
     {
@@ -345,8 +352,8 @@ public class ChatService : IChatService
         }
 
         var recipes = await _db.Recipes
-            .Where(r => distinct.Contains(r.Id)
-                && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == userId))
+            .Where(RecipeVisibilityPolicy.VisibleTo(userId))
+            .Where(r => distinct.Contains(r.Id))
             .ToListAsync(cancellationToken);
 
         return recipes.ToDictionary(r => r.Id);

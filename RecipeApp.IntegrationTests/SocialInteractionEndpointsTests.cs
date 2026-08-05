@@ -73,21 +73,80 @@ public class SocialInteractionEndpointsTests(IntegrationTestFactory factory) : I
         Assert.False(await db.Likes.AnyAsync(l => l.UserId == auth.UserId && l.RecipeId == recipe.Id));
     }
 
+    // Interacting is gated on READING (VisibleRecipeAuthorAsync), so the like/save/comment
+    // lane inherits the same relationship matrix as GET /recipes/{id}. Private is closed at
+    // every arrangement; FriendsOnly is closed at every arrangement but mutual.
     [Theory]
-    [InlineData(RecipeVisibility.Private)]
-    [InlineData(RecipeVisibility.FriendsOnly)]
-    public async Task LikeRecipe_NonVisibleRecipeOfAnotherUser_Returns404(RecipeVisibility visibility)
+    [InlineData(RecipeVisibility.Private, FollowRelationship.Stranger)]
+    [InlineData(RecipeVisibility.Private, FollowRelationship.Mutual)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.Stranger)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.ViewerFollowsAuthor)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.AuthorFollowsViewer)]
+    public async Task LikeRecipe_NonVisibleRecipeOfAnotherUser_Returns404(
+        RecipeVisibility visibility, FollowRelationship relationship)
     {
         var ownerClient = factory.CreateClient();
-        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
         var recipe = await CreateRecipeAsync(ownerClient, visibility);
 
         var otherClient = factory.CreateClient();
-        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        var other = await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        await FollowTestHelper.ArrangeAsync(relationship, otherClient, other.UserId, ownerClient, owner.UserId);
 
         var response = await otherClient.PostAsync($"/recipes/{recipe.Id}/likes", null);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // The whole interaction lane opens for a mutual friend at once, because all of it runs
+    // through the one visibility helper: like, save and comment are asserted together so a
+    // future change that widens reading but forgets one of them fails here.
+    [Fact]
+    public async Task Interactions_AMutualFriendsFriendsOnlyRecipe_AreAllowed()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient, RecipeVisibility.FriendsOnly);
+
+        var friendClient = factory.CreateClient();
+        var friend = await AuthTestHelper.RegisterAndAuthenticateAsync(friendClient);
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, ownerClient, owner.UserId);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await friendClient.PostAsync($"/recipes/{recipe.Id}/likes", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await friendClient.PostAsync($"/recipes/{recipe.Id}/saves", null)).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.Created,
+            (await friendClient.PostAsJsonAsync(
+                $"/recipes/{recipe.Id}/comments", new CommentRequest("A friend's note."), TestJson.Options)).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.True(await db.Likes.AnyAsync(l => l.UserId == friend.UserId && l.RecipeId == recipe.Id));
+    }
+
+    // …and it closes again the moment the mutual follow breaks: the saved recipe drops out
+    // of the friend's saved list, and a further like is 404. Access is a live read, never a
+    // grant that survives the relationship that justified it.
+    [Fact]
+    public async Task SavedList_DropsAFriendsOnlyRecipeWhenTheMutualFollowBreaks()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient, RecipeVisibility.FriendsOnly);
+
+        var friendClient = factory.CreateClient();
+        var friend = await AuthTestHelper.RegisterAndAuthenticateAsync(friendClient);
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, ownerClient, owner.UserId);
+        (await friendClient.PostAsync($"/recipes/{recipe.Id}/saves", null)).EnsureSuccessStatusCode();
+
+        var whileFriends = await friendClient.GetFromJsonAsync<RecipeListResponse>("/users/me/saved-recipes?limit=50", TestJson.Options);
+        Assert.Contains(whileFriends!.Items, r => r.Id == recipe.Id);
+
+        await FollowTestHelper.UnfollowAsync(ownerClient, friend.UserId);
+
+        var afterUnfollow = await friendClient.GetFromJsonAsync<RecipeListResponse>("/users/me/saved-recipes?limit=50", TestJson.Options);
+        Assert.DoesNotContain(afterUnfollow!.Items, r => r.Id == recipe.Id);
+        Assert.Equal(HttpStatusCode.NotFound, (await friendClient.PostAsync($"/recipes/{recipe.Id}/likes", null)).StatusCode);
     }
 
     [Fact]

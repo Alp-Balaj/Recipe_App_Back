@@ -50,18 +50,17 @@ public class RecipeService : IRecipeService
 
     public async Task<RecipeResult<RecipeResponse>> GetRecipeByIdAsync(Guid id, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
+        // Visibility rule 2 (recipe-management plan): a recipe the caller may not read is
+        // reported as NotFound — never Forbidden — so 404s don't leak that a private recipe
+        // exists. An anonymous caller (guest access, null id) owns nothing and is in no
+        // follow graph, so only Public rows reach them. Since stream F (D6) the readable
+        // set is RecipeVisibilityPolicy's — Public, own, or a mutual friend's FriendsOnly —
+        // and it composes into the same query rather than a second in-memory check.
         // Soft-deleted rows are already excluded by the global query filter (r => !r.IsDeleted).
-        var recipe = await _db.Recipes.SingleOrDefaultAsync(r => r.Id == id, cancellationToken);
+        var recipe = await _db.Recipes
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+            .SingleOrDefaultAsync(r => r.Id == id, cancellationToken);
         if (recipe is null)
-        {
-            return RecipeResult<RecipeResponse>.NotFound();
-        }
-
-        // Visibility rule 2 (recipe-management plan): a non-public recipe not owned by the
-        // caller is reported as NotFound — never Forbidden — so 404s don't leak that a
-        // private recipe exists. An anonymous caller (guest access, null id) owns nothing,
-        // so any non-public recipe is NotFound for them.
-        if (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId)
         {
             return RecipeResult<RecipeResponse>.NotFound();
         }
@@ -73,20 +72,19 @@ public class RecipeService : IRecipeService
     {
         // Visibility rule 1 (recipe-management plan): the visibility predicate is the FIRST
         // predicate composed onto the query, before any user-supplied filter, so no filter
-        // combination can widen what the caller may see. FriendsOnly is owner-only until
-        // social-features adds follows. Soft-deleted rows are excluded by the global filter.
-        // Anonymous caller (guest access): explicit null branch — Public only. Branching
-        // beats passing the nullable into EF, where `= NULL` would silently be always-false.
-        var recipes = currentUserId is Guid callerId
-            ? _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId)
-            : _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
+        // combination can widen what the caller may see. Since stream F (D6) FriendsOnly is
+        // readable by a mutual friend as well as the author — RecipeVisibilityPolicy owns
+        // that rule, including the anonymous-caller branch, for every read path in the app.
+        // Soft-deleted rows are excluded by the global filter.
+        var recipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
 
         // Author filter (GET /recipes/mine). Composed straight after the visibility predicate
         // and before any user-supplied filter — it only ever NARROWS, and it is deliberately
-        // not allowed to widen: asking for another user's id here still yields just their
-        // Public rows, because the visibility predicate above already ran. When the id is the
-        // caller's own, the two predicates AND down to "everything I wrote", private drafts
-        // included — which is the whole point of the endpoint.
+        // not allowed to widen: asking for another user's id here still yields only what the
+        // visibility predicate above already allowed — their Public rows, plus their
+        // FriendsOnly rows when the two of you follow each other, and nothing more. When the
+        // id is the caller's own, the two predicates AND down to "everything I wrote",
+        // private drafts included — which is the whole point of the endpoint.
         if (query.OwnedByUserId is Guid ownerId)
         {
             recipes = recipes.Where(r => r.CreatedByUserId == ownerId);
@@ -177,16 +175,22 @@ public class RecipeService : IRecipeService
             return RecipeResult<RecipeResponse>.NotFound();
         }
 
-        // Visibility rule 2 (recipe-management plan): a non-public recipe not owned by the
-        // caller is NotFound — never Forbidden — so 403s don't leak that a private recipe
-        // exists. Only a recipe the caller can see but doesn't own is Forbidden.
-        if (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId)
-        {
-            return RecipeResult<RecipeResponse>.NotFound();
-        }
-
+        // Visibility rule 2 (recipe-management plan): a recipe the caller cannot READ is
+        // NotFound — never Forbidden — so 403s don't leak that a private recipe exists.
+        // Only a recipe the caller can see but doesn't own is Forbidden. Writing is
+        // author-only and stream F did NOT widen that: a mutual friend who can now read a
+        // FriendsOnly recipe gets 403 here (they can see it, so there is nothing left to
+        // hide), and everyone else still gets 404. The extra query runs only for non-owners.
         if (recipe.CreatedByUserId != currentUserId)
         {
+            var readable = await _db.Recipes
+                .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+                .AnyAsync(r => r.Id == id, cancellationToken);
+            if (!readable)
+            {
+                return RecipeResult<RecipeResponse>.NotFound();
+            }
+
             _logger.LogWarning("User {UserId} forbidden from updating recipe {RecipeId}.", currentUserId, id);
             return RecipeResult<RecipeResponse>.Forbidden();
         }
@@ -230,16 +234,19 @@ public class RecipeService : IRecipeService
             return RecipeResult<bool>.NotFound();
         }
 
-        // Visibility rule 2 (recipe-management plan): a non-public recipe not owned by the
-        // caller is NotFound — never Forbidden — so 403s don't leak that a private recipe
-        // exists. Only a recipe the caller can see but doesn't own is Forbidden.
-        if (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId)
-        {
-            return RecipeResult<bool>.NotFound();
-        }
-
+        // Visibility rule 2 (recipe-management plan), exactly as UpdateRecipeAsync applies
+        // it: unreadable is NotFound, readable-but-not-mine is Forbidden. Deleting stays
+        // author-only — stream F widened reading, never writing.
         if (recipe.CreatedByUserId != currentUserId)
         {
+            var readable = await _db.Recipes
+                .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+                .AnyAsync(r => r.Id == id, cancellationToken);
+            if (!readable)
+            {
+                return RecipeResult<bool>.NotFound();
+            }
+
             _logger.LogWarning("User {UserId} forbidden from deleting recipe {RecipeId}.", currentUserId, id);
             return RecipeResult<bool>.Forbidden();
         }

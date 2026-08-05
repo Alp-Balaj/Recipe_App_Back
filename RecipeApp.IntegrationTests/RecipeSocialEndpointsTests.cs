@@ -105,18 +105,62 @@ public class RecipeSocialEndpointsTests(IntegrationTestFactory factory) : IClass
         Assert.Equal(author.UserId, envelope.Author.Id);
     }
 
+    // The social envelope's visibility must match GET /recipes/{id} EXACTLY (the parity this
+    // file exists to pin), so the relationship matrix is the same one RecipeEndpointsTests
+    // runs: Private is never anyone else's, FriendsOnly needs a mutual follow, and every
+    // denial is 404 rather than 403.
+    [Theory]
+    [InlineData(RecipeVisibility.Private, FollowRelationship.Stranger)]
+    [InlineData(RecipeVisibility.Private, FollowRelationship.Mutual)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.Stranger)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.ViewerFollowsAuthor)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.AuthorFollowsViewer)]
+    public async Task Social_SomeoneElsesUnreadableRecipe_Returns404(
+        RecipeVisibility visibility, FollowRelationship relationship)
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var recipe = await CreateRecipeAsync(authorClient, visibility);
+
+        var (viewerClient, viewer) = await NewUserAsync();
+        await FollowTestHelper.ArrangeAsync(relationship, viewerClient, viewer.UserId, authorClient, author.UserId);
+
+        var response = await viewerClient.GetAsync($"/recipes/{recipe.Id}/social");
+
+        // Rule 2: the recipe doesn't "exist" for this caller — 404, never 403.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // The one arrangement that opens it: a mutual friend gets the full envelope, with the
+    // author identified — i.e. the surface behaves exactly as it does for a Public recipe.
+    [Fact]
+    public async Task Social_AMutualFriendsFriendsOnlyRecipe_Returns200WithTheEnvelope()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var recipe = await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+
+        var (friendClient, friend) = await NewUserAsync();
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, authorClient, author.UserId);
+
+        var envelope = await GetSocialAsync(friendClient, recipe.Id);
+
+        Assert.Equal(author.UserId, envelope.Author.Id);
+        Assert.Equal(0, envelope.LikeCount);
+        Assert.False(envelope.LikedByMe);
+    }
+
+    // A guest is in nobody's follow graph, so the envelope of a FriendsOnly recipe is 404
+    // for them — the same answer they get for a Private one.
     [Theory]
     [InlineData(RecipeVisibility.Private)]
     [InlineData(RecipeVisibility.FriendsOnly)]
-    public async Task Social_SomeoneElsesNonPublicRecipe_Returns404(RecipeVisibility visibility)
+    public async Task Social_NonPublicRecipe_UnauthenticatedGuest_Returns404(RecipeVisibility visibility)
     {
         var (authorClient, _) = await NewUserAsync();
         var recipe = await CreateRecipeAsync(authorClient, visibility);
 
-        var (strangerClient, _) = await NewUserAsync();
-        var response = await strangerClient.GetAsync($"/recipes/{recipe.Id}/social");
+        var guest = factory.CreateClient();
+        var response = await guest.GetAsync($"/recipes/{recipe.Id}/social");
 
-        // Rule 2: the recipe doesn't "exist" for this caller — 404, never 403.
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 

@@ -114,20 +114,84 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         Assert.Equal(auth.UserId, body.CreatedByUserId);
     }
 
-    // 404 — not 403 — so the response doesn't confirm the private recipe exists.
+    // --- FriendsOnly (stream F, decision D6, 2026-08-05) -------------------------------
+    //
+    // These three theories replace a pair of [InlineData(Private)] / [InlineData(FriendsOnly)]
+    // rows that asserted "another user's non-public recipe is 404" full stop. FriendsOnly is
+    // no longer decided by ownership alone, so the relationship between the two accounts
+    // becomes the parameter: all four arrangements are enumerated on every read path, and
+    // exactly one of them is allowed to return 200.
+    //
+    // 404 — not 403 — throughout, so the response never confirms a hidden recipe exists.
+
+    // Private is owner-only at EVERY relationship. Pinned explicitly because the obvious way
+    // to get FriendsOnly wrong is to widen "non-public" rather than FriendsOnly alone, and
+    // this theory is what would catch that: a mutual follow must not unlock a private draft.
     [Theory]
-    [InlineData(RecipeVisibility.Private)]
-    [InlineData(RecipeVisibility.FriendsOnly)]
-    public async Task GetRecipeById_AnotherUsersNonPublicRecipe_ReturnsNotFound(RecipeVisibility visibility)
+    [InlineData(FollowRelationship.Stranger)]
+    [InlineData(FollowRelationship.ViewerFollowsAuthor)]
+    [InlineData(FollowRelationship.AuthorFollowsViewer)]
+    [InlineData(FollowRelationship.Mutual)]
+    public async Task GetRecipeById_AnotherUsersPrivateRecipe_ReturnsNotFoundAtEveryRelationship(
+        FollowRelationship relationship)
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var created = await CreateRecipeAsync(
+            ownerClient, ValidCreateRecipeRequest() with { Visibility = RecipeVisibility.Private });
+
+        var otherClient = factory.CreateClient();
+        var other = await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        await FollowTestHelper.ArrangeAsync(relationship, otherClient, other.UserId, ownerClient, owner.UserId);
+
+        var response = await otherClient.GetAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // FriendsOnly: mutual follow reads it, every one-way arrangement and the stranger do not.
+    [Theory]
+    [InlineData(FollowRelationship.Stranger, HttpStatusCode.NotFound)]
+    [InlineData(FollowRelationship.ViewerFollowsAuthor, HttpStatusCode.NotFound)]
+    [InlineData(FollowRelationship.AuthorFollowsViewer, HttpStatusCode.NotFound)]
+    [InlineData(FollowRelationship.Mutual, HttpStatusCode.OK)]
+    public async Task GetRecipeById_AnotherUsersFriendsOnlyRecipe_RequiresAMutualFollow(
+        FollowRelationship relationship, HttpStatusCode expected)
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var created = await CreateRecipeAsync(
+            ownerClient, ValidCreateRecipeRequest() with { Visibility = RecipeVisibility.FriendsOnly });
+
+        var otherClient = factory.CreateClient();
+        var other = await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        await FollowTestHelper.ArrangeAsync(relationship, otherClient, other.UserId, ownerClient, owner.UserId);
+
+        var response = await otherClient.GetAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(expected, response.StatusCode);
+        if (expected == HttpStatusCode.OK)
+        {
+            var body = await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options);
+            Assert.Equal(created.Id, body!.Id);
+            Assert.Equal(RecipeVisibility.FriendsOnly, body.Visibility);
+            Assert.Equal(owner.UserId, body.CreatedByUserId);
+        }
+    }
+
+    // A guest has no token and therefore no follow graph — there is no arrangement that
+    // makes them anyone's friend, so FriendsOnly is 404 for them by construction.
+    [Fact]
+    public async Task GetRecipeById_FriendsOnlyRecipe_UnauthenticatedGuest_ReturnsNotFound()
     {
         var ownerClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
-        var created = await CreateRecipeAsync(ownerClient, ValidCreateRecipeRequest() with { Visibility = visibility });
+        var created = await CreateRecipeAsync(
+            ownerClient, ValidCreateRecipeRequest() with { Visibility = RecipeVisibility.FriendsOnly });
 
-        var otherClient = factory.CreateClient();
-        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        var guest = factory.CreateClient();
 
-        var response = await otherClient.GetAsync($"/recipes/{created.Id}");
+        var response = await guest.GetAsync($"/recipes/{created.Id}");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -253,22 +317,53 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
-    // 404 — not 403 — so the response doesn't confirm the private recipe exists.
+    // 404 — not 403 — so the response doesn't confirm the private recipe exists. FriendsOnly
+    // joins Private here for every relationship EXCEPT mutual, which is covered below.
     [Theory]
-    [InlineData(RecipeVisibility.Private)]
-    [InlineData(RecipeVisibility.FriendsOnly)]
-    public async Task UpdateRecipe_AnotherUsersNonPublicRecipe_ReturnsNotFound(RecipeVisibility visibility)
+    [InlineData(RecipeVisibility.Private, FollowRelationship.Stranger)]
+    [InlineData(RecipeVisibility.Private, FollowRelationship.Mutual)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.Stranger)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.ViewerFollowsAuthor)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.AuthorFollowsViewer)]
+    public async Task UpdateRecipe_AnotherUsersUnreadableRecipe_ReturnsNotFound(
+        RecipeVisibility visibility, FollowRelationship relationship)
     {
         var ownerClient = factory.CreateClient();
-        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
         var created = await CreateRecipeAsync(ownerClient, ValidCreateRecipeRequest() with { Visibility = visibility });
 
         var otherClient = factory.CreateClient();
-        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        var other = await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        await FollowTestHelper.ArrangeAsync(relationship, otherClient, other.UserId, ownerClient, owner.UserId);
 
         var response = await otherClient.PutAsJsonAsync($"/recipes/{created.Id}", ValidUpdateRecipeRequest(), TestJson.Options);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // Stream F widened READING, never writing. A mutual friend can now open the recipe, so
+    // the 404-not-403 convention flips to its other half for them: they get Forbidden,
+    // exactly as any user does on a Public recipe they don't own. The recipe must be
+    // untouched afterwards — a 403 that still saved would be the worst of both worlds.
+    [Fact]
+    public async Task UpdateRecipe_AMutualFriendsFriendsOnlyRecipe_ReturnsForbiddenAndChangesNothing()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var created = await CreateRecipeAsync(
+            ownerClient, ValidCreateRecipeRequest() with { Visibility = RecipeVisibility.FriendsOnly });
+
+        var friendClient = factory.CreateClient();
+        var friend = await AuthTestHelper.RegisterAndAuthenticateAsync(friendClient);
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, ownerClient, owner.UserId);
+
+        var response = await friendClient.PutAsJsonAsync($"/recipes/{created.Id}", ValidUpdateRecipeRequest(), TestJson.Options);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+
+        var reread = await ownerClient.GetFromJsonAsync<RecipeResponse>($"/recipes/{created.Id}", TestJson.Options);
+        Assert.Equal(created.Title, reread!.Title);
+        Assert.Equal(RecipeVisibility.FriendsOnly, reread.Visibility);
     }
 
     [Fact]
@@ -435,22 +530,48 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
-    // 404 — not 403 — so the response doesn't confirm the private recipe exists.
+    // 404 — not 403 — so the response doesn't confirm the private recipe exists. Same
+    // relationship matrix as UpdateRecipe: unreadable is 404 at every arrangement below.
     [Theory]
-    [InlineData(RecipeVisibility.Private)]
-    [InlineData(RecipeVisibility.FriendsOnly)]
-    public async Task DeleteRecipe_AnotherUsersNonPublicRecipe_ReturnsNotFound(RecipeVisibility visibility)
+    [InlineData(RecipeVisibility.Private, FollowRelationship.Stranger)]
+    [InlineData(RecipeVisibility.Private, FollowRelationship.Mutual)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.Stranger)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.ViewerFollowsAuthor)]
+    [InlineData(RecipeVisibility.FriendsOnly, FollowRelationship.AuthorFollowsViewer)]
+    public async Task DeleteRecipe_AnotherUsersUnreadableRecipe_ReturnsNotFound(
+        RecipeVisibility visibility, FollowRelationship relationship)
     {
         var ownerClient = factory.CreateClient();
-        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
         var created = await CreateRecipeAsync(ownerClient, ValidCreateRecipeRequest() with { Visibility = visibility });
 
         var otherClient = factory.CreateClient();
-        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        var other = await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+        await FollowTestHelper.ArrangeAsync(relationship, otherClient, other.UserId, ownerClient, owner.UserId);
 
         var response = await otherClient.DeleteAsync($"/recipes/{created.Id}");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // Deleting stays author-only: a mutual friend can read the recipe, so they get 403 —
+    // and the recipe is still there afterwards.
+    [Fact]
+    public async Task DeleteRecipe_AMutualFriendsFriendsOnlyRecipe_ReturnsForbiddenAndKeepsIt()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var created = await CreateRecipeAsync(
+            ownerClient, ValidCreateRecipeRequest() with { Visibility = RecipeVisibility.FriendsOnly });
+
+        var friendClient = factory.CreateClient();
+        var friend = await AuthTestHelper.RegisterAndAuthenticateAsync(friendClient);
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, ownerClient, owner.UserId);
+
+        var response = await friendClient.DeleteAsync($"/recipes/{created.Id}");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await ownerClient.GetAsync($"/recipes/{created.Id}")).StatusCode);
     }
 
     [Fact]

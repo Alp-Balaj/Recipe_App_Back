@@ -7,6 +7,7 @@ using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Infrastructure.Persistence;
+using RecipeApp.Infrastructure.Recipes;
 
 namespace RecipeApp.Infrastructure.MealPlanning;
 
@@ -177,11 +178,13 @@ public class MealPlanService : IMealPlanService
         }
 
         // Visibility rule 1 (recipe-management plan), reused verbatim from GET /recipes/{id} /
-        // RecipeService.GetRecipeByIdAsync: a non-public recipe is addable only by its own
-        // author; anything else (including soft-deleted, via the global filter) is NotFound.
+        // RecipeService.GetRecipeByIdAsync — and now literally the same expression, so
+        // "verbatim" cannot drift: a recipe is addable to your plan exactly when you can
+        // open it. Since stream F (D6) that includes a mutual friend's FriendsOnly recipe.
+        // Anything else (including soft-deleted, via the global filter) is NotFound.
         var recipe = await _db.Recipes
+            .Where(RecipeVisibilityPolicy.VisibleTo(userId))
             .Where(r => r.Id == request.RecipeId)
-            .Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == userId)
             .SingleOrDefaultAsync(cancellationToken);
         if (recipe is null)
         {
