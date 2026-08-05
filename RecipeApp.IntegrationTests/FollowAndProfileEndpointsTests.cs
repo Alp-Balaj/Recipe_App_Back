@@ -189,6 +189,62 @@ public class FollowAndProfileEndpointsTests(IntegrationTestFactory factory) : IC
         Assert.Contains(ownerList.Items, r => r.Id == privateRecipe.Id);
     }
 
+    // --- FriendsOnly on the profile surfaces (stream F, decision D6) --------------------
+
+    // The author's own profile page, read by each kind of viewer. All four arrangements,
+    // and both halves of the page — the recipe LIST and the recipe COUNT — because the
+    // count is computed by a separate query and a profile that advertises "4 recipes" over
+    // a list of 2 is its own small leak of what is being hidden.
+    [Theory]
+    [InlineData(FollowRelationship.Stranger, false)]
+    [InlineData(FollowRelationship.ViewerFollowsAuthor, false)]
+    [InlineData(FollowRelationship.AuthorFollowsViewer, false)]
+    [InlineData(FollowRelationship.Mutual, true)]
+    public async Task UserProfileAndRecipes_FriendsOnly_FollowTheMutualRule(
+        FollowRelationship relationship, bool expectedVisible)
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var publicRecipe = await CreateRecipeAsync(authorClient);
+        var friendsRecipe = await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+        var privateRecipe = await CreateRecipeAsync(authorClient, RecipeVisibility.Private);
+
+        var (viewerClient, viewer) = await NewUserAsync();
+        await FollowTestHelper.ArrangeAsync(relationship, viewerClient, viewer.UserId, authorClient, author.UserId);
+
+        var list = await viewerClient.GetFromJsonAsync<RecipeListResponse>(
+            $"/users/{author.UserId}/recipes", TestJson.Options);
+        Assert.Contains(list!.Items, r => r.Id == publicRecipe.Id);
+        Assert.Equal(expectedVisible, list.Items.Any(r => r.Id == friendsRecipe.Id));
+        Assert.DoesNotContain(list.Items, r => r.Id == privateRecipe.Id);
+
+        var profile = await viewerClient.GetFromJsonAsync<UserProfileResponse>(
+            $"/users/{author.UserId}", TestJson.Options);
+        // The count must agree with the list it describes: 1 public, plus the friends-only
+        // one exactly when the list showed it.
+        Assert.Equal(expectedVisible ? 2 : 1, profile!.RecipeCount);
+    }
+
+    // A guest reads profiles too (guest access, plan §3.3) and is in nobody's follow graph.
+    [Fact]
+    public async Task UserProfileAndRecipes_UnauthenticatedGuest_SeesPublicOnly()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var publicRecipe = await CreateRecipeAsync(authorClient);
+        var friendsRecipe = await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+
+        var guest = factory.CreateClient();
+
+        var list = await guest.GetFromJsonAsync<RecipeListResponse>(
+            $"/users/{author.UserId}/recipes", TestJson.Options);
+        Assert.Contains(list!.Items, r => r.Id == publicRecipe.Id);
+        Assert.DoesNotContain(list.Items, r => r.Id == friendsRecipe.Id);
+
+        var profile = await guest.GetFromJsonAsync<UserProfileResponse>(
+            $"/users/{author.UserId}", TestJson.Options);
+        Assert.Equal(1, profile!.RecipeCount);
+        Assert.False(profile.FollowedByMe);
+    }
+
     [Fact]
     public async Task UserRecipes_UnknownUser_Returns404()
     {

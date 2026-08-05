@@ -12,6 +12,7 @@ using RecipeApp.Domain.Entities.RecipeInteractions;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
+using RecipeApp.Infrastructure.Recipes;
 
 namespace RecipeApp.Infrastructure.Social;
 
@@ -126,10 +127,20 @@ public class SocialService : ISocialService
     {
         // The Recipe navigation carries the soft-delete query filter, and the visibility
         // predicate composes on top — a saved recipe that was deleted or went non-visible
-        // is silently omitted rather than erroring (chat-suggestion convention).
+        // is silently omitted rather than erroring (chat-suggestion convention). Since
+        // stream F that includes a friend's FriendsOnly recipe you saved and then fell out
+        // of a mutual follow with: it drops out of this list the moment the rule stops
+        // holding, because the readable set is recomputed per request, never cached.
+        //
+        // The rule lives in ONE expression (RecipeVisibilityPolicy) shaped for Recipe, so
+        // reaching it from a non-Recipe row is a projection to ids + Contains — a plain
+        // EXISTS subquery in SQL — rather than a second hand-written copy of the predicate.
+        var visibleRecipeIds = _db.Recipes
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+            .Select(r => r.Id);
         var saved = _db.SavedRecipes
             .Where(s => s.UserId == currentUserId)
-            .Where(s => s.Recipe.Visibility == RecipeVisibility.Public || s.Recipe.CreatedByUserId == currentUserId);
+            .Where(s => visibleRecipeIds.Contains(s.RecipeId));
 
         if (cursor is not null)
         {
@@ -247,8 +258,12 @@ public class SocialService : ISocialService
 
         // The comment's recipe decides visibility: a comment under a soft-deleted recipe
         // (filtered) or a recipe the caller can't see is NotFound, never Forbidden (rule 2).
-        var recipe = await _db.Recipes.SingleOrDefaultAsync(r => r.Id == comment.RecipeId, cancellationToken);
-        if (recipe is null || (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId))
+        // The readable set is RecipeVisibilityPolicy's, so a mutual friend can edit their
+        // own comment on a FriendsOnly recipe they can now read.
+        var recipe = await _db.Recipes
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+            .SingleOrDefaultAsync(r => r.Id == comment.RecipeId, cancellationToken);
+        if (recipe is null)
         {
             return SocialResult<CommentResponse>.NotFound();
         }
@@ -285,8 +300,11 @@ public class SocialService : ISocialService
             return SocialResult<bool>.NotFound();
         }
 
-        var recipe = await _db.Recipes.SingleOrDefaultAsync(r => r.Id == comment.RecipeId, cancellationToken);
-        if (recipe is null || (recipe.Visibility != RecipeVisibility.Public && recipe.CreatedByUserId != currentUserId))
+        // Same readable set as UpdateCommentAsync — one policy, both comment paths.
+        var recipe = await _db.Recipes
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+            .SingleOrDefaultAsync(r => r.Id == comment.RecipeId, cancellationToken);
+        if (recipe is null)
         {
             return SocialResult<bool>.NotFound();
         }
@@ -492,14 +510,16 @@ public class SocialService : ISocialService
     public async Task<SocialResult<RecipeSocialResponse>> GetRecipeSocialAsync(Guid recipeId, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
         // Guest access: an anonymous caller (null id) sees Public recipes only and never a
-        // caller-relative flag. isAuthenticated is a parameterized constant in the SQL, so
-        // the membership subqueries collapse to FALSE for guests instead of comparing = NULL.
+        // caller-relative flag. RecipeVisibilityPolicy owns the row filter (its own explicit
+        // null branch); isAuthenticated remains a parameterized constant in the SQL for the
+        // flags below, so the membership subqueries collapse to FALSE for guests instead of
+        // comparing = NULL.
         var isAuthenticated = currentUserId is not null;
         var callerId = currentUserId ?? Guid.Empty;
 
         var envelope = await _db.Recipes
-            .Where(r => r.Id == recipeId
-                && (r.Visibility == RecipeVisibility.Public || (isAuthenticated && r.CreatedByUserId == callerId)))
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+            .Where(r => r.Id == recipeId)
             .Select(r => new RecipeSocialResponse(
                 new UserSummaryResponse(r.CreatedByUserId, r.CreatedByUser.Username, r.CreatedByUser.ProfileImageUrl),
                 r.Likes.Count(),
@@ -660,11 +680,11 @@ public class SocialService : ISocialService
         var followingCount = await _db.UserFollows.CountAsync(f => f.FollowerId == targetUserId, cancellationToken);
         // RecipeCount is caller-relative: rule 1 scoped to this author, so a profile never
         // advertises recipes its viewer can't open (soft-deleted rows already filtered).
-        // Guest access: an anonymous viewer counts Public only and follows nobody — the
-        // membership query is skipped entirely rather than run with a null id.
-        var visibleRecipes = currentUserId is Guid callerId
-            ? _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId)
-            : _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
+        // Guest access is RecipeVisibilityPolicy's explicit null branch — Public only.
+        // Since stream F the count a mutual friend sees includes this author's FriendsOnly
+        // recipes, and it MUST, or the profile would advertise a number its own recipe list
+        // (GetUserRecipesAsync, same policy) then contradicts.
+        var visibleRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
         var recipeCount = await visibleRecipes
             .CountAsync(r => r.CreatedByUserId == targetUserId, cancellationToken);
         var followedByMe = currentUserId is not null && await _db.UserFollows.AnyAsync(
@@ -744,10 +764,10 @@ public class SocialService : ISocialService
 
         // Visibility rule 1: the visibility predicate composes FIRST, then the author
         // filter — same discipline as GET /recipes so this endpoint can't widen anything.
-        // Guest access: anonymous caller (null) gets the explicit Public-only branch.
-        var visibleRecipes = currentUserId is Guid callerId
-            ? _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId)
-            : _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
+        // Guest access is the policy's explicit Public-only branch. A mutual friend browsing
+        // this profile sees the author's FriendsOnly recipes here (stream F, D6); a one-way
+        // follower in either direction, and a stranger, see exactly the Public ones.
+        var visibleRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
         var recipes = visibleRecipes.Where(r => r.CreatedByUserId == targetUserId);
 
         if (cursor is not null)
@@ -792,7 +812,7 @@ public class SocialService : ISocialService
                 return new FeedListResponse([], null, "following");
             }
 
-            var guestRecipes = _db.Recipes.Where(r => r.Visibility == RecipeVisibility.Public);
+            var guestRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(null));
             var guestSource = scope == FeedScope.ForYou ? "forYou" : "discover";
             return await BuildFeedPageAsync(guestRecipes, guestSource, cursor, limit, null, cancellationToken);
         }
@@ -802,8 +822,20 @@ public class SocialService : ISocialService
             .Select(f => f.FollowingId);
 
         // Pull-based (plan decision): recipes are queried at request time from the followed
-        // set — no fan-out-on-write table. Rule 1 is NOT widened here: the feed shows
-        // followed authors' Public recipes only (FriendsOnly stays owner-only everywhere).
+        // set — no fan-out-on-write table. Every branch below composes the SAME shared
+        // visibility policy and then narrows; none of them writes its own predicate.
+        //
+        // Stream F (D6) changes what that policy admits, and the feed inherits it: a
+        // FriendsOnly recipe reaches this caller's feed when the two of you follow EACH
+        // OTHER. A one-way follow does not — which is why the old note here ("rule 1 is NOT
+        // widened by following") had to be rewritten rather than deleted: following alone
+        // still buys nothing, it is the follow-BACK that completes the rule.
+        //
+        // The `!= callerId` and `followedIds.Contains(...)` clauses are audience narrowing,
+        // not visibility: they keep your own recipes out of a feed of other people's work.
+        // A mutual friend is by definition someone you follow, so their FriendsOnly recipes
+        // pass the Following branch's author filter without any special-casing.
+        var visible = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(callerId));
         IQueryable<Recipe> recipes;
         string source;
         if (scope == FeedScope.ForYou)
@@ -811,30 +843,28 @@ public class SocialService : ISocialService
             // The everyone-feed, requested explicitly (the client's "For You" tab) —
             // same query as the cold-start discover fallback, but available regardless
             // of the caller's follow count.
-            recipes = _db.Recipes.Where(r =>
-                r.Visibility == RecipeVisibility.Public && r.CreatedByUserId != callerId);
+            recipes = visible.Where(r => r.CreatedByUserId != callerId);
             source = "forYou";
         }
         else if (scope == FeedScope.Following)
         {
             // Followed authors only, no fallback: an empty follow graph (or quiet
             // follows) is an empty page, which the client renders as a follow prompt.
-            recipes = _db.Recipes.Where(r =>
-                r.Visibility == RecipeVisibility.Public && followedIds.Contains(r.CreatedByUserId));
+            recipes = visible.Where(r => followedIds.Contains(r.CreatedByUserId));
             source = "following";
         }
         else if (await followedIds.AnyAsync(cancellationToken))
         {
-            recipes = _db.Recipes.Where(r =>
-                r.Visibility == RecipeVisibility.Public && followedIds.Contains(r.CreatedByUserId));
+            recipes = visible.Where(r => followedIds.Contains(r.CreatedByUserId));
             source = "following";
         }
         else
         {
-            // Cold start: a caller following nobody sees recent Public recipes by others,
+            // Cold start: a caller following nobody sees recent visible recipes by others,
             // labeled so the client can frame it as Discover rather than a followed feed.
-            recipes = _db.Recipes.Where(r =>
-                r.Visibility == RecipeVisibility.Public && r.CreatedByUserId != callerId);
+            // Following nobody means no mutual follow exists, so this is Public-by-others
+            // in practice — by the policy, not by a second hand-written predicate.
+            recipes = visible.Where(r => r.CreatedByUserId != callerId);
             source = "discover";
         }
 
@@ -914,21 +944,21 @@ public class SocialService : ISocialService
     // --- helpers ------------------------------------------------------------------------
 
     // Visibility rule 2 folded into the author lookup: returns the recipe's author id when
-    // the caller may interact with it (Public, or their own), else null. Soft-deleted rows
-    // are excluded by the global query filter, so a hidden/missing recipe reads as null —
-    // callers turn that into NotFound, never Forbidden. The author id is also what the
-    // gamification award/revert path needs, so this one query serves both.
-    // Guest access: a null caller (anonymous comment reads) takes the explicit Public-only
-    // branch; write paths keep passing a real Guid, which widens to Guid? implicitly.
-    private Task<Guid?> VisibleRecipeAuthorAsync(Guid recipeId, Guid? currentUserId, CancellationToken cancellationToken)
-    {
-        var visible = currentUserId is Guid callerId
-            ? _db.Recipes.Where(r => r.Id == recipeId && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == callerId))
-            : _db.Recipes.Where(r => r.Id == recipeId && r.Visibility == RecipeVisibility.Public);
-        return visible
+    // the caller may interact with it, else null. "May interact" is exactly "may read" —
+    // the shared RecipeVisibilityPolicy — so liking, saving, commenting on and rating a
+    // mutual friend's FriendsOnly recipe all became possible in one edit, and all stay
+    // impossible for a one-way follower. Soft-deleted rows are excluded by the global query
+    // filter, so a hidden/missing recipe reads as null — callers turn that into NotFound,
+    // never Forbidden. The author id is also what the gamification award/revert path needs,
+    // so this one query serves both. Guest access: a null caller (anonymous comment reads)
+    // takes the policy's Public-only branch; write paths keep passing a real Guid, which
+    // widens to Guid? implicitly.
+    private Task<Guid?> VisibleRecipeAuthorAsync(Guid recipeId, Guid? currentUserId, CancellationToken cancellationToken) =>
+        _db.Recipes
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+            .Where(r => r.Id == recipeId)
             .Select(r => (Guid?)r.CreatedByUserId)
             .SingleOrDefaultAsync(cancellationToken);
-    }
 
     // Gamification award: stage a rank increase on the recipe's author for a social event.
     // Never awards an author for acting on their own recipe (authorId == actingUserId), and
@@ -1045,13 +1075,19 @@ public class SocialService : ISocialService
     // id when the caller may interact with it, else null. Visibility is the recipe's — a
     // comment under a soft-deleted (query-filtered) or non-visible recipe reads as null, so
     // callers turn it into NotFound. The author id is what the award/revert path needs, so
-    // one query serves both, exactly as it does for recipes.
-    private Task<Guid?> VisibleCommentAuthorAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken) =>
-        _db.Comments
-            .Where(c => c.Id == commentId
-                && (c.Recipe.Visibility == RecipeVisibility.Public || c.Recipe.CreatedByUserId == currentUserId))
+    // one query serves both, exactly as it does for recipes. The readable recipe set is
+    // projected to ids and matched with Contains rather than restating the policy for
+    // Comment: one predicate, one place to get wrong.
+    private Task<Guid?> VisibleCommentAuthorAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken)
+    {
+        var visibleRecipeIds = _db.Recipes
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+            .Select(r => r.Id);
+        return _db.Comments
+            .Where(c => c.Id == commentId && visibleRecipeIds.Contains(c.RecipeId))
             .Select(c => (Guid?)c.UserId)
             .SingleOrDefaultAsync(cancellationToken);
+    }
 
     private static CookedRecipeResponse ToCookedResponse(Guid recipeId, CookedRecipe row) =>
         new(recipeId, row.TimesCooked, row.Rating, row.TimesCooked > 0 ? row.LastCookedAt : null);

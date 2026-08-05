@@ -150,7 +150,9 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
     }
 
     // Visibility rule 1 (recipe-management plan): the caller's own non-public recipes
-    // appear in their list; another user's Private/FriendsOnly recipes never do.
+    // appear in their list; a STRANGER's Private/FriendsOnly recipes never do. The
+    // FriendsOnly half of this used to be the whole story — see the follow-graph theory
+    // below for what stream F (D6) changed.
     [Fact]
     public async Task ListRecipes_NonPublicRecipes_VisibleToOwnerOnly()
     {
@@ -172,6 +174,79 @@ public class RecipeListEndpointsTests(IntegrationTestFactory factory) : IClassFi
         Assert.DoesNotContain(privateRecipe.Id, otherIds);
         Assert.DoesNotContain(friendsOnlyRecipe.Id, otherIds);
         Assert.Contains(publicRecipe.Id, otherIds);
+    }
+
+    // The list is where rule 1 is composed first and every user filter narrows afterwards,
+    // so it is the read path where a widened predicate would leak the most rows at once.
+    // All four arrangements, one recipe of each non-public kind, in a single theory.
+    [Theory]
+    [InlineData(FollowRelationship.Stranger, false)]
+    [InlineData(FollowRelationship.ViewerFollowsAuthor, false)]
+    [InlineData(FollowRelationship.AuthorFollowsViewer, false)]
+    [InlineData(FollowRelationship.Mutual, true)]
+    public async Task ListRecipes_AnotherUsersFriendsOnlyRecipe_AppearsOnlyOnAMutualFollow(
+        FollowRelationship relationship, bool expectedVisible)
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var friendsOnlyRecipe = await SeedRecipeAsync(ownerClient, visibility: RecipeVisibility.FriendsOnly);
+        var privateRecipe = await SeedRecipeAsync(ownerClient, visibility: RecipeVisibility.Private);
+
+        var viewerClient = factory.CreateClient();
+        var viewer = await AuthTestHelper.RegisterAndAuthenticateAsync(viewerClient);
+        await FollowTestHelper.ArrangeAsync(relationship, viewerClient, viewer.UserId, ownerClient, owner.UserId);
+
+        var ids = await WalkAllIdsAsync(viewerClient, "/recipes?limit=50");
+
+        Assert.Equal(expectedVisible, ids.Contains(friendsOnlyRecipe.Id));
+        // Private never widens, whatever the relationship.
+        Assert.DoesNotContain(privateRecipe.Id, ids);
+    }
+
+    // /recipes/mine is the same query with the author filter pinned to the CALLER's own id,
+    // and that filter only ever narrows. Stream F widened what the visibility predicate
+    // admits, so this pins that "mine" did not follow it anywhere: a friend's FriendsOnly
+    // recipes are readable to this caller now, and still must not show up in "mine".
+    [Fact]
+    public async Task MyRecipes_StaysOwnRecipesOnly_EvenWithAReadableFriendsOnlyRecipe()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var theirFriendsOnly = await SeedRecipeAsync(ownerClient, visibility: RecipeVisibility.FriendsOnly);
+        var theirPublic = await SeedRecipeAsync(ownerClient, visibility: RecipeVisibility.Public);
+
+        var viewerClient = factory.CreateClient();
+        var viewer = await AuthTestHelper.RegisterAndAuthenticateAsync(viewerClient);
+        await FollowTestHelper.MakeMutualAsync(viewerClient, viewer.UserId, ownerClient, owner.UserId);
+        var ownDraft = await SeedRecipeAsync(viewerClient, visibility: RecipeVisibility.Private);
+
+        // Readable — the premise of the test.
+        Assert.Contains(theirFriendsOnly.Id, await WalkAllIdsAsync(viewerClient, "/recipes?limit=50"));
+
+        var mine = await WalkAllIdsAsync(viewerClient, "/recipes/mine?limit=50");
+
+        Assert.Contains(ownDraft.Id, mine);
+        Assert.DoesNotContain(theirFriendsOnly.Id, mine);
+        Assert.DoesNotContain(theirPublic.Id, mine);
+    }
+
+    // A guest is in nobody's follow graph: the anonymous branch of the policy is Public-only,
+    // so neither non-public kind can reach an unauthenticated list.
+    [Fact]
+    public async Task ListRecipes_UnauthenticatedGuest_SeesNeitherPrivateNorFriendsOnly()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var friendsOnlyRecipe = await SeedRecipeAsync(ownerClient, visibility: RecipeVisibility.FriendsOnly);
+        var privateRecipe = await SeedRecipeAsync(ownerClient, visibility: RecipeVisibility.Private);
+        var publicRecipe = await SeedRecipeAsync(ownerClient, visibility: RecipeVisibility.Public);
+
+        var guest = factory.CreateClient();
+        var ids = await WalkAllIdsAsync(guest, "/recipes?limit=50");
+
+        Assert.Contains(publicRecipe.Id, ids);
+        Assert.DoesNotContain(friendsOnlyRecipe.Id, ids);
+        Assert.DoesNotContain(privateRecipe.Id, ids);
     }
 
     [Fact]

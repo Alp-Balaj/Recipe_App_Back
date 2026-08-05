@@ -13,6 +13,14 @@ namespace RecipeApp.IntegrationTests;
 // non-public recipes stay 404 (existence never leaks); every write path still 401s.
 // The DB is shared across the suite, so list assertions page-walk and use contains/absence
 // rather than exact counts (same discipline as FeedEndpointsTests).
+//
+// Stream F (decision D6) made FriendsOnly readable by a mutual friend, which changes WHY
+// the assertions below hold rather than whether they hold: a guest is not owner-only, they
+// are follow-graph-less. RecipeVisibilityPolicy answers a null caller from an explicit
+// Public-only branch precisely so a nullable id never reaches SQL, where `= NULL` is
+// silently always-false instead of an error. The
+// GuestSeesNothingEvenWhenAMutualFollowExists tests below are what actually pin that: they
+// build a real mutual follow between two OTHER users and prove none of it reaches a guest.
 public class GuestAccessTests(IntegrationTestFactory factory) : IClassFixture<IntegrationTestFactory>
 {
     // --- recipes ------------------------------------------------------------------------
@@ -51,6 +59,39 @@ public class GuestAccessTests(IntegrationTestFactory factory) : IClassFixture<In
         // Never leak existence: both non-public tiers are indistinguishable from missing.
         Assert.Equal(HttpStatusCode.NotFound, (await guest.GetAsync($"/recipes/{privateRecipe.Id}")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await guest.GetAsync($"/recipes/{friendsRecipe.Id}")).StatusCode);
+    }
+
+    // The leak-sensitive guest case, and the reason the two tests above are no longer
+    // self-explaining: a FriendsOnly recipe whose author IS in a live mutual follow — just
+    // not with the guest, because a guest cannot be in one. Every anonymous read path is
+    // checked against the same recipe in one test, so a policy branch that forgot the null
+    // caller anywhere shows up here rather than in production.
+    [Fact]
+    public async Task GuestSeesNothingEvenWhenAMutualFollowExists()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var friendsRecipe = await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+
+        var (friendClient, friend) = await NewUserAsync();
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, authorClient, author.UserId);
+
+        // Premise: the recipe really is readable — by the friend.
+        Assert.Equal(HttpStatusCode.OK, (await friendClient.GetAsync($"/recipes/{friendsRecipe.Id}")).StatusCode);
+
+        var guest = factory.CreateClient();
+
+        Assert.Equal(HttpStatusCode.NotFound, (await guest.GetAsync($"/recipes/{friendsRecipe.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await guest.GetAsync($"/recipes/{friendsRecipe.Id}/social")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await guest.GetAsync($"/recipes/{friendsRecipe.Id}/insights")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await guest.GetAsync($"/recipes/{friendsRecipe.Id}/comments")).StatusCode);
+        Assert.DoesNotContain(friendsRecipe.Id, await WalkRecipeListAsync(guest));
+
+        var authorRecipes = await guest.GetFromJsonAsync<RecipeListResponse>(
+            $"/users/{author.UserId}/recipes", TestJson.Options);
+        Assert.DoesNotContain(authorRecipes!.Items, r => r.Id == friendsRecipe.Id);
+
+        var feed = await WalkFeedAsync(guest);
+        Assert.DoesNotContain(feed.Items, i => i.Recipe.Id == friendsRecipe.Id);
     }
 
     // --- feed ---------------------------------------------------------------------------

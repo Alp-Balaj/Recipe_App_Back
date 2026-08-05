@@ -33,8 +33,14 @@ public class FeedEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
         Assert.NotEmpty(feed.Items);
     }
 
+    // NEGATIVE — the direction that used to be the whole rule. Following an author is a
+    // one-way edge and buys nothing beyond their Public recipes. This test previously read
+    // "rule 1 is not widened by following: FriendsOnly stays invisible", which was true of
+    // FriendsOnly everywhere; since stream F (D6) it is true of a ONE-WAY follow, and the
+    // follow-back case below is what changed. Following yourself into someone's private
+    // shelf with a single click is exactly what D6 rejected.
     [Fact]
-    public async Task Feed_FollowingAnAuthor_ReturnsExactlyTheirPublicRecipes()
+    public async Task Feed_FollowingAnAuthorWithoutAFollowBack_ReturnsExactlyTheirPublicRecipes()
     {
         var (authorClient, author) = await NewUserAsync();
         var publicRecipe = await CreateRecipeAsync(authorClient);
@@ -45,19 +51,90 @@ public class FeedEndpointsTests(IntegrationTestFactory factory) : IClassFixture<
         var strangerRecipe = await CreateRecipeAsync(strangerClient);
 
         var (viewerClient, _) = await NewUserAsync();
-        (await viewerClient.PostAsync($"/users/{author.UserId}/follow", null)).EnsureSuccessStatusCode();
+        await FollowTestHelper.FollowOneWayAsync(viewerClient, author.UserId);
 
         var feed = await WalkFeedAsync(viewerClient);
 
         Assert.Equal("following", feed.Source);
         var ids = feed.Items.Select(i => i.Recipe.Id).ToList();
         Assert.Contains(publicRecipe.Id, ids);
-        // Rule 1 is not widened by following: FriendsOnly stays invisible.
+        // Private is never anyone else's, at any relationship.
         Assert.DoesNotContain(privateRecipe.Id, ids);
+        // FriendsOnly needs the follow BACK, which this author never gave.
         Assert.DoesNotContain(friendsRecipe.Id, ids);
         // Non-followed authors never appear in following mode.
         Assert.DoesNotContain(strangerRecipe.Id, ids);
         Assert.All(feed.Items, i => Assert.Equal(author.UserId, i.Author.Id));
+    }
+
+    // POSITIVE — the mutual case, the one thing D6 added. The author's FriendsOnly recipe
+    // reaches a friend's feed; Private still does not, because Private is owner-only at
+    // every relationship.
+    [Fact]
+    public async Task Feed_MutualFollow_IncludesTheAuthorsFriendsOnlyRecipes()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var publicRecipe = await CreateRecipeAsync(authorClient);
+        var privateRecipe = await CreateRecipeAsync(authorClient, RecipeVisibility.Private);
+        var friendsRecipe = await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+
+        var (viewerClient, viewer) = await NewUserAsync();
+        await FollowTestHelper.MakeMutualAsync(viewerClient, viewer.UserId, authorClient, author.UserId);
+
+        var feed = await WalkFeedAsync(viewerClient);
+
+        Assert.Equal("following", feed.Source);
+        var ids = feed.Items.Select(i => i.Recipe.Id).ToList();
+        Assert.Contains(publicRecipe.Id, ids);
+        Assert.Contains(friendsRecipe.Id, ids);
+        Assert.DoesNotContain(privateRecipe.Id, ids);
+    }
+
+    // NEGATIVE — the OTHER one-way direction. The author follows the viewer; the viewer
+    // never followed back. D6 rejected this reading precisely because it would let an
+    // author's audience widen silently the moment someone follows them. The viewer's
+    // "following" feed cannot even contain this author, so the check runs through the
+    // forYou scope, where every readable recipe by someone else is eligible.
+    [Fact]
+    public async Task Feed_AuthorFollowsViewerButNotBack_StillHidesFriendsOnly()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var publicRecipe = await CreateRecipeAsync(authorClient);
+        var friendsRecipe = await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+
+        var (viewerClient, viewer) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(authorClient, viewer.UserId);
+
+        var feed = await WalkFeedAsync(viewerClient, "forYou");
+
+        Assert.Equal("forYou", feed.Source);
+        var ids = feed.Items.Select(i => i.Recipe.Id).ToList();
+        Assert.Contains(publicRecipe.Id, ids);
+        Assert.DoesNotContain(friendsRecipe.Id, ids);
+        Assert.NotEqual(Guid.Empty, author.UserId);
+    }
+
+    // Access is a live read, not a grant: breaking the mutual follow takes the recipe back
+    // out of the feed on the very next request. This is the property that makes the policy
+    // safe to compose everywhere — nothing caches "they were friends once".
+    [Fact]
+    public async Task Feed_UnfollowingAFriend_RemovesTheirFriendsOnlyRecipesAgain()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        var friendsRecipe = await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+
+        var (viewerClient, viewer) = await NewUserAsync();
+        await FollowTestHelper.MakeMutualAsync(viewerClient, viewer.UserId, authorClient, author.UserId);
+
+        var whileFriends = await WalkFeedAsync(viewerClient);
+        Assert.Contains(friendsRecipe.Id, whileFriends.Items.Select(i => i.Recipe.Id));
+
+        // The AUTHOR walks away — the viewer still follows them, so the viewer's feed still
+        // lists this author, which is what makes the recipe's absence meaningful.
+        await FollowTestHelper.UnfollowAsync(authorClient, viewer.UserId);
+
+        var afterUnfollow = await WalkFeedAsync(viewerClient);
+        Assert.DoesNotContain(friendsRecipe.Id, afterUnfollow.Items.Select(i => i.Recipe.Id));
     }
 
     [Fact]

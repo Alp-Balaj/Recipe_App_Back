@@ -7,6 +7,7 @@ using RecipeApp.Application.Social.Dtos;
 using RecipeApp.Domain.Entities.Moderation;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Infrastructure.Persistence;
+using RecipeApp.Infrastructure.Recipes;
 
 namespace RecipeApp.Infrastructure.Moderation;
 
@@ -41,12 +42,15 @@ public class ReportService : IReportService
         {
             case ReportTargetType.Recipe:
             {
-                // Soft-deleted rows are excluded by the global filter; a non-public recipe
-                // is only reportable by its owner — who is then blocked as self-report —
-                // so effectively: visible or NotFound.
+                // Soft-deleted rows are excluded by the global filter; the reportable set is
+                // the READABLE set (the shared RecipeVisibilityPolicy) — you can report
+                // exactly what you can see, so a mutual friend can report a FriendsOnly
+                // recipe they can now open, and nobody can probe for one they cannot.
+                // This is the reporter's own read, NOT an admin read: decision D5 keeps
+                // AdminService's IgnoreQueryFilters queries out of this policy entirely.
                 var recipe = await _db.Recipes
-                    .Where(r => r.Id == request.TargetId
-                        && (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == reporterId))
+                    .Where(RecipeVisibilityPolicy.VisibleTo(reporterId))
+                    .Where(r => r.Id == request.TargetId)
                     .Select(r => new { r.Id, r.CreatedByUserId, r.Title })
                     .SingleOrDefaultAsync(cancellationToken);
                 if (recipe is null)
@@ -63,10 +67,13 @@ public class ReportService : IReportService
             case ReportTargetType.Comment:
             {
                 // A comment is visible when its recipe is (comments ride the recipe's
-                // visibility — same rule VisibleCommentAuthorAsync applies in SocialService).
+                // visibility — same rule VisibleCommentAuthorAsync applies in SocialService,
+                // reached the same way: readable recipe ids, then Contains).
+                var visibleRecipeIds = _db.Recipes
+                    .Where(RecipeVisibilityPolicy.VisibleTo(reporterId))
+                    .Select(r => r.Id);
                 var comment = await _db.Comments
-                    .Where(c => c.Id == request.TargetId
-                        && (c.Recipe.Visibility == RecipeVisibility.Public || c.Recipe.CreatedByUserId == reporterId))
+                    .Where(c => c.Id == request.TargetId && visibleRecipeIds.Contains(c.RecipeId))
                     .Select(c => new { c.Id, c.UserId, c.Content, AuthorUsername = c.User.Username })
                     .SingleOrDefaultAsync(cancellationToken);
                 if (comment is null)

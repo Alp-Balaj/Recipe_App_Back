@@ -25,11 +25,12 @@ public class RecipeInsightService : IRecipeInsightService
     public async Task<RecipeResult<RecipeInsightsResponse>> GetAsync(
         Guid recipeId, Guid? currentUserId, CancellationToken cancellationToken = default)
     {
-        // Visibility rule 1, exactly as GetRecipeByIdAsync applies it, and for the same
-        // reason: insights describe a recipe, so they must not be readable for one the
-        // caller cannot open. Everything non-Success collapses to 404 upstream.
+        // Visibility rule 1, exactly as GetRecipeByIdAsync applies it — the same shared
+        // RecipeVisibilityPolicy expression, and for the same reason: insights describe a
+        // recipe, so they must not be readable for one the caller cannot open. Everything
+        // non-Success collapses to 404 upstream.
         var recipe = await _db.Recipes
-            .Where(r => r.Visibility == RecipeVisibility.Public || (currentUserId != null && r.CreatedByUserId == currentUserId))
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
             .SingleOrDefaultAsync(r => r.Id == recipeId, cancellationToken);
 
         if (recipe is null)
