@@ -55,7 +55,7 @@ public class MealPlanAssistantService : IMealPlanAssistantService
         _caller = caller;
     }
 
-    public async Task<IReadOnlyList<ProposedSlotAssignment>> ProposeWeekAsync(
+    public async Task<MealPlanProposal> ProposeWeekAsync(
         IReadOnlyList<PlanSlot> openSlots,
         IReadOnlyList<ChatCandidateRecipe> candidates,
         IReadOnlyList<string> dietaryRestrictions,
@@ -114,7 +114,9 @@ public class MealPlanAssistantService : IMealPlanAssistantService
             result.Add(new ProposedSlotAssignment(day, mealType, recipeId));
         }
 
-        return result;
+        // The usage rides back with the assignments even when every one of them was dropped:
+        // the provider was paid for the call, not for the survivors.
+        return new MealPlanProposal(result, call.Usage);
     }
 
     private static RawResponse ParseResponse(string json)

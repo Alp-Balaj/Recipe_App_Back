@@ -8,14 +8,21 @@ using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
+using RecipeApp.Infrastructure.Recipes;
 
 namespace RecipeApp.Infrastructure.MealPlanning;
 
-// IMealPlanProposalService (Stream C, D2 = propose-then-accept). Read-only orchestration:
-// occupied slots for the week → open slots, grounded candidate set, dietary restrictions,
-// one assistant call, hydration back onto the recipes already loaded for the candidate set
-// (no second query — assignment ids are a guaranteed subset of candidate ids). The write
-// path stays POST /meal-plans/{id}/entries, untouched.
+// IMealPlanProposalService (Stream C, D2 = propose-then-accept). Orchestration: occupied
+// slots for the week → open slots, grounded candidate set, dietary restrictions, one
+// assistant call, hydration back onto the recipes already loaded for the candidate set (no
+// second query — assignment ids are a guaranteed subset of candidate ids). The MEAL-PLAN
+// write path stays POST /meal-plans/{id}/entries, untouched — nothing here writes a
+// MealPlanEntry, which is what D2 means by propose-then-accept.
+//
+// It stopped being literally read-only on 2026-08-05, when the lane was metered: a successful
+// call now writes one AiUsageRecord. Said plainly here because "read-only" was load-bearing in
+// how this service was reasoned about, and a proposal that quietly persists something is
+// exactly the kind of drift the rest of these comments exist to prevent.
 public class MealPlanProposalService : IMealPlanProposalService
 {
     // Parity with ChatService.CandidateLimit: enough breadth to fill 21 slots with variety,
@@ -36,15 +43,18 @@ public class MealPlanProposalService : IMealPlanProposalService
 
     private readonly ApplicationDbContext _db;
     private readonly IMealPlanAssistantService _assistant;
+    private readonly IAiUsageService _aiUsage;
     private readonly ILogger<MealPlanProposalService> _logger;
 
     public MealPlanProposalService(
         ApplicationDbContext db,
         IMealPlanAssistantService assistant,
+        IAiUsageService aiUsage,
         ILogger<MealPlanProposalService> logger)
     {
         _db = db;
         _assistant = assistant;
+        _aiUsage = aiUsage;
         _logger = logger;
     }
 
@@ -104,19 +114,39 @@ public class MealPlanProposalService : IMealPlanProposalService
             .Select(u => u.DietaryRestrictions)
             .SingleAsync(cancellationToken);
 
-        IReadOnlyList<ProposedSlotAssignment> assignments;
+        // ai-quotas (stream B), wired here 2026-08-05. The gate sits BELOW the two cheap exits
+        // above — no open slots, no candidates — because neither of those calls the provider,
+        // and refusing a free path for budget would be a lie. It sits ABOVE the call itself for
+        // the same reason the other two lanes do: an exhausted budget must not cost money.
+        if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
+        {
+            return MealPlanResult<ProposeWeekResponse>.QuotaExceeded();
+        }
+
+        MealPlanProposal proposal;
         try
         {
-            assignments = await _assistant.ProposeWeekAsync(
+            proposal = await _assistant.ProposeWeekAsync(
                 openSlots, candidates, dietaryRestrictions.Select(Vocabulary.Describe).ToList(), cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Same funnel as ChatService.InvokeAssistantAsync: any assistant failure (network,
             // malformed output) becomes AssistantUnavailable → 502. Cancellation propagates.
+            // Nothing is recorded on this path — a failed call produced nothing and costs the
+            // user nothing, matching chat and the generator.
             _logger.LogError(ex, "Meal-plan assistant failed for user {UserId}.", userId);
             return MealPlanResult<ProposeWeekResponse>.AssistantUnavailable();
         }
+
+        var assignments = proposal.Assignments;
+
+        // This is the one write in an otherwise read-only service, and it is the whole point of
+        // metering: the row lands whatever the model returned, including an empty proposal,
+        // because the provider bills for the call rather than for its usefulness. SaveChanges
+        // flushes only this row — the candidate recipes above are loaded and never modified.
+        _aiUsage.RecordCall(userId, AiUsageLanes.MealPlanProposal, proposal.Usage);
+        await _db.SaveChangesAsync(cancellationToken);
 
         // Hydrate from the recipes loaded for the candidate set — assignment ids are a
         // guaranteed subset of candidate ids, so the lookup can't miss.
@@ -137,11 +167,23 @@ public class MealPlanProposalService : IMealPlanProposalService
 
     // Picker-corpus parity (the D2 brief's grounding rule): the user's own recipes, their
     // saves, and what they've planned before — the same three segments the picker prefetches —
-    // topped up with recent public recipes when those run thin. Everything passes visibility
-    // rule 1 (Public OR own); the global query filter drops soft-deleted rows, on navigations
-    // too. Order: personal corpus first so the cap trims strangers' recipes, not the user's.
+    // topped up with recent public recipes when those run thin. The global query filter drops
+    // soft-deleted rows, on navigations too. Order: personal corpus first so the cap trims
+    // strangers' recipes, not the user's.
+    //
+    // Visibility comes from RecipeVisibilityPolicy (stream F, D6) since 2026-08-05. It used to
+    // be three hand-written copies of "Public OR own", which stream F left alone because the
+    // proposal service was out of its scope — correct at the time and safe (narrower than the
+    // rest of the app, never wider), but it made this the one read path that disagreed with
+    // every other one: a recipe a friend shared with you was visible everywhere in the app and
+    // invisible to the thing planning your week. Composing the shared expression is also what
+    // stops the next visibility decision from having to find this file.
     private async Task<List<Recipe>> LoadCandidateRecipesAsync(Guid userId, CancellationToken cancellationToken)
     {
+        var visible = RecipeVisibilityPolicy.VisibleTo(userId);
+
+        // No policy call here on purpose: own recipes are a subset of what the policy admits,
+        // and the author's own corpus is never filtered by visibility.
         var mine = await _db.Recipes
             .Where(r => r.CreatedByUserId == userId)
             .OrderByDescending(r => r.CreatedAt)
@@ -149,18 +191,21 @@ public class MealPlanProposalService : IMealPlanProposalService
             .Take(CandidateLimit)
             .ToListAsync(cancellationToken);
 
+        // Filtering AFTER the projection to Recipe is what lets these two compose the shared
+        // Expression<Func<Recipe, bool>> rather than carrying a second copy of the rule keyed
+        // on SavedRecipe/MealPlanEntry — the same move stream F made in SocialService.
         var saved = await _db.SavedRecipes
-            .Where(s => s.UserId == userId
-                && (s.Recipe.Visibility == RecipeVisibility.Public || s.Recipe.CreatedByUserId == userId))
+            .Where(s => s.UserId == userId)
             .OrderByDescending(s => s.SavedAt)
             .Select(s => s.Recipe)
+            .Where(visible)
             .Take(CandidateLimit)
             .ToListAsync(cancellationToken);
 
         var planned = await _db.MealPlanEntries
-            .Where(e => e.MealPlan.UserId == userId
-                && (e.Recipe.Visibility == RecipeVisibility.Public || e.Recipe.CreatedByUserId == userId))
+            .Where(e => e.MealPlan.UserId == userId)
             .Select(e => e.Recipe)
+            .Where(visible)
             .Distinct()
             .Take(CandidateLimit)
             .ToListAsync(cancellationToken);
@@ -179,8 +224,8 @@ public class MealPlanProposalService : IMealPlanProposalService
         {
             var ids = seen.ToList();
             var topUp = await _db.Recipes
-                .Where(r => (r.Visibility == RecipeVisibility.Public || r.CreatedByUserId == userId)
-                    && !ids.Contains(r.Id))
+                .Where(visible)
+                .Where(r => !ids.Contains(r.Id))
                 .OrderByDescending(r => r.CreatedAt)
                 .ThenByDescending(r => r.Id)
                 .Take(CandidateLimit - combined.Count)

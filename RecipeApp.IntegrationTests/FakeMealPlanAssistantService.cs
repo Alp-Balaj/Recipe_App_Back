@@ -16,7 +16,13 @@ public sealed class FakeMealPlanAssistantService : IMealPlanAssistantService
 {
     public const string FailSentinel = "__FAIL__";
 
-    public Task<IReadOnlyList<ProposedSlotAssignment>> ProposeWeekAsync(
+    // Deliberately NOT FakeChatAssistantService.Usage's numbers: a usage row attributed to the
+    // wrong lane is otherwise indistinguishable from a correct one, and these counts are what
+    // the quota assertions read. The shape is also honest about this lane — a 50-candidate
+    // grounding prompt filling 21 slots is several times a chat turn.
+    public static readonly ChatTokenUsage Usage = new(3_000, 600, 3_600);
+
+    public Task<MealPlanProposal> ProposeWeekAsync(
         IReadOnlyList<PlanSlot> openSlots,
         IReadOnlyList<ChatCandidateRecipe> candidates,
         IReadOnlyList<string> dietaryRestrictions,
@@ -35,6 +41,6 @@ public sealed class FakeMealPlanAssistantService : IMealPlanAssistantService
                 slot.DayOfWeek, slot.MealType, candidates[i % candidates.Count].Id));
         }
 
-        return Task.FromResult<IReadOnlyList<ProposedSlotAssignment>>(assignments);
+        return Task.FromResult(new MealPlanProposal(assignments, Usage));
     }
 }
