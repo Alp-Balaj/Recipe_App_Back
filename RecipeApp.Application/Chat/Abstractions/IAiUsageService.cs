@@ -30,6 +30,15 @@ public static class AiUsageLanes
     // the generator consults GetBudgetAsync before spending and stages RecordCall on its
     // own unit of work, like the chat lane does.
     public const string RecipeGeneration = "recipe-generation";
+
+    // The week proposer. Added 2026-08-05, six days after the lane started spending: stream C
+    // shipped propose-week before this system existed, stream B metered the two lanes that
+    // existed when it landed, and nothing connected them — so the MOST expensive call in the
+    // app (a 50-candidate grounding prompt filling 21 slots against an 8192-token ceiling)
+    // was the one call the budget could not see. Under-reporting the ceiling is the part that
+    // matters: the remaining-budget figure the chat surface shows was wrong for every user who
+    // had proposed a week.
+    public const string MealPlanProposal = "meal-plan-proposal";
 }
 
 // A user's AI budget for one UTC day. The window is the calendar day in UTC — simple to

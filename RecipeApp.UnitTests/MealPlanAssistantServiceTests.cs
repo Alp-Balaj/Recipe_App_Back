@@ -18,8 +18,13 @@ public class MealPlanAssistantServiceTests
     private sealed class FakeCaller : IChatMessageCaller
     {
         private readonly string _json;
+        private readonly ChatTokenUsage? _usage;
 
-        public FakeCaller(string json) => _json = json;
+        public FakeCaller(string json, ChatTokenUsage? usage = null)
+        {
+            _json = json;
+            _usage = usage;
+        }
 
         public string? CapturedSystemPrompt { get; private set; }
         public object? CapturedSchema { get; private set; }
@@ -33,7 +38,7 @@ public class MealPlanAssistantServiceTests
         {
             CapturedSystemPrompt = systemPrompt;
             CapturedSchema = responseSchema;
-            return Task.FromResult(new ChatMessageCall(_json, null));
+            return Task.FromResult(new ChatMessageCall(_json, _usage));
         }
     }
 
@@ -50,21 +55,54 @@ public class MealPlanAssistantServiceTests
             new PlanSlot(DayOfWeek.Tuesday, MealType.Lunch),
         };
 
-    private static Task<IReadOnlyList<ProposedSlotAssignment>> InvokeAsync(
+    // Unwraps to the assignments so the filtering tests below read as they always did — the
+    // usage half of MealPlanProposal has its own test.
+    private static async Task<IReadOnlyList<ProposedSlotAssignment>> InvokeAsync(
         string json,
         IReadOnlyList<PlanSlot>? openSlots = null,
         IReadOnlyList<ChatCandidateRecipe>? candidates = null,
         IReadOnlyList<string>? dietary = null)
     {
         var service = new MealPlanAssistantService(new FakeCaller(json));
-        return service.ProposeWeekAsync(
+        var proposal = await service.ProposeWeekAsync(
             openSlots ?? TwoOpenSlots(),
             candidates ?? TwoCandidates(),
             dietary ?? Array.Empty<string>());
+        return proposal.Assignments;
     }
 
     private static string Slot(string day, string mealType, string recipeId) =>
         $$"""{"day":"{{day}}","mealType":"{{mealType}}","recipeId":"{{recipeId}}"}""";
+
+    // --- token usage (ai-quotas, 2026-08-05) -------------------------------------------------
+
+    [Fact]
+    public async Task ProviderUsage_RidesBackWithTheProposal()
+    {
+        var json = $$"""{"slots":[{{Slot("Monday", "Dinner", RecipeA.ToString())}}]}""";
+        var reported = new ChatTokenUsage(3_000, 600, 3_600);
+
+        var proposal = await new MealPlanAssistantService(new FakeCaller(json, reported))
+            .ProposeWeekAsync(TwoOpenSlots(), TwoCandidates(), Array.Empty<string>());
+
+        Assert.Equal(reported, proposal.Usage);
+    }
+
+    [Fact]
+    public async Task UsageSurvives_EvenWhenEveryAssignmentIsDropped()
+    {
+        // The provider bills for the call, not for how much of its answer survived
+        // re-validation: a response of pure hallucination costs exactly what a good one does.
+        // If usage were derived from the surviving assignments, this call would be free.
+        var json = $$"""{"slots":[{{Slot("Monday", "Dinner", Guid.NewGuid().ToString())}}]}""";
+        var reported = new ChatTokenUsage(3_000, 600, 3_600);
+
+        var proposal = await new MealPlanAssistantService(new FakeCaller(json, reported))
+            .ProposeWeekAsync(TwoOpenSlots(), TwoCandidates(), Array.Empty<string>());
+
+        Assert.Empty(proposal.Assignments);
+        Assert.Equal(reported, proposal.Usage);
+    }
 
     [Fact]
     public async Task ValidResponse_FillsBothOpenSlots()

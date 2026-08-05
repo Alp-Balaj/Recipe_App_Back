@@ -115,12 +115,13 @@ public static class MealPlanEndpoints
             };
         });
 
-        // AI week proposal (Stream C, D2 = propose-then-accept): READ-ONLY. The model fills
-        // only the week's open Breakfast/Lunch/Dinner slots from a grounded candidate set;
-        // nothing is written here — accepted slots go through POST /{id}/entries above, so
-        // the slot 409 and WeekStart rules keep a single write path. Mapped outside the meal
-        // group because each call is paid LLM traffic: it rides the chat lane's tight budget
-        // (20/min), not Meal's 100/min.
+        // AI week proposal (Stream C, D2 = propose-then-accept). The model fills only the
+        // week's open Breakfast/Lunch/Dinner slots from a grounded candidate set; NO PLAN DATA
+        // is written here — accepted slots go through POST /{id}/entries above, so the slot 409
+        // and WeekStart rules keep a single write path. (Since 2026-08-05 a successful call does
+        // write one AiUsageRecord: metered, not read-only.) Mapped outside the meal group
+        // because each call is paid LLM traffic: it rides the chat lane's tight budget (20/min),
+        // not Meal's 100/min — and now the per-user daily budget on top of that.
         app.MapPost("/meal-plans/propose-week", async (ProposeWeekRequest request, IMealPlanProposalService proposals,
             ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
@@ -129,6 +130,10 @@ public static class MealPlanEndpoints
             {
                 MealPlanOutcome.Success => Results.Ok(result.Value),
                 MealPlanOutcome.AssistantUnavailable => AssistantUnavailable(),
+                // ai-quotas (2026-08-05): the per-user daily budget, on top of the per-IP chat
+                // rate lane below. The lane limits how FAST this endpoint can be called; the
+                // budget limits how much it may spend.
+                MealPlanOutcome.QuotaExceeded => QuotaExhausted(),
                 _ => Results.NotFound(),
             };
         })
@@ -247,4 +252,12 @@ public static class MealPlanEndpoints
             statusCode: StatusCodes.Status502BadGateway,
             title: "The planning assistant is temporarily unavailable.",
             detail: "The assistant could not propose a week. Nothing was changed — please try again.");
+
+    // Word-for-word the problem ChatEndpoints and RecipeEndpoints return, because a client
+    // showing "you are out of AI for today" should not have to know which lane refused it.
+    private static IResult QuotaExhausted() =>
+        Results.Problem(
+            statusCode: StatusCodes.Status429TooManyRequests,
+            title: "Daily AI budget exhausted.",
+            detail: "You have used today's AI allowance. The budget resets at 00:00 UTC.");
 }
