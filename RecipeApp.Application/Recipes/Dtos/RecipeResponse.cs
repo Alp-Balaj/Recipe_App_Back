@@ -27,4 +27,16 @@ public record RecipeResponse(
     // SourceConversationId is null for a recipe generated outside a conversation (and for
     // every recipe authored by hand).
     bool IsAiGenerated,
-    Guid? SourceConversationId);
+    Guid? SourceConversationId,
+    // Provenance for an imported recipe (stream L, decision D15). Null for every recipe that
+    // was typed or generated. Appended, so existing positional construction sites keep
+    // compiling.
+    //
+    // The FULL url, not just the domain, even though the domain is what the detail page shows.
+    // The client renders the host and links the whole thing: a reader who wants to check the
+    // import against the original needs the page, and a server that returned only the domain
+    // would be withholding the one thing that makes D15's auditability claim real.
+    //
+    // Deliberately absent from UpdateRecipeRequest — that absence IS the immutability
+    // mechanism, so anyone adding it there should read Recipe.SourceUrl's comment first.
+    string? SourceUrl);

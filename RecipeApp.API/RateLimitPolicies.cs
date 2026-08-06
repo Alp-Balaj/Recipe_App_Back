@@ -29,4 +29,17 @@ public static class RateLimitPolicies
     // meal-planning plan (cp02–04): the whole meal-plan/shopping-list family shares this one
     // lane. Cheap DB-only actions like Social, so the default budget mirrors Social's.
     public const string Meal = "meal";
+
+    // Stream L: the two /recipes/import routes. Its own budget
+    // (RateLimiting:ImportPermitLimit) rather than riding "chat" or "images", per this file's
+    // convention — and the tightest of the lot by default, because one import is the most
+    // expensive request in the app measured in things other than tokens: an outbound fetch to
+    // an address the CALLER chose, possibly a model call, and possibly a second fetch to
+    // download and re-store a 5 MB image.
+    //
+    // The outbound fetch is what makes this lane different in kind rather than degree. Every
+    // other rate limit here protects the server's own resources; this one also stands between
+    // a user and somebody else's web server, so an unbounded import lane would let this app be
+    // pointed at a third party as a traffic amplifier.
+    public const string Import = "import";
 }

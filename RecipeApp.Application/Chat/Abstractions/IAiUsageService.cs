@@ -69,6 +69,23 @@ public static class AiUsageLanes
     // moderation user's daily "budget" will read as wildly exhausted and that is meaningless,
     // because no code path ever consults it.
     public const string ContentModeration = "content-moderation";
+
+    // Stream L: recipe import — the LLM fallback for a page with no structured data, and the
+    // whole photo tier. Gated like every user-facing lane (GetBudgetAsync before the call,
+    // RecordCall staged on the same unit of work as the recipe's SaveChanges), NOT like the
+    // ContentModeration lane above. The distinction that comment draws is exactly the one that
+    // applies: moderation is spent on the platform's behalf against content nobody asked to
+    // have checked, whereas an import is a button a user pressed about a page they chose. A
+    // person who can afford it gets it; a person out of quota is told so before any money
+    // moves.
+    //
+    // WHAT MAKES THIS LANE UNLIKE THE OTHER FOUR: most imports never touch it. The JSON-LD
+    // path is deterministic and free, so a lane row exists only for the fallback and photo
+    // cases — which means the number here is a measure of how often structured data was
+    // MISSING, not of how often people imported. Anyone reading these figures later to size
+    // import's popularity will undercount it, badly, and should count the recipes carrying a
+    // SourceUrl instead.
+    public const string Import = "recipe-import";
 }
 
 // A user's AI budget for one UTC day. The window is the calendar day in UTC — simple to

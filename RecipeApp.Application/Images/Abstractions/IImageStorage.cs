@@ -60,10 +60,19 @@ namespace RecipeApp.Application.Images.Abstractions;
 //     every live image stops matching and the whole bucket looks unreachable. Compare on the
 //     last path segment, which is a server-generated Guid + validated extension and is
 //     already unique and unguessable.
-//     This also makes the sweep inert against stream L: imported recipes will carry FOREIGN
-//     image URLs in the same column. A foreign URL names no key of ours, so it protects
-//     nothing and endangers nothing — correct by construction, because the candidate set came
-//     from our own storage in the first place (see 1).
+//     NOTE, CORRECTED BY STREAM L (2026-08-06): this paragraph used to say the sweep would be
+//     "inert against stream L, because imported recipes will carry FOREIGN image URLs in the
+//     same column". That prediction was wrong, and the direction it was wrong in matters.
+//     Import RE-HOSTS the source's photo — it downloads it through the SSRF-guarded fetcher and
+//     stores it via SaveAsync like any upload — so an imported recipe's ImageUrl names one of
+//     OUR keys and is an ordinary member of the reachable set. Hot-linking was rejected
+//     precisely because it would have broken this column's one guarantee (every value names an
+//     object we hold), which the SPA and this sweep both rely on.
+//
+//     So the sweep is not inert against imports; it protects them, on exactly the same terms as
+//     everything else, and rule 3 above is what makes that work. The original reasoning still
+//     holds for any FUTURE foreign URL that reaches this column: it names no key of ours, so it
+//     protects nothing and endangers nothing.
 //
 //  4. DO NOT DELETE EAGERLY ON REPLACE. The cheap-looking shortcut — "when UpdateRecipeAsync
 //     changes ImageUrl from A to B, delete A right there" — is UNSAFE here, and the reason is

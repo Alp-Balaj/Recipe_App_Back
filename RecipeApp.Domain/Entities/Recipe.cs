@@ -51,6 +51,24 @@ public class Recipe
     public bool IsAiGenerated { get; set; }
     public Guid? SourceConversationId { get; set; }
 
+    // Provenance for an IMPORTED recipe (stream L, decision D15 — 2026-08-06). The page the
+    // recipe was read off, or null for every recipe that was typed or generated. Ordinary
+    // nullable scalar, so it needs no OnModelCreating entry — the same treatment ImageUrl gets.
+    //
+    // IMMUTABLE ONCE SET, and the mechanism is absence rather than a guard: UpdateRecipeRequest
+    // does not carry it and UpdateRecipeAsync assigns named fields, so there is no code path
+    // that can write it a second time. An owner may rewrite every word of an imported recipe;
+    // what they may not do is relabel where it came from, because the source domain is shown to
+    // readers as a claim about attribution and an editable claim is not attribution.
+    //
+    // NOT a marker of AI involvement, and deliberately separate from IsAiGenerated. An import
+    // that fell back to model extraction still read SOMEONE ELSE'S recipe off a real page — the
+    // model transcribed, it did not invent — so IsAiGenerated stays false on every import path
+    // and this column is the whole of what import claims about itself. Conflating the two would
+    // badge a real author's recipe as generated, which is the one provenance error that
+    // misattributes authorship rather than merely omitting it.
+    public string? SourceUrl { get; set; }
+
     // Relations
     public ICollection<SavedRecipe> SavedByUsers { get; set; } = [];
     public ICollection<Like> Likes { get; set; } = [];
