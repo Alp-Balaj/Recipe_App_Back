@@ -104,6 +104,12 @@ builder.Services.AddScoped<IMealPlanProposalService, MealPlanProposalService>();
 // below, and the Gemini key is only demanded when a generation actually runs.
 builder.Services.AddScoped<IRecipeGenerationAssistant, RecipeGenerationAssistant>();
 builder.Services.AddScoped<IRecipeGenerationService, RecipeGenerationService>();
+// Stream M (cook mode): the fourth assistant seam and its orchestrator, on the same lazy
+// terms — nothing demands the Gemini key until a cook actually asks something. No extra
+// persistence registration: decision D14 makes the exchange session-scoped, so the only row
+// a turn writes is the usage record IAiUsageService already stages.
+builder.Services.AddScoped<ICookAssistant, CookAssistant>();
+builder.Services.AddScoped<ICookAssistantService, CookAssistantService>();
 // open-loops slice 3: the READ side only — notification writes are staged inline in
 // SocialService so they share a transaction with the interaction that caused them.
 builder.Services.AddScoped<INotificationService, NotificationService>();

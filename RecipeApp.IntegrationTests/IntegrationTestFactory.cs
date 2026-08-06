@@ -86,6 +86,13 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             services.RemoveAll<IRecipeGenerationAssistant>();
             services.AddScoped<IRecipeGenerationAssistant, FakeRecipeGenerationAssistant>();
 
+            // Same for the cook-mode assistant (stream M): the real CookAssistantService under
+            // test — visibility gate, budget gate, server-side serving scaling, and the usage
+            // row that is the ONLY thing a session-scoped turn persists — runs against the
+            // container DB with a deterministic answer instead of Gemini.
+            services.RemoveAll<ICookAssistant>();
+            services.AddScoped<ICookAssistant, FakeCookAssistant>();
+
             // Built through the shared configurator, exactly like Program.cs and the
             // design-time factory. Two things ride on that: the dynamic-JSON opt-in (the jsonb
             // List<> columns throw NotSupportedException at SaveChangesAsync without it) and
