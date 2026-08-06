@@ -61,6 +61,34 @@ public static class RecipeEndpoints
         .AddEndpointFilter<ValidationFilter<GenerateRecipeRequest>>()
         .RequireRateLimiting(RateLimitPolicies.Chat);
 
+        // Stream M: the cook-mode assistant. Under /recipes/{id} because the question is ABOUT
+        // a recipe and the recipe's own visibility rule is what decides whether it may be asked
+        // at all — routing it under /chat would have meant re-deriving that rule somewhere it
+        // does not live.
+        //
+        // It takes the Chat rate-limit lane for the reason POST /generate does: this is a route
+        // that costs money per call, and RateLimitPolicies' convention is that money-gated
+        // traffic stays isolated from the cheap DB-only budgets. Cook mode makes that matter
+        // more than usual — three questions in ninety seconds is an ordinary session, not abuse.
+        //
+        // NO MIGRATION AND NO CONVERSATION (decision D14): the exchange is session-scoped and
+        // the client posts its own history each turn. The only row a turn writes is the usage
+        // record on the new AiUsageLanes.CookAssistant lane.
+        group.MapPost("/{id:guid}/cook/ask", async (Guid id, CookQuestionRequest request, ICookAssistantService cookAssistant, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var result = await cookAssistant.AskAsync(id, request, userId, cancellationToken);
+            return result.Outcome switch
+            {
+                CookAssistantOutcome.Success => Results.Ok(result.Value),
+                CookAssistantOutcome.AssistantUnavailable => CookAssistantUnavailable(),
+                CookAssistantOutcome.QuotaExceeded => QuotaExhausted(),
+                _ => Results.NotFound(),
+            };
+        })
+        .AddEndpointFilter<ValidationFilter<CookQuestionRequest>>()
+        .RequireRateLimiting(RateLimitPolicies.Chat);
+
         // Guest access (§3.1): the two read routes are anonymous-capable — the caller id is
         // read as nullable and the services degrade to Public-only for a null caller. They
         // also pick up the IP-partitioned Social rate-limit policy (§3.4): anonymous traffic
@@ -356,4 +384,13 @@ public static class RecipeEndpoints
             statusCode: StatusCodes.Status502BadGateway,
             title: "The recipe generator is temporarily unavailable.",
             detail: "The assistant could not write a usable recipe. Nothing was saved — please try again.");
+
+    // Stream M. Same 502 shape, different sentence: cook mode has nothing to save, so promising
+    // that "nothing was saved" would answer a question the cook did not ask. What they need to
+    // know is that the recipe in front of them is unaffected and the session continues.
+    private static IResult CookAssistantUnavailable() =>
+        Results.Problem(
+            statusCode: StatusCodes.Status502BadGateway,
+            title: "The cooking assistant is temporarily unavailable.",
+            detail: "The assistant could not answer just now. Your recipe and timers are unaffected — please try again.");
 }

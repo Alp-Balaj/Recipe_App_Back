@@ -87,6 +87,13 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             services.RemoveAll<IRecipeGenerationAssistant>();
             services.AddScoped<IRecipeGenerationAssistant, FakeRecipeGenerationAssistant>();
 
+            // Same for the cook-mode assistant (stream M): the real CookAssistantService under
+            // test — visibility gate, budget gate, server-side serving scaling, and the usage
+            // row that is the ONLY thing a session-scoped turn persists — runs against the
+            // container DB with a deterministic answer instead of Gemini.
+            services.RemoveAll<ICookAssistant>();
+            services.AddScoped<ICookAssistant, FakeCookAssistant>();
+
             // Stream X: the moderation classifier. Unlike the three fakes above this one is
             // not optional — ContentModerationWorker is a HOSTED SERVICE that starts with this
             // host and drains the queue for real, so without this replacement every recipe and

@@ -40,6 +40,17 @@ public static class AiUsageLanes
     // had proposed a week.
     public const string MealPlanProposal = "meal-plan-proposal";
 
+    // Stream M: the cook-mode assistant, and the first lane with no row of its
+    // own anywhere else in the database. Decision D14 keeps a cook-mode exchange session-scoped
+    // — no Conversation, no ChatMessage, nothing persisted but this usage row — because
+    // ChatService.BuildHistoryAsync feeds a conversation's trailing 20 messages back into the
+    // recommender's grounding, and "can I use margarine instead" is not a thing anyone wants
+    // shaping next week's suggestions. That is precisely why the lane has to exist: metering is
+    // the ONLY durable trace of a cook-mode turn, so without a constant here the app's most
+    // casually-repeated AI call would be the one call the budget cannot see. Stream C shipped
+    // propose-week into exactly that hole; this is the same mistake declined in advance.
+    public const string CookAssistant = "cook-assistant";
+
     // Stream X: the content-moderation classifier. This lane is unlike the three above in a
     // way that matters more than its name.
     //
