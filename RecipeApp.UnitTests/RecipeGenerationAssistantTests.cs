@@ -548,7 +548,7 @@ public class RecipeGenerationAssistantTests
         // go stale the moment servings change, which is the whole thing J is avoiding.
         var caller = new FakeCaller(ValidJson);
 
-        await new RecipeGenerationAssistant(caller).GenerateAsync("go", [], []);
+        await new RecipeGenerationAssistant(caller).GenerateAsync("go", [], AiPreferenceContext.None);
 
         Assert.Contains("ingredientIndexes", caller.CapturedSystemPrompt);
         Assert.Contains("WITHOUT repeating the quantity", caller.CapturedSystemPrompt);
