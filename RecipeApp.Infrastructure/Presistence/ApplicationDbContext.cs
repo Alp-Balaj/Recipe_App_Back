@@ -87,6 +87,21 @@ public class ApplicationDbContext : DbContext
             .ElementType(e => e.HasConversion<string>())
             .HasColumnType("jsonb");
 
+        // Onboarding (stream K). CuisinePreferences is a primitive collection of enums, so it
+        // needs the SAME treatment as the two above and NOT the RecipeAppDataSource converter.
+        // The distinction is easy to get wrong because both end up as jsonb: the data source's
+        // JsonStringEnumConverter serializes POCO documents Npgsql maps itself (Ingredients,
+        // with its nested UnitOfMeasure), whereas EF materializes a primitive collection
+        // through its own value converters and never consults Npgsql's JSON options at all.
+        // Omit this and the column lands as [3, 9] instead of ["Chinese", "Italian"] — silently,
+        // with a symmetric read that hides it until Cuisine gains a member and every stored
+        // preference shifts one place. See JsonbEnumEncodingTests for the assertion that
+        // catches it, which reads the raw jsonb rather than round-tripping.
+        builder.Entity<User>()
+            .PrimitiveCollection(u => u.CuisinePreferences)
+            .ElementType(e => e.HasConversion<string>())
+            .HasColumnType("jsonb");
+
         builder.Entity<User>()
             .HasIndex(u => u.Username)
             .IsUnique();

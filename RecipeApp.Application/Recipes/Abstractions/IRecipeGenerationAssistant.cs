@@ -28,7 +28,7 @@ public interface IRecipeGenerationAssistant
     Task<GeneratedRecipe> GenerateAsync(
         string request,
         IReadOnlyList<ChatHistoryItem> history,
-        IReadOnlyList<string> dietaryRestrictions,
+        AiPreferenceContext preferences,
         CancellationToken cancellationToken = default);
 }
 

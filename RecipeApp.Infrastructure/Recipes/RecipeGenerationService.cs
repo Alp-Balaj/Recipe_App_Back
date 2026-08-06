@@ -86,7 +86,7 @@ public class RecipeGenerationService : IRecipeGenerationService
         // respect, and how visible the result is when the request does not say.
         var author = await _db.Users
             .Where(u => u.Id == userId)
-            .Select(u => new { u.DietaryRestrictions, u.DefaultRecipeVisibility })
+            .Select(u => new { u.DietaryRestrictions, u.CuisinePreferences, u.DefaultRecipeVisibility })
             .SingleAsync(cancellationToken);
 
         GeneratedRecipe generated;
@@ -95,8 +95,12 @@ public class RecipeGenerationService : IRecipeGenerationService
             generated = await _assistant.GenerateAsync(
                 request.Prompt, history,
                 // Typed since stream G, described as words for the prompt — same treatment
-                // the chat and propose-week lanes give them.
-                author.DietaryRestrictions.Select(Vocabulary.Describe).ToList(),
+                // the chat and propose-week lanes give them. Stream K adds the cuisine half:
+                // the two travel together in a named record precisely so this call site
+                // cannot transpose an absolute constraint with a soft default.
+                new AiPreferenceContext(
+                    author.DietaryRestrictions.Select(Vocabulary.Describe).ToList(),
+                    author.CuisinePreferences.Select(Vocabulary.Describe).ToList()),
                 cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

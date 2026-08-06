@@ -106,6 +106,14 @@ public interface ISocialService
     /// </summary>
     Task<SocialResult<UserProfileResponse>> UpdateProfileAsync(UpdateProfileRequest request, Guid currentUserId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// The post-register wizard's one write (stream K): cuisine preferences and dietary
+    /// restrictions, plus the stamp that marks onboarding answered. Idempotent — running it
+    /// twice simply overwrites both lists. Empty lists are the SKIP case and still stamp,
+    /// which is what stops the wizard being raised again.
+    /// </summary>
+    Task<SocialResult<UserProfileResponse>> CompleteOnboardingAsync(CompleteOnboardingRequest request, Guid currentUserId, CancellationToken cancellationToken = default);
+
     /// <summary>An author's recipes visible to the caller (rule 1 composed first), keyset-paged.</summary>
     Task<SocialResult<RecipeListResponse>> GetUserRecipesAsync(Guid targetUserId, KeysetCursor? cursor, int limit, Guid? currentUserId, CancellationToken cancellationToken = default);
 

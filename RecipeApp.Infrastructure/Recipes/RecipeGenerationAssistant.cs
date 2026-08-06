@@ -184,7 +184,7 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
     public async Task<GeneratedRecipe> GenerateAsync(
         string request,
         IReadOnlyList<ChatHistoryItem> history,
-        IReadOnlyList<string> dietaryRestrictions,
+        AiPreferenceContext preferences,
         CancellationToken cancellationToken = default)
     {
         var trimmedHistory = history.Count > MaxHistoryMessages
@@ -196,7 +196,7 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
         // passed positionally binds to it silently — the bug that 502'd every chat turn on
         // 2026-07-30 (fixed in 4d2e4b8). Anything touching this seam passes it by name.
         var call = await _caller.CreateJsonMessageAsync(
-            BuildSystemPrompt(dietaryRestrictions),
+            BuildSystemPrompt(preferences),
             trimmedHistory,
             request,
             ResponseSchema,
@@ -246,8 +246,9 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
     }
 
     // ── 2. The prompt ───────────────────────────────────────────────────────────────────
-    private static string BuildSystemPrompt(IReadOnlyList<string> dietaryRestrictions)
+    private static string BuildSystemPrompt(AiPreferenceContext preferences)
     {
+        var dietaryRestrictions = preferences.DietaryRestrictions;
         var sb = new StringBuilder();
         sb.AppendLine("You are a recipe author for a cooking app. Invent ONE complete, genuinely cookable recipe that matches the user's request.");
         sb.AppendLine("Return the recipe as structured output only — no commentary, no markdown, no alternatives, exactly one recipe.");
@@ -287,6 +288,24 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
             sb.AppendLine();
             sb.Append("The user's dietary restrictions are absolute — every ingredient must comply: ");
             sb.AppendLine(string.Join(", ", dietaryRestrictions));
+        }
+
+        // Onboarding (stream K) — the generator's DEFAULT, which is all a preference is
+        // allowed to be here. The contrast with the block above is deliberate and is spelled
+        // out to the model: that one says "absolute", this one says "only when the request
+        // leaves it open". A generator that answered "a birthday cake for my daughter" with a
+        // Thai dish because Thai is on this list would be obeying the wrong instruction, and
+        // unlike a bad recommendation it would produce a saved row the user has to delete.
+        //
+        // This does NOT force cuisineType to be set: the omit-rather-than-approximate rule
+        // above still governs, so a dish that belongs to no cuisine stays null even when the
+        // preference nudged what was cooked.
+        if (preferences.CuisinePreferences.Count > 0)
+        {
+            sb.AppendLine();
+            sb.Append("When — and only when — the request does not imply a cuisine, a dish, or a set of ingredients of its own, lean toward the cuisines the user usually cooks: ");
+            sb.AppendLine(string.Join(", ", preferences.CuisinePreferences));
+            sb.AppendLine("Anything the user actually asked for overrides this completely. Never bend a specific request toward one of those cuisines, and never mention this preference in the title or description.");
         }
 
         return sb.ToString();

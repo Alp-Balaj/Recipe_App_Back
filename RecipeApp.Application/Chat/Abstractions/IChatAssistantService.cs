@@ -16,8 +16,34 @@ public interface IChatAssistantService
         string userMessage,
         IReadOnlyList<ChatHistoryItem> recentHistory,
         IReadOnlyList<ChatCandidateRecipe> candidates,
-        IReadOnlyList<string> dietaryRestrictions,
+        AiPreferenceContext preferences,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// What the caller's own account says about their food, as prose the prompt can use
+/// (stream K). Both lists are already rendered by <c>Vocabulary.Describe</c> — the assistants
+/// take words, never enum members, for the reason that class documents.
+/// </summary>
+///
+/// <remarks>
+/// A record rather than two adjacent <c>IReadOnlyList&lt;string&gt;</c> parameters, and that
+/// is the whole point of it. The two lists are semantically OPPOSITE — restrictions are
+/// absolute and exclude, preferences are soft and merely lean — so transposing them at a call
+/// site would turn "never serve me shellfish" into a gentle suggestion and "I like Thai food"
+/// into a rule, with no compiler error and no test that obviously fails. Named members make
+/// that transposition impossible to write. (Stream C learned the same lesson positionally,
+/// with IChatMessageCaller's token arguments.)
+///
+/// IMealPlanAssistantService deliberately does NOT take this: propose-week consumes
+/// preferences by weighting its candidate set rather than by prompt, so it has exactly one
+/// such list and nothing to confuse it with.
+/// </remarks>
+public record AiPreferenceContext(
+    IReadOnlyList<string> DietaryRestrictions,
+    IReadOnlyList<string> CuisinePreferences)
+{
+    public static readonly AiPreferenceContext None = new([], []);
 }
 
 // Compact projection of a recipe the model may recommend. Mirrors the fields the recipe

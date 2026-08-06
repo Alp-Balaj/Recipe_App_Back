@@ -66,7 +66,7 @@ public class RecipeGenerationAssistantTests
 
     private static Task<GeneratedRecipe> InvokeAsync(string json, IReadOnlyList<string>? dietary = null) =>
         new RecipeGenerationAssistant(new FakeCaller(json))
-            .GenerateAsync("something with cod", [], dietary ?? []);
+            .GenerateAsync("something with cod", [], new AiPreferenceContext(dietary ?? [], []));
 
     private static async Task<GeneratedRecipeDraft> DraftAsync(string json) => (await InvokeAsync(json)).Draft;
 
@@ -363,7 +363,7 @@ public class RecipeGenerationAssistantTests
         var caller = new FakeCaller(ValidJson);
 
         await new RecipeGenerationAssistant(caller)
-            .GenerateAsync("something with cod", [], ["vegetarian", "no nuts"]);
+            .GenerateAsync("something with cod", [], new AiPreferenceContext(["vegetarian", "no nuts"], []));
 
         Assert.Contains("vegetarian, no nuts", caller.CapturedSystemPrompt);
         Assert.Equal("something with cod", caller.CapturedUserMessage);
@@ -371,6 +371,37 @@ public class RecipeGenerationAssistantTests
         // schema — its own recipe schema has to travel through the seam.
         Assert.NotNull(caller.CapturedSchema);
         Assert.IsNotType<CancellationToken>(caller.CapturedSchema);
+    }
+
+    // Onboarding (stream K). The generator's stakes are higher than chat's: a recommendation
+    // bent toward a preferred cuisine is a bad suggestion the user scrolls past, but a
+    // GENERATED recipe bent that way is a row saved to their account. Hence the conditional
+    // wording, and hence this assertion on it.
+    [Fact]
+    public async Task SystemPrompt_CarriesCuisinePreferences_AsADefaultTheRequestOverrides()
+    {
+        var caller = new FakeCaller(ValidJson);
+
+        await new RecipeGenerationAssistant(caller)
+            .GenerateAsync("something with cod", [], new AiPreferenceContext(["vegan"], ["Korean", "Japanese"]));
+
+        var prompt = caller.CapturedSystemPrompt!;
+        Assert.Contains("Korean, Japanese", prompt);
+        Assert.Contains("only when — the request does not imply a cuisine", prompt);
+        Assert.Contains("overrides this completely", prompt);
+
+        // The restriction line keeps "absolute"; the preference must never borrow that word.
+        Assert.Contains("dietary restrictions are absolute", prompt);
+    }
+
+    [Fact]
+    public async Task SystemPrompt_OmitsThePreferenceBlock_WhenNoCuisinesAreChosen()
+    {
+        var caller = new FakeCaller(ValidJson);
+
+        await new RecipeGenerationAssistant(caller).GenerateAsync("something with cod", [], AiPreferenceContext.None);
+
+        Assert.DoesNotContain("lean toward the cuisines", caller.CapturedSystemPrompt!);
     }
 
     [Fact]
@@ -381,7 +412,7 @@ public class RecipeGenerationAssistantTests
             .Select(i => new ChatHistoryItem("user", $"message {i}"))
             .ToList();
 
-        await new RecipeGenerationAssistant(caller).GenerateAsync("go", history, []);
+        await new RecipeGenerationAssistant(caller).GenerateAsync("go", history, AiPreferenceContext.None);
 
         Assert.Equal(20, caller.CapturedHistory!.Count);
         Assert.Equal("message 11", caller.CapturedHistory[0].Content);
@@ -517,7 +548,7 @@ public class RecipeGenerationAssistantTests
         // go stale the moment servings change, which is the whole thing J is avoiding.
         var caller = new FakeCaller(ValidJson);
 
-        await new RecipeGenerationAssistant(caller).GenerateAsync("go", [], []);
+        await new RecipeGenerationAssistant(caller).GenerateAsync("go", [], AiPreferenceContext.None);
 
         Assert.Contains("ingredientIndexes", caller.CapturedSystemPrompt);
         Assert.Contains("WITHOUT repeating the quantity", caller.CapturedSystemPrompt);

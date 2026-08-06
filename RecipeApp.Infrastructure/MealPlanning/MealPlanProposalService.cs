@@ -97,7 +97,18 @@ public class MealPlanProposalService : IMealPlanProposalService
             return await EmptyProposalAsync(request.WeekStartDate, userId, cancellationToken);
         }
 
-        var recipes = await LoadCandidateRecipesAsync(userId, cancellationToken);
+        // One row for both things the caller's own record decides here: what the model must
+        // never propose, and which cuisines it should lean toward. Read BEFORE the candidates
+        // because the preferences decide which candidates survive the cap — see
+        // LoadCandidateRecipesAsync. (Stream K moved this read up from below the candidate
+        // load; the restriction half is used exactly where it always was.)
+        var preferences = await _db.Users
+            .Where(u => u.Id == userId)
+            .Select(u => new { u.DietaryRestrictions, u.CuisinePreferences })
+            .SingleAsync(cancellationToken);
+        var dietaryRestrictions = preferences.DietaryRestrictions;
+
+        var recipes = await LoadCandidateRecipesAsync(userId, preferences.CuisinePreferences, cancellationToken);
         if (recipes.Count == 0)
         {
             // Nothing to ground on — an empty proposal, not an assistant failure. Skips the
@@ -115,11 +126,6 @@ public class MealPlanProposalService : IMealPlanProposalService
                 r.TotalTimeMinutes, r.CaloriesPerServing,
                 r.Tags.Select(Vocabulary.Describe).ToList()))
             .ToList();
-
-        var dietaryRestrictions = await _db.Users
-            .Where(u => u.Id == userId)
-            .Select(u => u.DietaryRestrictions)
-            .SingleAsync(cancellationToken);
 
         // ai-quotas (stream B), wired here 2026-08-05. The gate sits BELOW the two cheap exits
         // above — no open slots, no candidates — because neither of those calls the provider,
@@ -229,7 +235,22 @@ public class MealPlanProposalService : IMealPlanProposalService
     // every other one: a recipe a friend shared with you was visible everywhere in the app and
     // invisible to the thing planning your week. Composing the shared expression is also what
     // stops the next visibility decision from having to find this file.
-    private async Task<List<Recipe>> LoadCandidateRecipesAsync(Guid userId, CancellationToken cancellationToken)
+    //
+    // Onboarding (stream K) adds the WEIGHTING. The three segments and the top-up are
+    // unchanged; what changes is which recipes survive the cap when the pool overflows it,
+    // and in what order the survivors reach the prompt. A recipe whose cuisine the user
+    // named goes first, and within each group the existing source order (own → saved →
+    // planned → recent) is preserved exactly.
+    //
+    // Weighting and not FILTERING, deliberately. A preference is a lean, not a rule (see
+    // User.CuisinePreferences): a user who likes Thai food still eats other things, and a
+    // candidate set narrowed to three cuisines would propose the same six dishes every week.
+    // The restriction list is the thing that excludes, and it is not applied here at all.
+    //
+    // With no preferences the partition is a no-op and this method behaves exactly as it did
+    // before — same recipes, same order.
+    private async Task<List<Recipe>> LoadCandidateRecipesAsync(
+        Guid userId, IReadOnlyCollection<Cuisine> cuisinePreferences, CancellationToken cancellationToken)
     {
         var visible = RecipeVisibilityPolicy.VisibleTo(userId);
 
@@ -261,15 +282,21 @@ public class MealPlanProposalService : IMealPlanProposalService
             .Take(CandidateLimit)
             .ToListAsync(cancellationToken);
 
-        var combined = new List<Recipe>(CandidateLimit);
+        // Dedupe the personal corpus FIRST, keeping the source order, and only then weigh and
+        // cap it. Capping during the merge (as this did before stream K) would decide the
+        // survivors before any preference had been consulted, so a preferred recipe sitting
+        // in the planned segment could be trimmed by fifty earlier ones.
+        var pool = new List<Recipe>();
         var seen = new HashSet<Guid>();
         foreach (var recipe in mine.Concat(saved).Concat(planned))
         {
-            if (seen.Add(recipe.Id) && combined.Count < CandidateLimit)
+            if (seen.Add(recipe.Id))
             {
-                combined.Add(recipe);
+                pool.Add(recipe);
             }
         }
+
+        var combined = ByPreferredCuisine(pool, cuisinePreferences).Take(CandidateLimit).ToList();
 
         if (combined.Count < CandidateLimit)
         {
@@ -281,10 +308,46 @@ public class MealPlanProposalService : IMealPlanProposalService
                 .ThenByDescending(r => r.Id)
                 .Take(CandidateLimit - combined.Count)
                 .ToListAsync(cancellationToken);
-            combined.AddRange(topUp);
+            // Weighted within the top-up only, so the personal corpus still precedes
+            // strangers' recipes — the existing priority this method's header states. The
+            // top-up is reached only by a user whose own corpus is thin, and there the whole
+            // pool fits under the cap anyway, so nothing is being trimmed by recency here.
+            combined.AddRange(ByPreferredCuisine(topUp, cuisinePreferences));
         }
 
         return combined;
+    }
+
+    // Stable partition: recipes in a cuisine the user named, then everything else, with the
+    // incoming order preserved inside each group. Both halves are kept — this reorders, it
+    // never drops, which is what makes it a weighting rather than a filter.
+    private static List<Recipe> ByPreferredCuisine(
+        IEnumerable<Recipe> recipes, IReadOnlyCollection<Cuisine> preferences)
+    {
+        if (preferences.Count == 0)
+        {
+            return recipes.ToList();
+        }
+
+        var preferred = new List<Recipe>();
+        var rest = new List<Recipe>();
+        foreach (var recipe in recipes)
+        {
+            // A null CuisineType means "no particular cuisine" (see the Cuisine doc comment),
+            // which is not a near match to anything and never counts as preferred. Cuisine
+            // .Other is matched only if the user literally chose Other.
+            if (recipe.CuisineType is Cuisine cuisine && preferences.Contains(cuisine))
+            {
+                preferred.Add(recipe);
+            }
+            else
+            {
+                rest.Add(recipe);
+            }
+        }
+
+        preferred.AddRange(rest);
+        return preferred;
     }
 
     // BCL DayOfWeek is Sunday=0; the app's week is Monday-first (WeekStart).

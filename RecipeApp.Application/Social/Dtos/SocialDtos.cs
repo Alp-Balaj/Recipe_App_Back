@@ -60,7 +60,11 @@ public record UserProfileResponse(
     // every system prompt was addressing an empty list. Typing the field without giving it
     // a way in would have kept it that way, so it rides the profile pair that already
     // carries DefaultRecipeVisibility, the other account-level setting.
-    IReadOnlyList<DietaryRestriction> DietaryRestrictions);
+    IReadOnlyList<DietaryRestriction> DietaryRestrictions,
+    // Onboarding (stream K). Rides the same profile pair for the same reason the line above
+    // does — it is an account-level setting, and a preference no surface can edit after the
+    // wizard would be a preference the user is stuck with.
+    IReadOnlyList<Cuisine> CuisinePreferences);
 
 // Body of PUT /users/me — the caller updating their own account (account settings /
 // Edit profile). Username must stay unique; Bio/ProfileImageUrl clear to null when empty.
@@ -73,6 +77,22 @@ public record UpdateProfileRequest(
     // compiling. Absent means "no change requested"? No — PUT is a full replace here, like
     // every other field on this record, so an omitted list CLEARS the restrictions. The
     // default exists for the compiler, not as merge semantics.
+    List<DietaryRestriction>? DietaryRestrictions = null,
+    // Stream K, appended on exactly the same terms: full replace, defaulted for the compiler.
+    List<Cuisine>? CuisinePreferences = null);
+
+// Body of POST /users/me/onboarding — the post-register wizard's one write (stream K).
+//
+// Deliberately NOT PUT /users/me. That route is a full replace of the whole account, so a
+// wizard using it would have to send a username, a bio and a visibility it never asked
+// about — and any field the wizard forgot would be silently CLEARED. This endpoint writes
+// only what the wizard collects.
+//
+// Both lists null/empty is the SKIP case, and it is a real answer rather than a no-op: it
+// stamps OnboardingCompletedAt like any other completion, which is what stops the wizard
+// coming back. See User.OnboardingCompletedAt.
+public record CompleteOnboardingRequest(
+    List<Cuisine>? CuisinePreferences = null,
     List<DietaryRestriction>? DietaryRestrictions = null);
 
 // The feed's social envelope around each recipe (social-feed plan, cp03). Counts are

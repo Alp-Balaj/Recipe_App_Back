@@ -265,9 +265,9 @@ public class ChatService : IChatService
         string content, IReadOnlyList<ChatHistoryItem> history, Guid userId, CancellationToken cancellationToken)
     {
         var candidates = await BuildCandidatesAsync(userId, cancellationToken);
-        var dietaryRestrictions = await _db.Users
+        var preferences = await _db.Users
             .Where(u => u.Id == userId)
-            .Select(u => u.DietaryRestrictions)
+            .Select(u => new { u.DietaryRestrictions, u.CuisinePreferences })
             .SingleAsync(cancellationToken);
 
         try
@@ -275,8 +275,14 @@ public class ChatService : IChatService
             // Stream G: the restrictions are typed now, so they reach the prompt as words
             // ("gluten free") rather than as enum member names. The assistant contract stays
             // string-based — what a prompt needs is prose, not a vocabulary it must decode.
+            // Stream K: the cuisine preferences ride the same rendering, and the same record,
+            // for the reason AiPreferenceContext documents.
             return await _assistant.GetReplyAsync(
-                content, history, candidates, dietaryRestrictions.Select(Vocabulary.Describe).ToList(), cancellationToken);
+                content, history, candidates,
+                new AiPreferenceContext(
+                    preferences.DietaryRestrictions.Select(Vocabulary.Describe).ToList(),
+                    preferences.CuisinePreferences.Select(Vocabulary.Describe).ToList()),
+                cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

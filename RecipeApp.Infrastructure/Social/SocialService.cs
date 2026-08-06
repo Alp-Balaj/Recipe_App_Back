@@ -706,7 +706,8 @@ public class SocialService : ISocialService
             recipeCount,
             followedByMe,
             user.DefaultRecipeVisibility,
-            user.DietaryRestrictions));
+            user.DietaryRestrictions,
+            user.CuisinePreferences));
     }
 
     public async Task<SocialResult<UserProfileResponse>> UpdateProfileAsync(UpdateProfileRequest request, Guid currentUserId, CancellationToken cancellationToken = default)
@@ -744,6 +745,11 @@ public class SocialService : ISocialService
         user.DietaryRestrictions = request.DietaryRestrictions is null
             ? []
             : request.DietaryRestrictions.Distinct().ToList();
+        // Stream K, on the same terms as the line above — Distinct(), and a new list rather
+        // than the request's.
+        user.CuisinePreferences = request.CuisinePreferences is null
+            ? []
+            : request.CuisinePreferences.Distinct().ToList();
 
         try
         {
@@ -755,6 +761,37 @@ public class SocialService : ISocialService
             _db.ChangeTracker.Clear();
             return SocialResult<UserProfileResponse>.Conflict();
         }
+
+        return await GetUserProfileAsync(currentUserId, currentUserId, cancellationToken);
+    }
+
+    public async Task<SocialResult<UserProfileResponse>> CompleteOnboardingAsync(CompleteOnboardingRequest request, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var user = await _db.Users.SingleOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+        if (user is null)
+        {
+            return SocialResult<UserProfileResponse>.NotFound();
+        }
+
+        // Only the three fields the wizard owns. Note what is NOT here: username, bio, photo
+        // and visibility are untouched, which is the whole reason this is not PUT /users/me.
+        // Distinct() and a fresh list for the same reasons UpdateProfileAsync gives.
+        user.CuisinePreferences = request.CuisinePreferences is null
+            ? []
+            : request.CuisinePreferences.Distinct().ToList();
+        user.DietaryRestrictions = request.DietaryRestrictions is null
+            ? []
+            : request.DietaryRestrictions.Distinct().ToList();
+
+        // Stamped on every completion INCLUDING a skip — see the entity. Overwritten rather
+        // than set-once, so a second run (a user reopening the wizard) is harmless.
+        user.OnboardingCompletedAt = DateTime.UtcNow;
+
+        await _db.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation(
+            "User {UserId} completed onboarding with {CuisineCount} cuisine preferences and {RestrictionCount} restrictions.",
+            currentUserId, user.CuisinePreferences.Count, user.DietaryRestrictions.Count);
 
         return await GetUserProfileAsync(currentUserId, currentUserId, cancellationToken);
     }

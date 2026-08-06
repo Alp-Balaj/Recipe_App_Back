@@ -18,5 +18,20 @@ public class UpdateProfileRequestValidator : AbstractValidator<UpdateProfileRequ
         // through model binding (the JsonStringEnumConverter allows integers) and land in
         // jsonb, then reach an AI system prompt as a meaningless constraint.
         RuleForEach(x => x.DietaryRestrictions).IsInEnum().When(x => x.DietaryRestrictions is not null);
+        // Stream K: same guard, same reason — an undefined Cuisine would bind, land in jsonb
+        // and then be weighted against a candidate set it can never match.
+        RuleForEach(x => x.CuisinePreferences).IsInEnum().When(x => x.CuisinePreferences is not null);
+    }
+}
+
+// Validates POST /users/me/onboarding. Both lists are optional — omitting both IS the skip
+// case — so the only rule is that whatever IS sent names real members, exactly as the
+// profile validator requires above.
+public class CompleteOnboardingRequestValidator : AbstractValidator<CompleteOnboardingRequest>
+{
+    public CompleteOnboardingRequestValidator()
+    {
+        RuleForEach(x => x.CuisinePreferences).IsInEnum().When(x => x.CuisinePreferences is not null);
+        RuleForEach(x => x.DietaryRestrictions).IsInEnum().When(x => x.DietaryRestrictions is not null);
     }
 }

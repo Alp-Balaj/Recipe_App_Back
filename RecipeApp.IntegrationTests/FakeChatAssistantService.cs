@@ -29,7 +29,7 @@ public sealed class FakeChatAssistantService : IChatAssistantService
         string userMessage,
         IReadOnlyList<ChatHistoryItem> recentHistory,
         IReadOnlyList<ChatCandidateRecipe> candidates,
-        IReadOnlyList<string> dietaryRestrictions,
+        AiPreferenceContext preferences,
         CancellationToken cancellationToken = default)
     {
         if (userMessage.Contains(FailSentinel, StringComparison.Ordinal))

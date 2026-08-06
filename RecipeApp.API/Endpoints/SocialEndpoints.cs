@@ -215,6 +215,22 @@ public static class SocialEndpoints
         })
         .AddEndpointFilter<ValidationFilter<UpdateProfileRequest>>();
 
+        // Onboarding (stream K) — the post-register wizard's write. Another literal "me"
+        // route, above the {id:guid} matchers with the rest. POST rather than PUT because
+        // it is not a replace of any addressable resource: it records that the wizard was
+        // answered (or skipped) and stores what it collected. Returns the refreshed profile,
+        // like PUT /me, so the SPA can seed account settings without a second call.
+        group.MapPost("/me/onboarding", async (CompleteOnboardingRequest request, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.CompleteOnboardingAsync(request, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                SocialOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        })
+        .AddEndpointFilter<ValidationFilter<CompleteOnboardingRequest>>();
+
         group.MapPost("/{id:guid}/follow", async (Guid id, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var userId = GetUserId(user);
