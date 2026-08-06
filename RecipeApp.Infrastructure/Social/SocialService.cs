@@ -451,22 +451,26 @@ public class SocialService : ISocialService
         row.Rating = rating;
         row.RatedAt = now;
 
-        // Gamification: AiRecipeCookedAndRated (+15) to the author, ONLY on the transition
+        // Gamification: RecipeCookedAndRated (+15) to the author, ONLY on the transition
         // from unrated to rated. Re-rating (5 -> 1 -> 5) must not award again, or rank is
         // farmable by toggling a star.
         //
         // Stream E note (2026-07-31): Recipe.IsAiGenerated now EXISTS, so the "when the
         // generator lands" half of this comment is spent — but the award is deliberately
         // NOT narrowed to flagged recipes, and stream E did not narrow it. Narrowing it
-        // alone would silently strip the +15 from every hand-written recipe; doing it
-        // honestly needs a sibling RankEvent for the non-AI case, which is a change to the
-        // scoring model that no stream owns. What D1 actually required is already true:
-        // generation awards nothing on creation (RecipeGenerationService makes no rank
-        // call), and a generated recipe first scores here, when somebody cooked it and
-        // said what they thought.
+        // alone would silently strip the +15 from every hand-written recipe. What D1
+        // actually required is already true: generation awards nothing on creation
+        // (RecipeGenerationService makes no rank call), and a generated recipe first scores
+        // here, when somebody cooked it and said what they thought.
+        //
+        // Stream H closed that out on 2026-08-06 by RENAMING the member —
+        // AiRecipeCookedAndRated -> RecipeCookedAndRated. E's note reached for "a sibling
+        // RankEvent for the non-AI case", which would have been the wrong shape: there was
+        // never an AI case and a non-AI case, only one event whose name claimed otherwise.
+        // The name now says what the line below has always done.
         if (wasUnrated)
         {
-            await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.AiRecipeCookedAndRated, cancellationToken);
+            await AwardAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeCookedAndRated, cancellationToken);
         }
 
         await SaveIgnoringDuplicateAsync(cancellationToken);
@@ -494,7 +498,7 @@ public class SocialService : ISocialService
             // never rated never awarded, so removing it must not dock the author.
             if (hadRating)
             {
-                await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.AiRecipeCookedAndRated, cancellationToken);
+                await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeCookedAndRated, cancellationToken);
             }
 
             await _db.SaveChangesAsync(cancellationToken);

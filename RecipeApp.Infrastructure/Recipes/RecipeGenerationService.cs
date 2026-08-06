@@ -21,7 +21,7 @@ namespace RecipeApp.Infrastructure.Recipes;
 // RecipeService.CreateRecipeAsync: that method awards RankEvent.RecipeCreated (+20), and a
 // generator that awarded it would make rank farmable by holding down a button. Generation
 // therefore writes the recipe WITHOUT touching CookingRank. The points are not lost, they
-// are deferred — SocialService.RateRecipeAsync awards AiRecipeCookedAndRated (+15) on the
+// are deferred — SocialService.RateRecipeAsync awards RecipeCookedAndRated (+15) on the
 // null -> rated transition, so a generated recipe scores when somebody actually cooked it
 // and said what they thought. The exploit and the once-dead enum member cancel out.
 public class RecipeGenerationService : IRecipeGenerationService

@@ -11,7 +11,7 @@ public class RankingServiceTests
     [InlineData(RankEvent.RecipeReceivedComment, 3)]
     [InlineData(RankEvent.CommentReceivedLike, 1)]
     [InlineData(RankEvent.SavedByOtherUser, 8)]
-    [InlineData(RankEvent.AiRecipeCookedAndRated, 15)]
+    [InlineData(RankEvent.RecipeCookedAndRated, 15)]
     public void PointsFor_ReturnsExpectedPointsForEachEvent(RankEvent rankEvent, int expectedPoints)
     {
         Assert.Equal(expectedPoints, RankingService.PointsFor(rankEvent));

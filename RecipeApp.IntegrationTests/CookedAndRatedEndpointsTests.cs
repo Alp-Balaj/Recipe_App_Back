@@ -11,7 +11,7 @@ using RecipeApp.Infrastructure.Persistence;
 namespace RecipeApp.IntegrationTests;
 
 // open-loops slice 1: "I cooked this" + rating, and the rank award that finally makes
-// RankEvent.AiRecipeCookedAndRated reachable. Fresh users/recipes per test (shared
+// RankEvent.RecipeCookedAndRated reachable. Fresh users/recipes per test (shared
 // Testcontainers DB); rank is read back off the author's public profile because that is
 // where the SPA reads it too.
 public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : IClassFixture<IntegrationTestFactory>

@@ -19,7 +19,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<Like> Likes => Set<Like>();
     public DbSet<SavedRecipe> SavedRecipes => Set<SavedRecipe>();
     // open-loops slice 1: the two interactions that make CommentReceivedLike and
-    // AiRecipeCookedAndRated reachable. Both are queried directly (count subqueries on
+    // RecipeCookedAndRated reachable. Both are queried directly (count subqueries on
     // the social envelope), so both are promoted rather than left nav-only.
     public DbSet<CommentLike> CommentLikes => Set<CommentLike>();
     public DbSet<CookedRecipe> CookedRecipes => Set<CookedRecipe>();
