@@ -45,9 +45,35 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
 
         Assert.Equal(2, stored.Steps.Count);
         Assert.Equal("Mix the flour with water.", stored.Steps[0].Description);
-        Assert.Equal(600, stored.Steps[1].TimerSeconds);
+        Assert.Equal(600, stored.Steps[1].DurationSeconds);
+
+        // Stream J's typed half of the same round-trip.
+        Assert.Equal([0], stored.Steps[0].IngredientIndexes);
+        Assert.Null(stored.Steps[0].Temperature);
+        Assert.Empty(stored.Steps[1].IngredientIndexes);
+        Assert.Equal(220, stored.Steps[1].Temperature!.Value);
+        Assert.Equal(TemperatureUnit.Celsius, stored.Steps[1].Temperature!.Unit);
 
         Assert.Equal(new List<RecipeTag> { RecipeTag.Vegan, RecipeTag.Quick }, stored.Tags);
+    }
+
+    // Stream J, decision D16 at the boundary. The unit tests prove the RULE; this proves the
+    // rule is actually wired into the endpoint's validation filter, which is the part that
+    // makes "every stored index is in range" true of the database rather than of a class.
+    [Fact]
+    public async Task CreateRecipe_WithAStepReferencingAMissingIngredient_ReturnsBadRequest()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var request = ValidCreateRecipeRequest() with
+        {
+            // One ingredient line, so index 3 is a reference to nothing.
+            Steps = [new RecipeStep { StepNumber = 1, Description = "Fold it in.", IngredientIndexes = [3] }],
+        };
+
+        var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
@@ -296,7 +322,7 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
 
         var step = Assert.Single(stored.Steps);
         Assert.Equal("Knead the rye dough and bake.", step.Description);
-        Assert.Equal(1200, step.TimerSeconds);
+        Assert.Equal(1200, step.DurationSeconds);
 
         Assert.Equal(new List<RecipeTag> { RecipeTag.Comfort, RecipeTag.Baking }, stored.Tags);
     }
@@ -638,10 +664,19 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         ImageUrl: null,
         Visibility: RecipeVisibility.Public,
         Ingredients: [new RecipeIngredient { Name = "flour", Quantity = 2.5m, Unit = UnitOfMeasure.Cup }],
+        // Stream J: a typed step. Step 1 consumes the only ingredient line (D16's index
+        // reference), step 2 rests with a duration and no references, and the bake carries
+        // a temperature — the three shapes the round-trip below asserts survive Postgres.
         Steps:
         [
-            new RecipeStep { StepNumber = 1, Description = "Mix the flour with water." },
-            new RecipeStep { StepNumber = 2, Description = "Rest the dough.", TimerSeconds = 600 },
+            new RecipeStep { StepNumber = 1, Description = "Mix the flour with water.", IngredientIndexes = [0] },
+            new RecipeStep
+            {
+                StepNumber = 2,
+                Description = "Rest the dough.",
+                DurationSeconds = 600,
+                Temperature = new StepTemperature { Value = 220, Unit = TemperatureUnit.Celsius },
+            },
         ],
         Tags: [RecipeTag.Vegan, RecipeTag.Quick]);
 
@@ -659,6 +694,6 @@ public class RecipeEndpointsTests(IntegrationTestFactory factory) : IClassFixtur
         ImageUrl: "https://example.test/rye.jpg",
         Visibility: RecipeVisibility.Public,
         Ingredients: [new RecipeIngredient { Name = "rye flour", Quantity = 3m, Unit = UnitOfMeasure.Cup }],
-        Steps: [new RecipeStep { StepNumber = 1, Description = "Knead the rye dough and bake.", TimerSeconds = 1200 }],
+        Steps: [new RecipeStep { StepNumber = 1, Description = "Knead the rye dough and bake.", DurationSeconds = 1200 }],
         Tags: [RecipeTag.Comfort, RecipeTag.Baking]);
 }

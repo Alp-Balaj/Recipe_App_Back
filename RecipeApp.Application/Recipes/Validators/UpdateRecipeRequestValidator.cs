@@ -38,6 +38,23 @@ public class UpdateRecipeRequestValidator : AbstractValidator<UpdateRecipeReques
         {
             step.RuleFor(s => s.StepNumber).GreaterThan(0);
             step.RuleFor(s => s.Description).NotEmpty();
+
+            // Stream J's typed step — see CreateRecipeRequestValidator for the reasoning.
+            step.RuleFor(s => s.DurationSeconds)
+                .InclusiveBetween(1, RecipeStepRules.MaxDurationSeconds)
+                .When(s => s.DurationSeconds is not null);
+
+            step.RuleFor(s => s.Temperature)
+                .Must(RecipeStepRules.TemperatureIsValid)
+                .WithMessage(RecipeStepRules.TemperatureMessage);
         });
+
+        // Decision D16. This one matters MORE on the update path than the create path: an
+        // edit is where an ingredient line gets deleted out from under a step's reference,
+        // and PUT being a full replace is exactly what lets the pair be checked together.
+        RuleForEach(x => x.Steps)
+            .Must((request, step) =>
+                RecipeStepRules.IngredientIndexesAreValid(step, request.Ingredients?.Count ?? 0))
+            .WithMessage(RecipeStepRules.IngredientIndexesMessage);
     }
 }
