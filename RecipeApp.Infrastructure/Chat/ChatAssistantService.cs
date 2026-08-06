@@ -30,10 +30,10 @@ public class ChatAssistantService : IChatAssistantService
         string userMessage,
         IReadOnlyList<ChatHistoryItem> recentHistory,
         IReadOnlyList<ChatCandidateRecipe> candidates,
-        IReadOnlyList<string> dietaryRestrictions,
+        AiPreferenceContext preferences,
         CancellationToken cancellationToken = default)
     {
-        var systemPrompt = BuildSystemPrompt(candidates, dietaryRestrictions);
+        var systemPrompt = BuildSystemPrompt(candidates, preferences);
 
         // Trim to the last M messages; the caller controls how many it hands us, but we cap
         // defensively so the prompt can't grow without bound.
@@ -90,8 +90,9 @@ public class ChatAssistantService : IChatAssistantService
 
     private static string BuildSystemPrompt(
         IReadOnlyList<ChatCandidateRecipe> candidates,
-        IReadOnlyList<string> dietaryRestrictions)
+        AiPreferenceContext preferences)
     {
+        var dietaryRestrictions = preferences.DietaryRestrictions;
         var sb = new StringBuilder();
         sb.AppendLine("You are a helpful cooking assistant for a recipe app. Help the user find recipes to cook.");
         sb.AppendLine("Recommend recipes ONLY from the candidate list below — never invent recipes or recipe ids.");
@@ -103,6 +104,21 @@ public class ChatAssistantService : IChatAssistantService
         {
             sb.Append("Respect the user's dietary restrictions strictly: ");
             sb.AppendLine(string.Join(", ", dietaryRestrictions));
+            sb.AppendLine();
+        }
+
+        // Onboarding (stream K). Note how differently this is worded from the restriction
+        // line above, and that the difference is the feature. A restriction is a rule; a
+        // preference is a tiebreak. Phrased as a constraint ("only suggest Thai food") the
+        // model would answer "something quick with chicken" by refusing every candidate that
+        // did not match, which is both wrong and indistinguishable from a broken candidate
+        // set. So the sentence explicitly licenses ignoring it whenever the request says
+        // otherwise — the user's actual question always outranks their standing taste.
+        if (preferences.CuisinePreferences.Count > 0)
+        {
+            sb.Append("The user tends to prefer these cuisines: ");
+            sb.AppendLine(string.Join(", ", preferences.CuisinePreferences));
+            sb.AppendLine("Use that only to break ties between candidates that fit equally well. It is a mild preference, NOT a filter: never withhold or rank down a recipe that suits what the user actually asked for just because its cuisine is not on that list, and ignore the preference entirely whenever the user names a cuisine, dish or ingredient themselves.");
             sb.AppendLine();
         }
 

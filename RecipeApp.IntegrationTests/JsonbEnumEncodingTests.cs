@@ -83,6 +83,38 @@ public class JsonbEnumEncodingTests(IntegrationTestFactory factory) : IClassFixt
         Assert.DoesNotContain("1", json);
     }
 
+    // Onboarding (stream K), and the reason this file was worth extending rather than
+    // trusting the round-trip in OnboardingEndpointTests. CuisinePreferences is a primitive
+    // collection like DietaryRestrictions above, so it needs EF's OWN element conversion —
+    // the RecipeAppDataSource converter does not reach it. Miss that and the column lands as
+    // [19, 11] with a symmetric read that hides the problem completely, until Cuisine gains a
+    // member and every stored preference silently shifts one place.
+    //
+    // Thai is ordinal 19 and Korean 11, so the negative assertions below are what actually
+    // fail if the conversion is dropped.
+    [Fact]
+    public async Task Cuisine_preferences_are_stored_as_names_not_ordinals()
+    {
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var response = await client.PostAsJsonAsync(
+            "/users/me/onboarding",
+            new CompleteOnboardingRequest(CuisinePreferences: [Cuisine.Thai, Cuisine.Korean]),
+            TestJson.Options);
+        response.EnsureSuccessStatusCode();
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var json = await ReadScalarAsync(
+            db, $"""SELECT "CuisinePreferences"::text FROM "Users" WHERE "Id" = '{auth.UserId}'""");
+
+        Assert.Contains("\"Thai\"", json);
+        Assert.Contains("\"Korean\"", json);
+        Assert.DoesNotContain("19", json);
+        Assert.DoesNotContain("11", json);
+    }
+
     // The jsonpath the SearchVector generated column depends on is '$[*].Name' — keeping
     // RecipeIngredient.Name a string is what leaves that column and its GIN index untouched
     // (sharp edge 2). This is the assertion that the typing pass did not disturb it.

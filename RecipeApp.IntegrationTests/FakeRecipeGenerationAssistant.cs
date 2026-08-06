@@ -37,7 +37,7 @@ public sealed class FakeRecipeGenerationAssistant : IRecipeGenerationAssistant
     public Task<GeneratedRecipe> GenerateAsync(
         string request,
         IReadOnlyList<ChatHistoryItem> history,
-        IReadOnlyList<string> dietaryRestrictions,
+        AiPreferenceContext preferences,
         CancellationToken cancellationToken = default)
     {
         if (request.Contains(FailSentinel, StringComparison.Ordinal))
@@ -47,12 +47,20 @@ public sealed class FakeRecipeGenerationAssistant : IRecipeGenerationAssistant
 
         // Still a pure function of the inputs — no mutable state, safe under the shared
         // TestServer (see the class note).
-        var restrictions = dietaryRestrictions.Count == 0 ? "none" : string.Join('/', dietaryRestrictions);
+        var restrictions = preferences.DietaryRestrictions.Count == 0
+            ? "none"
+            : string.Join('/', preferences.DietaryRestrictions);
+        // Stream K: the cuisine half is echoed on the same terms, which is what lets an
+        // integration test assert that a preference actually REACHED the generator rather
+        // than only that it was stored.
+        var cuisines = preferences.CuisinePreferences.Count == 0
+            ? "none"
+            : string.Join('/', preferences.CuisinePreferences);
         var ingredientName = IngredientFrom(request);
 
         var draft = new GeneratedRecipeDraft(
             Title: $"Generated: {request}",
-            Description: $"A recipe invented for the integration suite. history-{history.Count} restrictions-{restrictions}",
+            Description: $"A recipe invented for the integration suite. history-{history.Count} restrictions-{restrictions} cuisines-{cuisines}",
             PrepTimeMinutes: 5,
             CookTimeMinutes: 10,
             Servings: 2,

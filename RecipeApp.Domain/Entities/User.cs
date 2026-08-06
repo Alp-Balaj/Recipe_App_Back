@@ -29,6 +29,19 @@ public class User
     // Typed in stream G (D10). These reach every AI system prompt as an absolute constraint,
     // so a free-text typo was a restriction the model was asked to honour and could not.
     public List<DietaryRestriction> DietaryRestrictions { get; set; } = [];
+    // Onboarding (stream K). The taste half of the pair above, and deliberately NOT the same
+    // kind of thing: a restriction is a rule the app must never break, a preference is a lean
+    // it should follow when nothing else decides. Every consumer treats them that way — the
+    // three readers weight or nudge with this and constrain with the list above, and none of
+    // them ever FILTERS on a preference. Read by propose-week's candidate weighting, the
+    // generator's defaults and the chat prompt; deliberately NOT by Discover or the feed,
+    // whose ordering stays what the user asked for rather than what we guessed.
+    public List<Cuisine> CuisinePreferences { get; set; } = [];
+    // Null until the post-register wizard is finished OR skipped — both stamp it, because
+    // "I chose nothing" and "I have not been asked" are different states and only the second
+    // one should ever raise the wizard again. Deriving this from the two lists being empty
+    // would nag forever the user whose honest answer is "no preferences".
+    public DateTime? OnboardingCompletedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Recipes this user created

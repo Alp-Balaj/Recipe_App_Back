@@ -57,7 +57,7 @@ public class ChatAssistantServiceTests
             "something warm, no meat",
             history ?? Array.Empty<ChatHistoryItem>(),
             candidates ?? TwoCandidates(),
-            dietary ?? Array.Empty<string>());
+            new AiPreferenceContext(dietary ?? [], []));
     }
 
     [Fact]
@@ -151,13 +151,58 @@ public class ChatAssistantServiceTests
             "warm and vegetarian",
             Array.Empty<ChatHistoryItem>(),
             TwoCandidates(),
-            new[] { "vegetarian", "nut-free" });
+            new AiPreferenceContext(["vegetarian", "nut-free"], []));
 
         var prompt = caller.CapturedSystemPrompt!;
         Assert.Contains(RecipeA.ToString(), prompt);          // candidate id is serialized in
         Assert.Contains("Tomato Soup", prompt);               // candidate title
         Assert.Contains("vegetarian", prompt);                // dietary restriction
         Assert.Contains("nut-free", prompt);
+    }
+
+    // ── Cuisine preferences (onboarding, stream K) ───────────────────────────────────────
+    //
+    // The value of these two is the CONTRAST they assert. A preference that reached the
+    // prompt worded like a restriction would be a regression no other test could see: the
+    // suggestions would still be well-formed and still be real candidate ids, they would just
+    // quietly stop including anything outside the user's listed cuisines. So the assertions
+    // are on the framing ("prefer", "NOT a filter"), not merely on the cuisine names being
+    // present somewhere.
+    [Fact]
+    public async Task SystemPrompt_CarriesCuisinePreferences_AsAPreferenceNotAConstraint()
+    {
+        var caller = new FakeCaller("""{"reply":"ok","suggestedRecipeIds":[]}""");
+        var service = new ChatAssistantService(caller);
+
+        await service.GetReplyAsync(
+            "something warm",
+            Array.Empty<ChatHistoryItem>(),
+            TwoCandidates(),
+            new AiPreferenceContext(["vegetarian"], ["Thai", "Middle Eastern"]));
+
+        var prompt = caller.CapturedSystemPrompt!;
+        Assert.Contains("Thai, Middle Eastern", prompt);
+        Assert.Contains("prefer", prompt);
+        Assert.Contains("NOT a filter", prompt);
+
+        // The restriction keeps its own, stronger framing — the two blocks must not have
+        // collapsed into one sentence that treats both the same way.
+        Assert.Contains("Respect the user's dietary restrictions strictly: vegetarian", prompt);
+    }
+
+    [Fact]
+    public async Task SystemPrompt_OmitsThePreferenceBlock_WhenNoCuisinesAreChosen()
+    {
+        var caller = new FakeCaller("""{"reply":"ok","suggestedRecipeIds":[]}""");
+        var service = new ChatAssistantService(caller);
+
+        await service.GetReplyAsync(
+            "something warm", Array.Empty<ChatHistoryItem>(), TwoCandidates(), AiPreferenceContext.None);
+
+        // A user who skipped onboarding must not get an empty "prefers these cuisines:" line
+        // — a dangling label is a prompt the model has to interpret, and the honest reading of
+        // "prefers: (nothing)" is not one anybody intends.
+        Assert.DoesNotContain("tends to prefer", caller.CapturedSystemPrompt!);
     }
 
     [Fact]
@@ -170,7 +215,7 @@ public class ChatAssistantServiceTests
         var caller = new FakeCaller("""{"reply":"ok","suggestedRecipeIds":[]}""");
         var service = new ChatAssistantService(caller);
 
-        await service.GetReplyAsync("next", history, TwoCandidates(), Array.Empty<string>());
+        await service.GetReplyAsync("next", history, TwoCandidates(), AiPreferenceContext.None);
 
         Assert.Equal(20, caller.CapturedHistory!.Count);
         Assert.Equal("msg 5", caller.CapturedHistory[0].Content);   // oldest 5 dropped
@@ -190,7 +235,7 @@ public class ChatAssistantServiceTests
         using var cts = new CancellationTokenSource();
 
         await service.GetReplyAsync(
-            "something warm", Array.Empty<ChatHistoryItem>(), TwoCandidates(), Array.Empty<string>(), cts.Token);
+            "something warm", Array.Empty<ChatHistoryItem>(), TwoCandidates(), AiPreferenceContext.None, cts.Token);
 
         Assert.Null(caller.CapturedSchema);
     }

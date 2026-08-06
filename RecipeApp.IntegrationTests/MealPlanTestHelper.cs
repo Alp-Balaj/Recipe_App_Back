@@ -53,7 +53,10 @@ internal static class MealPlanTestHelper
         HttpClient client,
         string title,
         List<RecipeIngredient> ingredients,
-        RecipeVisibility visibility = RecipeVisibility.Public)
+        RecipeVisibility visibility = RecipeVisibility.Public,
+        // Stream K: the candidate-weighting tests need recipes that differ by cuisine.
+        // Defaulted to what every existing caller already got.
+        Cuisine cuisine = Cuisine.Other)
     {
         var request = new CreateRecipeRequest(
             Title: title,
@@ -62,7 +65,7 @@ internal static class MealPlanTestHelper
             CookTimeMinutes: 20,
             Servings: 4,
             Difficulty: DifficultyLevel.Easy,
-            CuisineType: Cuisine.Other,
+            CuisineType: cuisine,
             CaloriesPerServing: 210,
             ImageUrl: null,
             Visibility: visibility,

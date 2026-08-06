@@ -123,7 +123,7 @@ public class AuthService : IAuthService
     {
         return await _db.Users
             .Where(u => u.Id == userId)
-            .Select(u => new MeResponse(u.Id, u.Username, u.Role))
+            .Select(u => new MeResponse(u.Id, u.Username, u.Role, u.OnboardingCompletedAt == null))
             .SingleOrDefaultAsync(cancellationToken);
     }
 
