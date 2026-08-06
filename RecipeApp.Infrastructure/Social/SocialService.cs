@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using RecipeApp.Application.Common;
+using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Application.Social;
@@ -19,11 +20,16 @@ namespace RecipeApp.Infrastructure.Social;
 public class SocialService : ISocialService
 {
     private readonly ApplicationDbContext _db;
+    private readonly IContentModerationQueue _moderationQueue;
     private readonly ILogger<SocialService> _logger;
 
-    public SocialService(ApplicationDbContext db, ILogger<SocialService> logger)
+    public SocialService(
+        ApplicationDbContext db,
+        IContentModerationQueue moderationQueue,
+        ILogger<SocialService> logger)
     {
         _db = db;
+        _moderationQueue = moderationQueue;
         _logger = logger;
     }
 
@@ -194,6 +200,12 @@ public class SocialService : ISocialService
 
         _logger.LogInformation("User {UserId} commented on recipe {RecipeId}.", currentUserId, recipeId);
 
+        // Stream X: offer the comment for classification, after the commit and outside the
+        // unit of work. Never inline — a comment must post at the speed of a database insert,
+        // not at the speed of a model round-trip, and a classifier that is down must not be
+        // able to turn "post a comment" into a 500.
+        _moderationQueue.TryEnqueue(new ModerationWorkItem(ReportTargetType.Comment, comment.Id));
+
         var username = await _db.Users
             .Where(u => u.Id == currentUserId)
             .Select(u => u.Username)
@@ -278,6 +290,10 @@ public class SocialService : ISocialService
         comment.Content = content;
         comment.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(cancellationToken);
+
+        // Stream X: same reasoning as the recipe edit path — a create-only check is bypassed
+        // by posting something bland and editing it afterwards.
+        _moderationQueue.TryEnqueue(new ModerationWorkItem(ReportTargetType.Comment, comment.Id));
 
         var username = await _db.Users
             .Where(u => u.Id == currentUserId)

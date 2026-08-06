@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NpgsqlTypes;
+using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
@@ -15,12 +16,18 @@ public class RecipeService : IRecipeService
 {
     private readonly ApplicationDbContext _db;
     private readonly IIngredientResolver _ingredientResolver;
+    private readonly IContentModerationQueue _moderationQueue;
     private readonly ILogger<RecipeService> _logger;
 
-    public RecipeService(ApplicationDbContext db, IIngredientResolver ingredientResolver, ILogger<RecipeService> logger)
+    public RecipeService(
+        ApplicationDbContext db,
+        IIngredientResolver ingredientResolver,
+        IContentModerationQueue moderationQueue,
+        ILogger<RecipeService> logger)
     {
         _db = db;
         _ingredientResolver = ingredientResolver;
+        _moderationQueue = moderationQueue;
         _logger = logger;
     }
 
@@ -45,6 +52,15 @@ public class RecipeService : IRecipeService
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User {UserId} created recipe {RecipeId}.", createdByUserId, recipe.Id);
+
+        // Stream X: offer the new recipe for classification — AFTER the commit, deliberately.
+        // TryEnqueue is synchronous, never blocks, never throws and never touches the
+        // database; its result is ignored because there is no failure here the author could
+        // act on and nothing to roll back. If the queue is full, or moderation is disabled,
+        // or the classifier is down, this recipe was still created and this method still
+        // returns the same response it always did.
+        _moderationQueue.TryEnqueue(new ModerationWorkItem(ReportTargetType.Recipe, recipe.Id));
+
         return RecipeMapper.ToResponse(recipe);
     }
 
@@ -220,6 +236,12 @@ public class RecipeService : IRecipeService
         await _ingredientResolver.ResolveAsync(recipe.Ingredients, cancellationToken);
 
         await _db.SaveChangesAsync(cancellationToken);
+
+        // Stream X: an EDIT is classified too, and this is not scope creep — PUT is a full
+        // replace, so "create something innocuous, then edit it into the real payload" is the
+        // one-step bypass of a create-only check. The worker re-reads by id, so it always
+        // judges the current text rather than whatever was enqueued.
+        _moderationQueue.TryEnqueue(new ModerationWorkItem(ReportTargetType.Recipe, recipe.Id));
 
         return RecipeResult<RecipeResponse>.Success(RecipeMapper.ToResponse(recipe));
     }

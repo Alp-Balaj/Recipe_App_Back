@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Chat.Dtos;
+using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
@@ -35,6 +36,7 @@ public class RecipeGenerationService : IRecipeGenerationService
     private readonly IAiUsageService _aiUsage;
     private readonly IIngredientResolver _ingredientResolver;
     private readonly IDietaryCheckService _dietaryChecks;
+    private readonly IContentModerationQueue _moderationQueue;
     private readonly ILogger<RecipeGenerationService> _logger;
 
     public RecipeGenerationService(
@@ -43,6 +45,7 @@ public class RecipeGenerationService : IRecipeGenerationService
         IAiUsageService aiUsage,
         IIngredientResolver ingredientResolver,
         IDietaryCheckService dietaryChecks,
+        IContentModerationQueue moderationQueue,
         ILogger<RecipeGenerationService> logger)
     {
         _db = db;
@@ -50,6 +53,7 @@ public class RecipeGenerationService : IRecipeGenerationService
         _aiUsage = aiUsage;
         _ingredientResolver = ingredientResolver;
         _dietaryChecks = dietaryChecks;
+        _moderationQueue = moderationQueue;
         _logger = logger;
     }
 
@@ -134,6 +138,12 @@ public class RecipeGenerationService : IRecipeGenerationService
         _logger.LogInformation(
             "User {UserId} generated recipe {RecipeId} from conversation {ConversationId}.",
             userId, recipe.Id, request.ConversationId);
+
+        // Stream X: a generated recipe is classified like any other. It is tempting to exempt
+        // it — our own model wrote it — but the PROMPT is the user's, so this is the one
+        // recipe path where a person can steer the text without typing it, and D1 makes the
+        // result an ordinary user-owned row indistinguishable from a typed one thereafter.
+        _moderationQueue.TryEnqueue(new ModerationWorkItem(ReportTargetType.Recipe, recipe.Id));
 
         // Stream H: verify what the model was told. author.DietaryRestrictions went into the
         // prompt above; this runs the catalogue-backed check over what came back. It has to

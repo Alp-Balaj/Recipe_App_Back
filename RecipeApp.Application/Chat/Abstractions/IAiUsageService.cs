@@ -39,6 +39,25 @@ public static class AiUsageLanes
     // matters: the remaining-budget figure the chat surface shows was wrong for every user who
     // had proposed a week.
     public const string MealPlanProposal = "meal-plan-proposal";
+
+    // Stream X: the content-moderation classifier. This lane is unlike the three above in a
+    // way that matters more than its name.
+    //
+    // Every other lane bills the person who pressed the button, and gates on their budget
+    // BEFORE spending — GetBudgetAsync(...).IsExhausted returns 429 and no money is spent.
+    // A moderation pass is spent on the platform's behalf against content someone ELSE wrote,
+    // so there is no such person to gate on. Naively reusing the pre-call gate against the
+    // content's author would let a user disable moderation of their own content by exhausting
+    // their own quota — the failure mode is exactly backwards, because the author of the
+    // content most worth checking is the one most likely to be hammering the API.
+    //
+    // So: the spend is RECORDED against SystemUsers.ModerationId so it stays attributable and
+    // shows up in the same accounting as everything else, and NOTHING is gated on it. The
+    // ceiling that keeps this lane bounded is the queue's capacity, not a budget — see
+    // ContentModerationQueue. Note the consequence for anyone reading the numbers later: the
+    // moderation user's daily "budget" will read as wildly exhausted and that is meaningless,
+    // because no code path ever consults it.
+    public const string ContentModeration = "content-moderation";
 }
 
 // A user's AI budget for one UTC day. The window is the calendar day in UTC — simple to
