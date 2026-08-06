@@ -34,6 +34,7 @@ public class RecipeGenerationService : IRecipeGenerationService
     private readonly IRecipeGenerationAssistant _assistant;
     private readonly IAiUsageService _aiUsage;
     private readonly IIngredientResolver _ingredientResolver;
+    private readonly IDietaryCheckService _dietaryChecks;
     private readonly ILogger<RecipeGenerationService> _logger;
 
     public RecipeGenerationService(
@@ -41,12 +42,14 @@ public class RecipeGenerationService : IRecipeGenerationService
         IRecipeGenerationAssistant assistant,
         IAiUsageService aiUsage,
         IIngredientResolver ingredientResolver,
+        IDietaryCheckService dietaryChecks,
         ILogger<RecipeGenerationService> logger)
     {
         _db = db;
         _assistant = assistant;
         _aiUsage = aiUsage;
         _ingredientResolver = ingredientResolver;
+        _dietaryChecks = dietaryChecks;
         _logger = logger;
     }
 
@@ -128,13 +131,26 @@ public class RecipeGenerationService : IRecipeGenerationService
             "User {UserId} generated recipe {RecipeId} from conversation {ConversationId}.",
             userId, recipe.Id, request.ConversationId);
 
+        // Stream H: verify what the model was told. author.DietaryRestrictions went into the
+        // prompt above; this runs the catalogue-backed check over what came back. It has to
+        // happen AFTER ResolveAsync — an unresolved line has no catalogue name to test, and
+        // running before resolution would report every line as uncheckable.
+        //
+        // The finding does NOT block the write, deliberately. D1 makes the generated recipe an
+        // ordinary user-owned row, and refusing to save one because a keyword rule fired would
+        // give this check an authority its own class comment says it must not have. The user
+        // is told, and owns the row either way.
+        var checksByRecipe = await _dietaryChecks.CheckAsync(
+            [recipe], author.DietaryRestrictions, cancellationToken);
+
         var budget = await _aiUsage.GetBudgetAsync(userId, cancellationToken);
         return RecipeGenerationResult<GenerateRecipeResponse>.Success(new GenerateRecipeResponse(
             RecipeMapper.ToResponse(recipe),
             new AiBudgetResponse(
                 budget.DailyCallLimit, budget.CallsUsed, budget.CallsRemaining,
                 budget.DailyTokenLimit, budget.TokensUsed, budget.TokensRemaining,
-                budget.ResetsAtUtc)));
+                budget.ResetsAtUtc),
+            checksByRecipe[recipe.Id]));
     }
 
     // The trailing HistoryLimit messages of the source conversation, oldest first for the

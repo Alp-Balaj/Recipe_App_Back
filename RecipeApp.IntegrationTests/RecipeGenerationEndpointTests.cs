@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.Chat.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
+using RecipeApp.Application.Social.Dtos;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -226,6 +227,86 @@ public class RecipeGenerationEndpointTests(IntegrationTestFactory factory) : ICl
         var response = await client.PostAsJsonAsync("/recipes/generate", Request(), TestJson.Options);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    // --- dietary verification at the AI boundary (stream H) ----------------------------------
+
+    [Fact]
+    public async Task Generate_VerifiesTheGeneratedIngredientsAgainstTheCallersRestrictions()
+    {
+        // The sharper of the two lanes: propose-week is grounded in recipes that already
+        // exist, but the generator INVENTS the ingredient list, and its trust boundary is
+        // range testing rather than membership. Nothing stopped it writing cheese into a
+        // recipe for someone who said "vegan" — the model was told, and nobody checked.
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        await SetRestrictionsAsync(client, auth.Username, [DietaryRestriction.Vegan]);
+
+        var result = await GenerateAsync(client, Request(
+            $"something creamy {FakeRecipeGenerationAssistant.IngredientSentinel}cheddar__"));
+
+        var check = Assert.Single(result.DietaryChecks);
+        Assert.Equal(DietaryRestriction.Vegan, check.Restriction);
+        var conflict = Assert.Single(check.Conflicts);
+        Assert.Contains("cheese", conflict.IngredientName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Generate_StillSavesTheRecipeWhenTheCheckFindsAConflict()
+    {
+        // The finding does not block the write, deliberately. D1 makes this an ordinary
+        // user-owned row, and refusing to save one because a keyword rule fired would give
+        // the check an authority DietaryRules explicitly declines to claim. The user is told
+        // and owns the recipe either way.
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        await SetRestrictionsAsync(client, auth.Username, [DietaryRestriction.Vegan]);
+
+        var result = await GenerateAsync(client, Request(
+            $"something creamy {FakeRecipeGenerationAssistant.IngredientSentinel}cheddar__"));
+
+        Assert.NotEmpty(result.DietaryChecks.Single().Conflicts);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.True(await db.Recipes.AnyAsync(r => r.Id == result.Recipe.Id && r.CreatedByUserId == auth.UserId));
+    }
+
+    [Fact]
+    public async Task Generate_ReportsUncheckableLinesRatherThanClaimingSafety()
+    {
+        // The generator's DEFAULT case, and the reason this is reported rather than hidden:
+        // it invents names freely, so a line that resolves to nothing is entirely expected
+        // (D8) and must be counted, not read as a clean bill.
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        await SetRestrictionsAsync(client, auth.Username, [DietaryRestriction.Vegan]);
+
+        var result = await GenerateAsync(client, Request("something with zzzz unobtainium"));
+
+        var check = Assert.Single(result.DietaryChecks);
+        Assert.Empty(check.Conflicts);
+        Assert.Equal(1, check.UncheckableLines);
+    }
+
+    [Fact]
+    public async Task Generate_CallerWithNoRestrictionsGetsNoChecks()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var result = await GenerateAsync(client, Request(
+            $"something creamy {FakeRecipeGenerationAssistant.IngredientSentinel}cheddar__"));
+
+        Assert.Empty(result.DietaryChecks);
+    }
+
+    private static async Task SetRestrictionsAsync(
+        HttpClient client, string username, List<DietaryRestriction> restrictions)
+    {
+        var response = await client.PutAsJsonAsync("/users/me", new UpdateProfileRequest(
+            username, null, null, RecipeVisibility.Public, restrictions), TestJson.Options);
+        response.EnsureSuccessStatusCode();
     }
 
     [Theory]

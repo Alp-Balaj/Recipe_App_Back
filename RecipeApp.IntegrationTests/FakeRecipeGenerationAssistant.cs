@@ -27,6 +27,13 @@ public sealed class FakeRecipeGenerationAssistant : IRecipeGenerationAssistant
 {
     public const string FailSentinel = "__FAIL__";
 
+    // Stream H. The default "generated ingredient" resolves to nothing, which is realistic
+    // but useless for testing the dietary check — an unresolved line is uncheckable by
+    // definition, so no fixture could ever produce a conflict. A prompt containing
+    // "__INGREDIENT:cheddar__" makes the draft's one line "cheddar" instead, which the
+    // catalogue does know. Still a pure function of the input, like FailSentinel.
+    public const string IngredientSentinel = "__INGREDIENT:";
+
     public Task<GeneratedRecipe> GenerateAsync(
         string request,
         IReadOnlyList<ChatHistoryItem> history,
@@ -41,6 +48,7 @@ public sealed class FakeRecipeGenerationAssistant : IRecipeGenerationAssistant
         // Still a pure function of the inputs — no mutable state, safe under the shared
         // TestServer (see the class note).
         var restrictions = dietaryRestrictions.Count == 0 ? "none" : string.Join('/', dietaryRestrictions);
+        var ingredientName = IngredientFrom(request);
 
         var draft = new GeneratedRecipeDraft(
             Title: $"Generated: {request}",
@@ -51,10 +59,26 @@ public sealed class FakeRecipeGenerationAssistant : IRecipeGenerationAssistant
             Difficulty: DifficultyLevel.Easy,
             CuisineType: Cuisine.Other,
             CaloriesPerServing: 320,
-            Ingredients: [new RecipeIngredient { Name = "generated ingredient", Quantity = 1m, Unit = UnitOfMeasure.Piece }],
+            Ingredients: [new RecipeIngredient { Name = ingredientName, Quantity = 100m, Unit = UnitOfMeasure.Gram }],
             Steps: [new RecipeStep { StepNumber = 1, Description = "Cook the generated ingredient." }],
             Tags: [RecipeTag.Dinner]);
 
         return Task.FromResult(new GeneratedRecipe(draft, new ChatTokenUsage(120, 240, 360)));
+    }
+
+    /// <summary>
+    /// "…__INGREDIENT:cheddar__…" → "cheddar"; anything else → the unresolvable default.
+    /// </summary>
+    private static string IngredientFrom(string request)
+    {
+        var start = request.IndexOf(IngredientSentinel, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return "generated ingredient";
+        }
+
+        var from = start + IngredientSentinel.Length;
+        var end = request.IndexOf("__", from, StringComparison.Ordinal);
+        return end < 0 ? "generated ingredient" : request[from..end];
     }
 }
