@@ -1,3 +1,4 @@
+using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Enums;
 
 namespace RecipeApp.Application.MealPlanning.Dtos;
@@ -44,7 +45,24 @@ public record MealPlanResponse(
 
 public record ProposeWeekRequest(DateTime WeekStartDate);
 
-public record ProposedSlotResponse(DayOfWeek DayOfWeek, MealType MealType, MealPlanEntryRecipeSummary Recipe);
+/// <summary>
+/// One proposed (day, meal) assignment.
+///
+/// <c>DietaryChecks</c> is stream H's addition and the reason this lane is worth
+/// verifying at all: until now the model was TOLD the caller's restrictions and nobody
+/// checked whether it listened. Each entry is one restriction's verdict over the
+/// recipe's resolved ingredients — conflicts FOUND plus the number of lines that could
+/// not be read. Empty when the caller has no restrictions.
+///
+/// It is emphatically NOT a safety verdict, and a client must not render it as one:
+/// see DietaryRules for the three reasons a clean result over a partly-unreadable
+/// recipe is not compliance. Appended last, per this file's convention.
+/// </summary>
+public record ProposedSlotResponse(
+    DayOfWeek DayOfWeek,
+    MealType MealType,
+    MealPlanEntryRecipeSummary Recipe,
+    IReadOnlyList<DietaryCheckResponse> DietaryChecks);
 
 // Slots is Monday-first, Breakfast/Lunch/Dinner within a day. Empty is a valid proposal:
 // the week is already full, or the caller has no visible recipes to ground on.

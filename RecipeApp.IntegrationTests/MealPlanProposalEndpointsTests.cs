@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.MealPlanning.Dtos;
+using RecipeApp.Application.Social.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
@@ -245,6 +246,112 @@ public class MealPlanProposalEndpointsTests(IntegrationTestFactory factory) : IC
 
         var afterUnfollow = await ProposeAsync(viewerClient, weekStart);
         Assert.DoesNotContain(afterUnfollow.Slots, s => s.Recipe.Id == friendsOnly.Id);
+    }
+
+    // --- dietary verification at the AI boundary (stream H) ----------------------------------
+
+    [Fact]
+    public async Task ProposeWeek_VerifiesTheCallersRestrictionsAgainstWhatTheModelPicked()
+    {
+        // The sentence this stream buys: the model is TOLD the restriction (it always was —
+        // dietaryRestrictions goes into the prompt), and now the system CHECKS the answer.
+        // The probe recipe is PRIVATE so only this user's candidate load can see it, which is
+        // what makes an assertion about a specific dish safe on the shared DB.
+        var client = _factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        await SetRestrictionsAsync(client, auth.Username, [DietaryRestriction.Vegan]);
+
+        var offending = await MealPlanTestHelper.CreateRecipeAsync(
+            client, $"Cheese Probe {Guid.NewGuid():N}",
+            [new RecipeIngredient { Name = "cheddar", Quantity = 100m, Unit = UnitOfMeasure.Gram }],
+            RecipeVisibility.Private);
+
+        var proposal = await ProposeAsync(client, MealPlanTestHelper.NextMonday());
+
+        // EVERY slot holding that dish carries the verdict, not just the first. The fake
+        // assistant round-robins, so one candidate can legitimately fill all 21 slots — and a
+        // per-slot verdict that only populated once would be worse than none.
+        var slots = proposal.Slots.Where(s => s.Recipe.Id == offending.Id).ToList();
+        Assert.NotEmpty(slots);
+        Assert.All(slots, slot =>
+        {
+            var check = Assert.Single(slot.DietaryChecks);
+            Assert.Equal(DietaryRestriction.Vegan, check.Restriction);
+            var conflict = Assert.Single(check.Conflicts);
+            Assert.Contains("cheese", conflict.IngredientName, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
+    public async Task ProposeWeek_ConflictingSlotsAreReportedNotSilentlyDropped()
+    {
+        // Deliberate: a conflict is surfaced to the user, who vetoes the slot in the review
+        // dialog (D2's per-slot veto). Filtering it out server-side would hide the model's
+        // failure AND imply the surviving slots had been cleared — neither is true.
+        var client = _factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        await SetRestrictionsAsync(client, auth.Username, [DietaryRestriction.Vegetarian]);
+
+        var offending = await MealPlanTestHelper.CreateRecipeAsync(
+            client, $"Bacon Probe {Guid.NewGuid():N}",
+            [new RecipeIngredient { Name = "bacon", Quantity = 100m, Unit = UnitOfMeasure.Gram }],
+            RecipeVisibility.Private);
+
+        var proposal = await ProposeAsync(client, MealPlanTestHelper.NextMonday());
+
+        Assert.Contains(proposal.Slots, s => s.Recipe.Id == offending.Id);
+    }
+
+    [Fact]
+    public async Task ProposeWeek_ReportsUncheckableLinesRatherThanClaimingSafety()
+    {
+        // "No conflicts" over a recipe of nothing but unresolved lines would be a safety
+        // claim the catalogue cannot support. The count is what keeps it honest — and D8
+        // guarantees unresolved lines will always exist.
+        var client = _factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        await SetRestrictionsAsync(client, auth.Username, [DietaryRestriction.Vegan]);
+
+        var unreadable = await MealPlanTestHelper.CreateRecipeAsync(
+            client, $"Mystery Probe {Guid.NewGuid():N}",
+            [
+                new RecipeIngredient { Name = "zzzz mystery paste", Quantity = 1m, Unit = UnitOfMeasure.Tablespoon },
+                new RecipeIngredient { Name = "zzzz other thing", Quantity = 1m, Unit = UnitOfMeasure.Tablespoon },
+            ],
+            RecipeVisibility.Private);
+
+        var proposal = await ProposeAsync(client, MealPlanTestHelper.NextMonday());
+
+        var slots = proposal.Slots.Where(s => s.Recipe.Id == unreadable.Id).ToList();
+        Assert.NotEmpty(slots);
+        Assert.All(slots, slot =>
+        {
+            var check = Assert.Single(slot.DietaryChecks);
+            Assert.Empty(check.Conflicts);
+            Assert.Equal(2, check.UncheckableLines);
+        });
+    }
+
+    [Fact]
+    public async Task ProposeWeek_CallerWithNoRestrictionsGetsNoChecks()
+    {
+        // The path most callers take, and the one that must cost nothing: no restrictions
+        // means the catalogue is never read.
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        await MealPlanTestHelper.CreateRecipeAsync(client, "Unrestricted Soup", Ingredients());
+
+        var proposal = await ProposeAsync(client, MealPlanTestHelper.NextMonday());
+
+        Assert.NotEmpty(proposal.Slots);
+        Assert.All(proposal.Slots, s => Assert.Empty(s.DietaryChecks));
+    }
+
+    private static async Task SetRestrictionsAsync(
+        HttpClient client, string username, List<DietaryRestriction> restrictions)
+    {
+        var response = await client.PutAsJsonAsync("/users/me", new UpdateProfileRequest(
+            username, null, null, RecipeVisibility.Public, restrictions), TestJson.Options);
+        response.EnsureSuccessStatusCode();
     }
 
     private async Task<ProposeWeekResponse> ProposeAsync(HttpClient client, DateTime weekStart)

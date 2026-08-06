@@ -4,6 +4,7 @@ using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
+using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.Services;
@@ -44,17 +45,20 @@ public class MealPlanProposalService : IMealPlanProposalService
     private readonly ApplicationDbContext _db;
     private readonly IMealPlanAssistantService _assistant;
     private readonly IAiUsageService _aiUsage;
+    private readonly IDietaryCheckService _dietaryChecks;
     private readonly ILogger<MealPlanProposalService> _logger;
 
     public MealPlanProposalService(
         ApplicationDbContext db,
         IMealPlanAssistantService assistant,
         IAiUsageService aiUsage,
+        IDietaryCheckService dietaryChecks,
         ILogger<MealPlanProposalService> logger)
     {
         _db = db;
         _assistant = assistant;
         _aiUsage = aiUsage;
+        _dietaryChecks = dietaryChecks;
         _logger = logger;
     }
 
@@ -151,14 +155,38 @@ public class MealPlanProposalService : IMealPlanProposalService
         // Hydrate from the recipes loaded for the candidate set — assignment ids are a
         // guaranteed subset of candidate ids, so the lookup can't miss.
         var recipesById = recipes.ToDictionary(r => r.Id);
+
+        // Stream H: VERIFY what the model was merely told. The restrictions above went into
+        // the prompt; these run the catalogue-backed check over what came back, per slot,
+        // against the same caller's restrictions. One catalogue read for the whole week (the
+        // reason IDietaryCheckService is a batch), and it happens BEFORE the user sees the
+        // proposal rather than when they later open the recipe — which is the difference
+        // between verification and a footnote.
+        //
+        // Only the PROPOSED recipes are checked, not all 50 candidates: nobody is shown a
+        // verdict on a dish that was not proposed. Note also what this deliberately does NOT
+        // do — it does not drop conflicting slots. A found conflict is reported to the user,
+        // who vetoes it in the review dialog (D2's per-slot veto); silently filtering would
+        // both hide the model's failure and imply the survivors were cleared.
+        var proposedRecipes = assignments
+            .Select(a => recipesById[a.RecipeId])
+            .DistinctBy(r => r.Id)
+            .ToList();
+        var checksByRecipe = await _dietaryChecks.CheckAsync(
+            proposedRecipes, dietaryRestrictions, cancellationToken);
+
         var slots = assignments
             .OrderBy(a => MondayFirstIndex(a.DayOfWeek))
             .ThenBy(a => Array.IndexOf(PlannableMealTypes, a.MealType))
             .Select(a =>
             {
                 var recipe = recipesById[a.RecipeId];
-                return new ProposedSlotResponse(a.DayOfWeek, a.MealType, new MealPlanEntryRecipeSummary(
-                    recipe.Id, recipe.Title, recipe.ImageUrl, recipe.TotalTimeMinutes, recipe.CaloriesPerServing));
+                return new ProposedSlotResponse(
+                    a.DayOfWeek,
+                    a.MealType,
+                    new MealPlanEntryRecipeSummary(
+                        recipe.Id, recipe.Title, recipe.ImageUrl, recipe.TotalTimeMinutes, recipe.CaloriesPerServing),
+                    checksByRecipe[recipe.Id]);
             })
             .ToList();
 
