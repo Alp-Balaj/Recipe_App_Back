@@ -81,6 +81,9 @@ builder.Services.AddScoped<IRecipeService, RecipeService>();
 builder.Services.AddScoped<IIngredientResolver, IngredientResolver>();
 builder.Services.AddScoped<IIngredientCatalogueService, IngredientCatalogueService>();
 builder.Services.AddScoped<IRecipeInsightService, RecipeInsightService>();
+// The batch dietary check behind the two AI lanes (stream H). The per-recipe logic is
+// the same DietaryCheck the insights endpoint runs; this is only the catalogue read.
+builder.Services.AddScoped<IDietaryCheckService, DietaryCheckService>();
 builder.Services.AddScoped<IngredientCatalogueSeeder>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();

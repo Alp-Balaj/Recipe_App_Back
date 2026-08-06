@@ -58,7 +58,12 @@ public class RecipeInsightService : IRecipeInsightService
 
         return RecipeResult<RecipeInsightsResponse>.Success(new RecipeInsightsResponse(
             ComputeNutrition(recipe, catalogue),
-            CheckRestrictions(recipe, catalogue, restrictions)));
+            // The check moved to Application/Recipes/DietaryCheck.cs (stream H, 2026-08-06)
+            // so propose-week and the generator can run the same one — see that file for why
+            // it had to leave this class. The catalogue stays loaded HERE and is passed in:
+            // nutrition needs the same rows, and routing this through IDietaryCheckService
+            // would read them a second time for one recipe.
+            DietaryCheck.For(recipe.Ingredients, catalogue, restrictions)));
     }
 
     /// <summary>
@@ -116,42 +121,5 @@ public class RecipeInsightService : IRecipeInsightService
             anyFibre ? Math.Round(fibre / servings, 1) : null,
             covered,
             recipe.Ingredients.Count);
-    }
-
-    /// <summary>
-    /// Runs the caller's own restrictions against the recipe's RESOLVED ingredients.
-    ///
-    /// UncheckableLines is the honest half and is reported per restriction: a line
-    /// that did not resolve has no catalogue name to test, so it was not checked at
-    /// all. A client showing "no conflicts" without showing that number would be
-    /// making a safety claim this cannot support.
-    /// </summary>
-    private static List<DietaryCheckResponse> CheckRestrictions(
-        Recipe recipe,
-        IReadOnlyDictionary<Guid, Ingredient> catalogue,
-        List<DietaryRestriction> restrictions)
-    {
-        if (restrictions.Count == 0)
-        {
-            return [];
-        }
-
-        var checkable = recipe.Ingredients
-            .Where(i => i.IngredientId is not null && catalogue.ContainsKey(i.IngredientId!.Value))
-            .Select(i => catalogue[i.IngredientId!.Value])
-            .Select(i => (i.Name, i.Category))
-            .ToList();
-
-        var uncheckable = recipe.Ingredients.Count - checkable.Count;
-
-        return restrictions
-            .Distinct()
-            .Select(restriction => new DietaryCheckResponse(
-                restriction,
-                DietaryRules.Conflicts(restriction, checkable)
-                    .Select(c => new DietaryConflictResponse(c.Name, c.Reason))
-                    .ToList(),
-                uncheckable))
-            .ToList();
     }
 }
