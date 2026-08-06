@@ -40,7 +40,7 @@ public static class AiUsageLanes
     // had proposed a week.
     public const string MealPlanProposal = "meal-plan-proposal";
 
-    // Stream M: the cook-mode assistant, the fourth lane and the first one with no row of its
+    // Stream M: the cook-mode assistant, and the first lane with no row of its
     // own anywhere else in the database. Decision D14 keeps a cook-mode exchange session-scoped
     // — no Conversation, no ChatMessage, nothing persisted but this usage row — because
     // ChatService.BuildHistoryAsync feeds a conversation's trailing 20 messages back into the
@@ -50,6 +50,25 @@ public static class AiUsageLanes
     // casually-repeated AI call would be the one call the budget cannot see. Stream C shipped
     // propose-week into exactly that hole; this is the same mistake declined in advance.
     public const string CookAssistant = "cook-assistant";
+
+    // Stream X: the content-moderation classifier. This lane is unlike the three above in a
+    // way that matters more than its name.
+    //
+    // Every other lane bills the person who pressed the button, and gates on their budget
+    // BEFORE spending — GetBudgetAsync(...).IsExhausted returns 429 and no money is spent.
+    // A moderation pass is spent on the platform's behalf against content someone ELSE wrote,
+    // so there is no such person to gate on. Naively reusing the pre-call gate against the
+    // content's author would let a user disable moderation of their own content by exhausting
+    // their own quota — the failure mode is exactly backwards, because the author of the
+    // content most worth checking is the one most likely to be hammering the API.
+    //
+    // So: the spend is RECORDED against SystemUsers.ModerationId so it stays attributable and
+    // shows up in the same accounting as everything else, and NOTHING is gated on it. The
+    // ceiling that keeps this lane bounded is the queue's capacity, not a budget — see
+    // ContentModerationQueue. Note the consequence for anyone reading the numbers later: the
+    // moderation user's daily "budget" will read as wildly exhausted and that is meaningless,
+    // because no code path ever consults it.
+    public const string ContentModeration = "content-moderation";
 }
 
 // A user's AI budget for one UTC day. The window is the calendar day in UTC — simple to

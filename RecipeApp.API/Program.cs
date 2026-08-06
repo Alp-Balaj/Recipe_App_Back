@@ -137,6 +137,12 @@ else
 // cp03 wires the /chat endpoints; the Gemini:ApiKey check is deferred to resolution time.
 builder.Services.AddChatAssistant(builder.Configuration);
 
+// Stream X: the out-of-band content moderation pass — the app's FIRST background execution
+// seam (a bounded Channel plus one BackgroundService draining it). Must be registered after
+// AddChatAssistant only for readability; the classifier resolves IChatMessageCaller lazily
+// inside the worker's per-item scope, so ordering here is immaterial.
+builder.Services.AddContentModeration(builder.Configuration);
+
 // Structured error responses: RFC-7807 ProblemDetails everywhere, with a global handler
 // (GlobalExceptionHandler) that logs unhandled exceptions and returns a 500 ProblemDetails
 // without leaking a stack trace. Wired into the pipeline via app.UseExceptionHandler() below.
