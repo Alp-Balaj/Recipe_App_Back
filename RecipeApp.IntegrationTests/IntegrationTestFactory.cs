@@ -54,6 +54,10 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         builder.UseSetting("RateLimiting:ImagesPermitLimit", "1000000");
         // And the meal lane (meal-planning cp02) — shared by cp02–04, same reasoning.
         builder.UseSetting("RateLimiting:MealPermitLimit", "1000000");
+        // And the import lane (stream L). Its production budget is the tightest in the app
+        // (10/min), which the suite would trip within a single test class — the real 429 is
+        // verified live, like every other lane's.
+        builder.UseSetting("RateLimiting:ImportPermitLimit", "1000000");
 
         // social-feed cp4: point IImageStorage (and the /images static-file mount) at the
         // per-factory temp root above instead of the repo tree.
@@ -102,6 +106,26 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             // the suite exercises end-to-end is the out-of-band path itself.
             services.RemoveAll<IContentModerationClassifier>();
             services.AddScoped<IContentModerationClassifier, FakeContentModerationClassifier>();
+
+            // Stream L: BOTH of import's outside-world seams, and they are replaced for two
+            // different reasons.
+            //
+            // The fetcher, because the real one makes an OUTBOUND HTTP REQUEST to whatever
+            // address the test names. That is unlike every other fake here — the rest exist to
+            // avoid a paid API call, this one exists to stop the suite reaching the internet
+            // at all. Leaving it in place would make the tests depend on a third-party site
+            // being up and on the CI box having egress.
+            //
+            // The extraction assistant, for the usual reason: it is the Gemini seam for both
+            // model-backed paths. Faking it here rather than the two provider callers beneath
+            // it means IVisionMessageCaller's factory lambda is never resolved, so its API-key
+            // check never fires — the same lazy-resolution property that lets the chat seam
+            // stay unconfigured in CI.
+            services.RemoveAll<IRecipePageFetcher>();
+            services.AddScoped<IRecipePageFetcher, FakeRecipePageFetcher>();
+
+            services.RemoveAll<IRecipeExtractionAssistant>();
+            services.AddScoped<IRecipeExtractionAssistant, FakeRecipeExtractionAssistant>();
 
             // Built through the shared configurator, exactly like Program.cs and the
             // design-time factory. Two things ride on that: the dynamic-JSON opt-in (the jsonb
