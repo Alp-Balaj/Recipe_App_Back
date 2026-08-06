@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat.Abstractions;
+using RecipeApp.Application.Chat.Dtos;
 using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
@@ -91,7 +92,9 @@ public class MealPlanProposalService : IMealPlanProposalService
 
         if (openSlots.Count == 0)
         {
-            return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(request.WeekStartDate, []));
+            // Nothing was spent, but the caller still gets today's figure — see the DTO for
+            // why the envelope is non-nullable on every 200 rather than only on paid paths.
+            return await EmptyProposalAsync(request.WeekStartDate, userId, cancellationToken);
         }
 
         var recipes = await LoadCandidateRecipesAsync(userId, cancellationToken);
@@ -99,7 +102,7 @@ public class MealPlanProposalService : IMealPlanProposalService
         {
             // Nothing to ground on — an empty proposal, not an assistant failure. Skips the
             // (paid) LLM call entirely.
-            return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(request.WeekStartDate, []));
+            return await EmptyProposalAsync(request.WeekStartDate, userId, cancellationToken);
         }
 
         // Stream G touches this service ONLY here and at the restriction list below, and only
@@ -190,7 +193,27 @@ public class MealPlanProposalService : IMealPlanProposalService
             })
             .ToList();
 
-        return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(request.WeekStartDate, slots));
+        // Read AFTER RecordCall + SaveChanges, so the figure the caller gets back already
+        // includes the call they just made — the same ordering the generator lane uses.
+        return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(
+            request.WeekStartDate, slots, await BudgetAsync(userId, cancellationToken)));
+    }
+
+    // A 200 with no slots, still carrying the budget. Both callers reached here without
+    // spending anything, which is exactly why the envelope has to be filled in rather than
+    // left null: "nothing was spent" and "we won't say" are different answers.
+    private async Task<MealPlanResult<ProposeWeekResponse>> EmptyProposalAsync(
+        DateTime weekStartDate, Guid userId, CancellationToken cancellationToken)
+        => MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(
+            weekStartDate, [], await BudgetAsync(userId, cancellationToken)));
+
+    private async Task<AiBudgetResponse> BudgetAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        var budget = await _aiUsage.GetBudgetAsync(userId, cancellationToken);
+        return new AiBudgetResponse(
+            budget.DailyCallLimit, budget.CallsUsed, budget.CallsRemaining,
+            budget.DailyTokenLimit, budget.TokensUsed, budget.TokensRemaining,
+            budget.ResetsAtUtc);
     }
 
     // Picker-corpus parity (the D2 brief's grounding rule): the user's own recipes, their

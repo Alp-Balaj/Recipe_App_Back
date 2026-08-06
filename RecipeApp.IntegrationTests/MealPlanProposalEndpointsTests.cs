@@ -346,6 +346,58 @@ public class MealPlanProposalEndpointsTests(IntegrationTestFactory factory) : IC
         Assert.All(proposal.Slots, s => Assert.Empty(s.DietaryChecks));
     }
 
+    // --- the budget envelope (stream H ride-along) --------------------------------------------
+
+    [Fact]
+    public async Task ProposeWeek_ReportsWhatTheCallJustCostAgainstTodaysAllowance()
+    {
+        // The lane has been metered since 2026-08-05 but returned nothing about the spend, so
+        // the "N calls left today" figure the chat surface shows went stale the moment anybody
+        // proposed a week. The envelope is read AFTER the usage row is committed, so the call
+        // the caller just made is already counted.
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        await MealPlanTestHelper.CreateRecipeAsync(client, "Budget Probe Soup", Ingredients());
+
+        var proposal = await ProposeAsync(client, MealPlanTestHelper.NextMonday());
+
+        Assert.NotEmpty(proposal.Slots);
+        Assert.Equal(1, proposal.Budget.CallsUsed);
+        Assert.Equal(proposal.Budget.DailyCallLimit - 1, proposal.Budget.CallsRemaining);
+        Assert.Equal(FakeMealPlanAssistantService.Usage.TotalTokens, proposal.Budget.TokensUsed);
+    }
+
+    [Fact]
+    public async Task ProposeWeek_CarriesTheBudgetEvenWhenNothingWasSpent()
+    {
+        // A FULL week is the deterministic no-spend exit: it returns before the candidate
+        // load and before the provider call. ("Fresh user with no recipes" is not — public
+        // recipes from every other test in this class enter the candidate set on the shared
+        // DB, so that user gets a real, billed proposal.)
+        //
+        // The envelope is still filled in on this path: "nothing was spent, here is what
+        // remains" and "we won't say" are different answers, and a nullable field would make
+        // every client branch to tell them apart.
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var recipe = await MealPlanTestHelper.CreateRecipeAsync(
+            client, $"Full Week Filler {Guid.NewGuid():N}", Ingredients(), RecipeVisibility.Private);
+        var weekStart = MealPlanTestHelper.NextMonday();
+        var plan = await MealPlanTestHelper.CreateMealPlanAsync(client, weekStart);
+
+        foreach (var day in Enum.GetValues<DayOfWeek>())
+        {
+            foreach (var meal in new[] { MealType.Breakfast, MealType.Lunch, MealType.Dinner })
+            {
+                await MealPlanTestHelper.AddEntryAsync(client, plan.Id, day, meal, recipe.Id);
+            }
+        }
+
+        var proposal = await ProposeAsync(client, weekStart);
+
+        Assert.Empty(proposal.Slots);
+        Assert.Equal(0, proposal.Budget.CallsUsed);
+        Assert.Equal(proposal.Budget.DailyCallLimit, proposal.Budget.CallsRemaining);
+    }
+
     private static async Task SetRestrictionsAsync(
         HttpClient client, string username, List<DietaryRestriction> restrictions)
     {

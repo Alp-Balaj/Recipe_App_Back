@@ -1,3 +1,4 @@
+using RecipeApp.Application.Chat.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Enums;
 
@@ -66,7 +67,19 @@ public record ProposedSlotResponse(
 
 // Slots is Monday-first, Breakfast/Lunch/Dinner within a day. Empty is a valid proposal:
 // the week is already full, or the caller has no visible recipes to ground on.
-public record ProposeWeekResponse(DateTime WeekStartDate, IReadOnlyList<ProposedSlotResponse> Slots);
+//
+// Budget is the same AiBudgetResponse envelope chat and the generator return, added by
+// stream H. This lane was metered on 2026-08-05 but kept returning nothing about the spend
+// — so the most expensive call in the app was the one call whose cost the user could not
+// see, and the "N calls left today" figure on the chat surface went stale the moment
+// somebody proposed a week. It is NON-NULLABLE and populated on every 200, including the
+// two cheap exits that never call the provider: the number is still true on those paths
+// ("nothing was spent, here is what remains"), and a nullable field would buy one skipped
+// aggregate query at the cost of making every client branch.
+public record ProposeWeekResponse(
+    DateTime WeekStartDate,
+    IReadOnlyList<ProposedSlotResponse> Slots,
+    AiBudgetResponse Budget);
 
 // --- shopping list ---------------------------------------------------------------------
 // ShoppingListItemResponse is the shape AddManualAsync (IShoppingListService) still returns
