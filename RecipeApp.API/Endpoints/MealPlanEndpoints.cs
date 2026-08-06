@@ -115,6 +115,22 @@ public static class MealPlanEndpoints
             };
         });
 
+        // Computed nutrition for the whole plan, one day per row (stream I, D12's second
+        // surface). ONE read on purpose: the day page could ask /recipes/{id}/insights per
+        // entry instead, which is up to 21 requests for a week — the N-per-view mistake the
+        // month view already refused twice. Read-only and catalogue-derived, so it rides the
+        // ordinary Meal rate lane rather than the chat lane; nothing here costs an LLM call.
+        group.MapGet("/{id:guid}/nutrition", async (Guid id, IMealPlanService mealPlans,
+            ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await mealPlans.GetNutritionAsync(id, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                MealPlanOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        });
+
         // AI week proposal (Stream C, D2 = propose-then-accept). The model fills only the
         // week's open Breakfast/Lunch/Dinner slots from a grounded candidate set; NO PLAN DATA
         // is written here — accepted slots go through POST /{id}/entries above, so the slot 409
