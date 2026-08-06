@@ -30,6 +30,20 @@ public class Report
     public ReportReason Reason { get; set; }
     public string? Details { get; set; }
 
+    // Stream X (D20). The reason list above stays exactly as stream D closed it — a closed
+    // human list is also a perfectly good label space for a classifier, so the model picks
+    // from these five rather than gaining a sixth nobody can pick. What the shape genuinely
+    // lacked is these two columns.
+    //
+    // Source discriminates who authored the row; Reporter stays non-null either way and
+    // points at SystemUsers.ModerationId when this is Automated.
+    public ReportSource Source { get; set; } = ReportSource.Human;
+
+    // The classifier's self-reported confidence in [0,1]. Null for a human report — a person
+    // pressing Report is not expressing a probability, and a sentinel like 1.0 would let the
+    // two kinds of row be compared as if they were the same measurement.
+    public double? Confidence { get; set; }
+
     public ReportStatus Status { get; set; } = ReportStatus.Open;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.MealPlanning.Abstractions;
+using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Infrastructure.Persistence;
 using Testcontainers.PostgreSql;
@@ -85,6 +86,15 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             // instead of Gemini.
             services.RemoveAll<IRecipeGenerationAssistant>();
             services.AddScoped<IRecipeGenerationAssistant, FakeRecipeGenerationAssistant>();
+
+            // Stream X: the moderation classifier. Unlike the three fakes above this one is
+            // not optional — ContentModerationWorker is a HOSTED SERVICE that starts with this
+            // host and drains the queue for real, so without this replacement every recipe and
+            // comment the suite creates would reach for the provider (and the Gemini key check)
+            // on a background thread. The real queue and the real worker stay in place: what
+            // the suite exercises end-to-end is the out-of-band path itself.
+            services.RemoveAll<IContentModerationClassifier>();
+            services.AddScoped<IContentModerationClassifier, FakeContentModerationClassifier>();
 
             // Built through the shared configurator, exactly like Program.cs and the
             // design-time factory. Two things ride on that: the dynamic-JSON opt-in (the jsonb

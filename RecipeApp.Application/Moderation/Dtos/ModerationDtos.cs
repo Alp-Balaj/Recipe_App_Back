@@ -26,7 +26,13 @@ public record ReportResponse(
     UserSummaryResponse Reporter,
     DateTime? ResolvedAtUtc,
     string? ResolvedByUsername,
-    string? ResolutionNote);
+    string? ResolutionNote,
+    // Stream X (D20). Appended, and both are additive: Reporter above stays non-nullable and
+    // keeps naming a real account for an auto-flag too (SystemUsers.ModerationId), so the
+    // frontend's existing src/api/reports.ts contract does not change shape. These two only
+    // let the queue TELL the two kinds of row apart and show how sure the classifier was.
+    ReportSource Source,
+    double? Confidence);
 
 public record ReportListResponse(IReadOnlyList<ReportResponse> Items, string? NextCursor);
 

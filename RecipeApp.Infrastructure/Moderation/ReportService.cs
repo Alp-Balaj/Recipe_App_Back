@@ -178,6 +178,8 @@ public class ReportService : IReportService
             new UserSummaryResponse(report.ReporterId, reporterUsername, reporterImageUrl),
             report.ResolvedAtUtc,
             resolvedByUsername,
-            report.ResolutionNote);
+            report.ResolutionNote,
+            report.Source,
+            report.Confidence);
     }
 }
