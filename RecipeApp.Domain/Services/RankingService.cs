@@ -12,7 +12,7 @@ public static class RankingService
         RankEvent.RecipeReceivedComment => 3,
         RankEvent.CommentReceivedLike => 1,
         RankEvent.SavedByOtherUser => 8,
-        RankEvent.AiRecipeCookedAndRated => 15,
+        RankEvent.RecipeCookedAndRated => 15,
         _ => 0
     };
 

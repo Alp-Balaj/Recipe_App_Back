@@ -23,6 +23,19 @@ public record GenerateRecipeRequest(
 // SAME shape every other recipe endpoint returns — the SPA can route straight to
 // /recipes/{id} with no special case. Budget rides along exactly as it does on a chat turn,
 // so the surface can say how much of today's allowance is left without a second request.
+//
+// DietaryChecks is stream H's addition, and this lane is the sharper of the two it covers.
+// propose-week is GROUNDED — the model may only point at recipes that already exist, so a
+// conflict there is a bad pick from a real corpus. The generator is FREE: it invents the
+// ingredient list, and its trust boundary is range testing, not membership. A model that
+// cheerfully writes butter into a recipe for someone who told it "dairy-free" produces a row
+// that is already saved by the time anyone looks. So the check runs on the way out, against
+// the CALLER's restrictions, and its finding travels with the 201.
+//
+// It reports conflicts FOUND and how many lines could not be read. It does not certify the
+// recipe, it does not block the write, and no client may render it as either — see
+// DietaryRules. Appended last so existing positional constructions keep compiling.
 public record GenerateRecipeResponse(
     RecipeResponse Recipe,
-    AiBudgetResponse Budget);
+    AiBudgetResponse Budget,
+    IReadOnlyList<DietaryCheckResponse> DietaryChecks);

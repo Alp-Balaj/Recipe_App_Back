@@ -1,9 +1,11 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat.Abstractions;
+using RecipeApp.Application.Chat.Dtos;
 using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
+using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.Services;
@@ -44,17 +46,20 @@ public class MealPlanProposalService : IMealPlanProposalService
     private readonly ApplicationDbContext _db;
     private readonly IMealPlanAssistantService _assistant;
     private readonly IAiUsageService _aiUsage;
+    private readonly IDietaryCheckService _dietaryChecks;
     private readonly ILogger<MealPlanProposalService> _logger;
 
     public MealPlanProposalService(
         ApplicationDbContext db,
         IMealPlanAssistantService assistant,
         IAiUsageService aiUsage,
+        IDietaryCheckService dietaryChecks,
         ILogger<MealPlanProposalService> logger)
     {
         _db = db;
         _assistant = assistant;
         _aiUsage = aiUsage;
+        _dietaryChecks = dietaryChecks;
         _logger = logger;
     }
 
@@ -87,7 +92,9 @@ public class MealPlanProposalService : IMealPlanProposalService
 
         if (openSlots.Count == 0)
         {
-            return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(request.WeekStartDate, []));
+            // Nothing was spent, but the caller still gets today's figure — see the DTO for
+            // why the envelope is non-nullable on every 200 rather than only on paid paths.
+            return await EmptyProposalAsync(request.WeekStartDate, userId, cancellationToken);
         }
 
         var recipes = await LoadCandidateRecipesAsync(userId, cancellationToken);
@@ -95,7 +102,7 @@ public class MealPlanProposalService : IMealPlanProposalService
         {
             // Nothing to ground on — an empty proposal, not an assistant failure. Skips the
             // (paid) LLM call entirely.
-            return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(request.WeekStartDate, []));
+            return await EmptyProposalAsync(request.WeekStartDate, userId, cancellationToken);
         }
 
         // Stream G touches this service ONLY here and at the restriction list below, and only
@@ -151,18 +158,62 @@ public class MealPlanProposalService : IMealPlanProposalService
         // Hydrate from the recipes loaded for the candidate set — assignment ids are a
         // guaranteed subset of candidate ids, so the lookup can't miss.
         var recipesById = recipes.ToDictionary(r => r.Id);
+
+        // Stream H: VERIFY what the model was merely told. The restrictions above went into
+        // the prompt; these run the catalogue-backed check over what came back, per slot,
+        // against the same caller's restrictions. One catalogue read for the whole week (the
+        // reason IDietaryCheckService is a batch), and it happens BEFORE the user sees the
+        // proposal rather than when they later open the recipe — which is the difference
+        // between verification and a footnote.
+        //
+        // Only the PROPOSED recipes are checked, not all 50 candidates: nobody is shown a
+        // verdict on a dish that was not proposed. Note also what this deliberately does NOT
+        // do — it does not drop conflicting slots. A found conflict is reported to the user,
+        // who vetoes it in the review dialog (D2's per-slot veto); silently filtering would
+        // both hide the model's failure and imply the survivors were cleared.
+        var proposedRecipes = assignments
+            .Select(a => recipesById[a.RecipeId])
+            .DistinctBy(r => r.Id)
+            .ToList();
+        var checksByRecipe = await _dietaryChecks.CheckAsync(
+            proposedRecipes, dietaryRestrictions, cancellationToken);
+
         var slots = assignments
             .OrderBy(a => MondayFirstIndex(a.DayOfWeek))
             .ThenBy(a => Array.IndexOf(PlannableMealTypes, a.MealType))
             .Select(a =>
             {
                 var recipe = recipesById[a.RecipeId];
-                return new ProposedSlotResponse(a.DayOfWeek, a.MealType, new MealPlanEntryRecipeSummary(
-                    recipe.Id, recipe.Title, recipe.ImageUrl, recipe.TotalTimeMinutes, recipe.CaloriesPerServing));
+                return new ProposedSlotResponse(
+                    a.DayOfWeek,
+                    a.MealType,
+                    new MealPlanEntryRecipeSummary(
+                        recipe.Id, recipe.Title, recipe.ImageUrl, recipe.TotalTimeMinutes, recipe.CaloriesPerServing),
+                    checksByRecipe[recipe.Id]);
             })
             .ToList();
 
-        return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(request.WeekStartDate, slots));
+        // Read AFTER RecordCall + SaveChanges, so the figure the caller gets back already
+        // includes the call they just made — the same ordering the generator lane uses.
+        return MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(
+            request.WeekStartDate, slots, await BudgetAsync(userId, cancellationToken)));
+    }
+
+    // A 200 with no slots, still carrying the budget. Both callers reached here without
+    // spending anything, which is exactly why the envelope has to be filled in rather than
+    // left null: "nothing was spent" and "we won't say" are different answers.
+    private async Task<MealPlanResult<ProposeWeekResponse>> EmptyProposalAsync(
+        DateTime weekStartDate, Guid userId, CancellationToken cancellationToken)
+        => MealPlanResult<ProposeWeekResponse>.Success(new ProposeWeekResponse(
+            weekStartDate, [], await BudgetAsync(userId, cancellationToken)));
+
+    private async Task<AiBudgetResponse> BudgetAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        var budget = await _aiUsage.GetBudgetAsync(userId, cancellationToken);
+        return new AiBudgetResponse(
+            budget.DailyCallLimit, budget.CallsUsed, budget.CallsRemaining,
+            budget.DailyTokenLimit, budget.TokensUsed, budget.TokensRemaining,
+            budget.ResetsAtUtc);
     }
 
     // Picker-corpus parity (the D2 brief's grounding rule): the user's own recipes, their

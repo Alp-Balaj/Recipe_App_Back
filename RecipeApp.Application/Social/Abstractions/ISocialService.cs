@@ -65,7 +65,7 @@ public interface ISocialService
 
     /// <summary>
     /// Sets the caller's 1-5 rating, creating the row if they never logged a cook. Awards
-    /// AiRecipeCookedAndRated (+15) to the author ONLY on the null -> rated transition, so
+    /// RecipeCookedAndRated (+15) to the author ONLY on the null -> rated transition, so
     /// re-rating cannot farm points.
     /// </summary>
     Task<SocialResult<CookedRecipeResponse>> RateRecipeAsync(Guid recipeId, int rating, Guid currentUserId, CancellationToken cancellationToken = default);
