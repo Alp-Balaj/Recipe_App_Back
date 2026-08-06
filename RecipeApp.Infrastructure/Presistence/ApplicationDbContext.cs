@@ -146,6 +146,17 @@ public class ApplicationDbContext : DbContext
             .Property(r => r.Status)
             .HasConversion<string>();
 
+        // Stream X (D20). Text like every other enum, defaulted to Human so the migration
+        // backfills every report stream D wrote without a data step. Confidence needs no
+        // configuration — a nullable double maps to a nullable double precision column — but
+        // note that the two columns are correlated by convention rather than by constraint:
+        // Confidence is non-null exactly when Source is Automated, and the only writer of an
+        // Automated row is ContentModerationWorker.
+        builder.Entity<Report>()
+            .Property(r => r.Source)
+            .HasConversion<string>()
+            .HasDefaultValue(RecipeApp.Domain.Enums.ReportSource.Human);
+
         // The snapshot is an excerpt, bounded on write by the report service.
         builder.Entity<Report>()
             .Property(r => r.TargetSummary)
