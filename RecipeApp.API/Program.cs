@@ -28,6 +28,7 @@ using RecipeApp.Infrastructure.Moderation;
 using RecipeApp.Infrastructure.Notifications;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
+using RecipeApp.Infrastructure.Recipes.Import;
 using RecipeApp.Infrastructure.Social;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -143,6 +144,15 @@ builder.Services.AddChatAssistant(builder.Configuration);
 // inside the worker's per-item scope, so ordering here is immaterial.
 builder.Services.AddContentModeration(builder.Configuration);
 
+// Stream L: recipe import, both tiers. Registered AFTER the image storage block above because
+// re-hosting a source photo goes through IImageStorage — but the dependency is resolved, not
+// captured, so the ordering is readability rather than a requirement.
+//
+// This brings in the app's first outbound HTTP client that connects to an address a USER
+// chose, which is why it registers its own named client with a connect-time address guard
+// rather than reusing the default one AddChatAssistant sets up. See GuardedHttpHandler.
+builder.Services.AddRecipeImport(builder.Configuration);
+
 // Structured error responses: RFC-7807 ProblemDetails everywhere, with a global handler
 // (GlobalExceptionHandler) that logs unhandled exceptions and returns a 500 ProblemDetails
 // without leaking a stack trace. Wired into the pipeline via app.UseExceptionHandler() below.
@@ -169,6 +179,11 @@ var imagesPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:Image
 // meal-planning plan cp02: shared by the whole meal-plan/shopping-list family (cp02–04).
 // Cheap DB-only actions like social, so the default mirrors social's looser budget.
 var mealPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:MealPermitLimit") ?? 100;
+// Stream L: the tightest lane, and the only one whose cost is partly somebody else's. One
+// import is an outbound fetch to a caller-chosen address, possibly a model call, and possibly
+// a second fetch downloading a multi-MB image — so 10/min is both a cost ceiling here and a
+// politeness ceiling on the sites being imported from.
+var importPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:ImportPermitLimit") ?? 10;
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -214,6 +229,15 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = mealPermitLimit,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+    options.AddPolicy(RateLimitPolicies.Import, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = importPermitLimit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));

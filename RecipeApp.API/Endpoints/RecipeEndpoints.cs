@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using RecipeApp.API.Filters;
+using RecipeApp.Application.Images;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
@@ -22,6 +23,10 @@ public static class RecipeEndpoints
     // in a few calls and the default is sized for a picker's dropdown.
     private const int DefaultIngredientPageSize = 25;
     private const int MaxIngredientPageSize = 200;
+
+    // Stream L: multipart framing and headers on top of a max-size photo, matching
+    // ImageEndpoints' own ceiling so a photo import and a photo upload refuse the same file.
+    private const long MaxDeclaredPhotoBytes = ImageUploadRules.MaxSizeBytes + 64 * 1024;
 
     public static void MapRecipeEndpoints(this WebApplication app)
     {
@@ -60,6 +65,76 @@ public static class RecipeEndpoints
         })
         .AddEndpointFilter<ValidationFilter<GenerateRecipeRequest>>()
         .RequireRateLimiting(RateLimitPolicies.Chat);
+
+        // ── STREAM L: the two import routes ─────────────────────────────────────────────
+        //
+        // Under /recipes because the result is a recipe — 201 with the same RecipeResponse
+        // every other recipe route returns, so the SPA routes straight to /recipes/{id}.
+        //
+        // Their OWN rate-limit lane rather than the chat one that /generate and /cook/ask take.
+        // The convention in RateLimitPolicies is per-lane budgets, and import differs from
+        // those two in a way that matters: they cost tokens, this also makes an outbound
+        // request to a server the CALLER named. Sharing chat's budget would let a burst of
+        // imports crowd out cook mode, and would leave this app usable as a traffic amplifier
+        // pointed at a third party.
+        //
+        // Six outcomes, mapping onto four status codes. The two fetch failures are separate
+        // deliberately: a private address is a 400 the user can fix by pasting a different
+        // link, a blog that is down is a 502 about somebody else's machine.
+        group.MapPost("/import/url", async (ImportRecipeFromUrlRequest request, IRecipeImportService import, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var result = await import.ImportFromUrlAsync(request, userId, cancellationToken);
+            return ImportResult(result);
+        })
+        .AddEndpointFilter<ValidationFilter<ImportRecipeFromUrlRequest>>()
+        .RequireRateLimiting(RateLimitPolicies.Import);
+
+        // Tier 2. Reads the multipart body by hand for exactly the reasons ImageEndpoints
+        // documents: the declared Content-Length can be refused before the body is parsed, and
+        // no inferred form parameter means no antiforgery requirement on this cookie-less API.
+        //
+        // The photo is validated through ImageUploadRules — the SAME magic-byte sniff an upload
+        // gets — before a single byte reaches the provider. That ordering is the point: without
+        // it, a mislabelled file becomes a paid vision call that fails at Gemini's allow-list
+        // instead of a free 400 here.
+        group.MapPost("/import/photo", async (HttpRequest httpRequest, IRecipeImportService import, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var userId = Guid.Parse(user.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? user.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+            if (httpRequest.ContentLength is > MaxDeclaredPhotoBytes)
+            {
+                return PhotoProblem($"The photo exceeds the {ImageUploadRules.MaxSizeBytes / (1024 * 1024)} MB size limit.");
+            }
+
+            if (!httpRequest.HasFormContentType)
+            {
+                return PhotoProblem("The request must be multipart/form-data with a 'file' part.");
+            }
+
+            var form = await httpRequest.ReadFormAsync(cancellationToken);
+            var file = form.Files.GetFile("file") ?? form.Files.FirstOrDefault();
+            if (file is null)
+            {
+                return PhotoProblem("No photo was uploaded. Send it as a multipart part named 'file'.");
+            }
+
+            await using var stream = file.OpenReadStream();
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer, cancellationToken);
+            var content = buffer.ToArray();
+
+            var header = content.AsSpan(0, Math.Min(ImageUploadRules.HeaderSniffLength, content.Length));
+            if (!ImageUploadRules.TryValidate(file.ContentType, content.Length, header, out _, out var error))
+            {
+                return PhotoProblem(error!);
+            }
+
+            var result = await import.ImportFromPhotoAsync(
+                new RecipeImageContent(content, file.ContentType), userId, cancellationToken);
+            return ImportResult(result);
+        })
+        .RequireRateLimiting(RateLimitPolicies.Import);
 
         // Stream M: the cook-mode assistant. Under /recipes/{id} because the question is ABOUT
         // a recipe and the recipe's own visibility rule is what decides whether it may be asked
@@ -393,4 +468,50 @@ public static class RecipeEndpoints
             statusCode: StatusCodes.Status502BadGateway,
             title: "The cooking assistant is temporarily unavailable.",
             detail: "The assistant could not answer just now. Your recipe and timers are unaffected — please try again.");
+
+    // Stream L. Shared by both import routes so the two can never drift on what an outcome
+    // means over the wire.
+    //
+    // The Detail carried by SourceRejected / SourceUnreachable / NotARecipe is surfaced
+    // VERBATIM, which is unusual for this codebase — most failures answer with a fixed
+    // sentence. It is safe and it is necessary here for the same reason: every one of those
+    // messages is about the URL the caller just typed, and they are written to be client-safe
+    // (no internal addresses, no provider bodies, no stack detail — see the fetcher). "That
+    // page is too large to import" and "no ingredients could be read from the source" are
+    // different problems with different fixes, and collapsing them into "import failed" would
+    // leave the user re-pasting a link that was never going to work.
+    private static IResult ImportResult(RecipeImportResult<ImportRecipeResponse> result) =>
+        result.Outcome switch
+        {
+            RecipeImportOutcome.Success =>
+                Results.Created($"/recipes/{result.Value!.Recipe.Id}", result.Value),
+
+            // The request is wrong and the caller can fix it. No network call was made.
+            RecipeImportOutcome.SourceRejected => Results.ValidationProblem(
+                new Dictionary<string, string[]> { ["url"] = [result.Detail ?? "That address cannot be imported."] }),
+
+            // Well-formed request, fetch worked, the CONTENT is the problem. 422 rather than
+            // 400: re-typing the same URL will not help, and a 400 invites exactly that.
+            RecipeImportOutcome.NotARecipe => Results.Problem(
+                statusCode: StatusCodes.Status422UnprocessableEntity,
+                title: "No recipe could be read from that source.",
+                detail: result.Detail),
+
+            RecipeImportOutcome.SourceUnreachable => Results.Problem(
+                statusCode: StatusCodes.Status502BadGateway,
+                title: "That page could not be fetched.",
+                detail: result.Detail),
+
+            RecipeImportOutcome.QuotaExceeded => QuotaExhausted(),
+
+            _ => Results.Problem(
+                statusCode: StatusCodes.Status502BadGateway,
+                title: "The recipe importer is temporarily unavailable.",
+                detail: "The importer could not read a usable recipe. Nothing was saved — please try again."),
+        };
+
+    // Same 400 shape as ImageEndpoints' upload failures: RFC-7807 ValidationProblem keyed on
+    // the offending field.
+    private static IResult PhotoProblem(string message) =>
+        Results.ValidationProblem(new Dictionary<string, string[]> { ["file"] = [message] });
 }

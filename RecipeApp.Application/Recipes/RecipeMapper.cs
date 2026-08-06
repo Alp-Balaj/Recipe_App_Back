@@ -30,6 +30,7 @@ public static class RecipeMapper
             recipe.Tags,
             recipe.CreatedByUserId,
             recipe.IsAiGenerated,
-            recipe.SourceConversationId);
+            recipe.SourceConversationId,
+            recipe.SourceUrl);
     }
 }
