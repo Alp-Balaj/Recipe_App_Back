@@ -57,6 +57,39 @@ public class JsonbEnumEncodingTests(IntegrationTestFactory factory) : IClassFixt
         Assert.DoesNotContain("\"Unit\":1", ingredientsJson);
     }
 
+    /// <summary>
+    /// Stream J extends the same contract to the Steps column, which had no enum in it until
+    /// a step gained a temperature. Steps is a COMPLEX jsonb column (List&lt;RecipeStep&gt;),
+    /// so RecipeAppDataSource's converter is what covers it — unlike Tags, which EF
+    /// serializes itself. Celsius is ordinal 0, so a lost converter would write
+    /// <c>"Unit":0</c>, and every stored oven temperature would silently become Fahrenheit
+    /// the day a member is inserted ahead of it.
+    /// </summary>
+    [Fact]
+    public async Task Step_temperature_units_are_stored_as_names_not_ordinals()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var created = await CreateAsync(client);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var stepsJson = await ReadScalarAsync(
+            db, $"""SELECT "Steps"::text FROM "Recipes" WHERE "Id" = '{created.Id}'""");
+
+        Assert.Contains("\"Celsius\"", stepsJson);
+        Assert.DoesNotContain("\"Unit\": 0", stepsJson);
+        Assert.DoesNotContain("\"Unit\":0", stepsJson);
+
+        // The rest of the typed step, round-tripped through Postgres rather than asserted on
+        // the response body — the point being that the jsonb document really carries them.
+        Assert.Contains("\"DurationSeconds\"", stepsJson);
+        Assert.Contains("\"IngredientIndexes\"", stepsJson);
+        Assert.DoesNotContain("timerSeconds", stepsJson);
+        Assert.DoesNotContain("TimerSeconds", stepsJson);
+    }
+
     [Fact]
     public async Task Dietary_restrictions_are_stored_as_names_not_ordinals()
     {
@@ -157,7 +190,19 @@ public class JsonbEnumEncodingTests(IntegrationTestFactory factory) : IClassFixt
                 new RecipeIngredient { Name = ingredientName, Quantity = 2m, Unit = UnitOfMeasure.Cup },
                 new RecipeIngredient { Name = "potato", Quantity = 1m, Unit = UnitOfMeasure.Kilogram },
             ],
-            Steps: [new RecipeStep { StepNumber = 1, Description = "Combine and serve." }],
+            Steps:
+            [
+                new RecipeStep
+                {
+                    StepNumber = 1,
+                    Description = "Combine and serve.",
+                    DurationSeconds = 120,
+                    IngredientIndexes = [0, 1],
+                    // Stream J puts the first enum inside the Steps column. Celsius is
+                    // ordinal 0, which is the negative this file asserts on below.
+                    Temperature = new StepTemperature { Value = 180, Unit = TemperatureUnit.Celsius },
+                },
+            ],
             Tags: [RecipeTag.OnePot, RecipeTag.Vegan]);
 
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);

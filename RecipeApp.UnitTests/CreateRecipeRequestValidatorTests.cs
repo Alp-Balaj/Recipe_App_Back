@@ -140,4 +140,158 @@ public class CreateRecipeRequestValidatorTests
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.PropertyName == nameof(CreateRecipeRequest.Steps));
     }
+
+    // ── Stream J: the typed step ────────────────────────────────────────────────────────
+    // Two ingredients, so an index can be both in range and out of it.
+    private static CreateRecipeRequest WithSteps(params RecipeStep[] steps) => Valid() with
+    {
+        Ingredients =
+        [
+            new RecipeIngredient { Name = "water", Quantity = 1m, Unit = UnitOfMeasure.Cup },
+            new RecipeIngredient { Name = "flour", Quantity = 200m, Unit = UnitOfMeasure.Gram },
+        ],
+        Steps = [.. steps],
+    };
+
+    [Fact]
+    public void Validate_StepWithNoTypedFields_IsValid()
+    {
+        // Every new field is optional. A step that is still just a number and prose — which
+        // is every step written before stream J — must stay a legal step.
+        Assert.True(_validator.Validate(Valid()).IsValid);
+    }
+
+    [Fact]
+    public void Validate_StepReferencingBothIngredientLines_IsValid()
+    {
+        var result = _validator.Validate(WithSteps(
+            new RecipeStep { StepNumber = 1, Description = "Whisk together.", IngredientIndexes = [0, 1] }));
+
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void Validate_StepReferencingAnIngredientLineThatDoesNotExist_FailsOnSteps()
+    {
+        // Decision D16's whole point: an index is only meaningful against the sibling list,
+        // so index 2 against two ingredients is the shape a stale client would send.
+        var result = _validator.Validate(WithSteps(
+            new RecipeStep { StepNumber = 1, Description = "Fold it in.", IngredientIndexes = [2] }));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName.Contains("Steps"));
+    }
+
+    [Fact]
+    public void Validate_StepReferencingANegativeIngredientIndex_FailsOnSteps()
+    {
+        var result = _validator.Validate(WithSteps(
+            new RecipeStep { StepNumber = 1, Description = "Fold it in.", IngredientIndexes = [-1] }));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName.Contains("Steps"));
+    }
+
+    [Fact]
+    public void Validate_StepReferencingTheSameIngredientLineTwice_FailsOnSteps()
+    {
+        var result = _validator.Validate(WithSteps(
+            new RecipeStep { StepNumber = 1, Description = "Add the water twice?", IngredientIndexes = [0, 0] }));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName.Contains("Steps"));
+    }
+
+    [Fact]
+    public void Validate_StepWithZeroDuration_FailsOnSteps()
+    {
+        // Zero is not "no duration" — null is. Zero is a claim that the step is instant.
+        var result = _validator.Validate(WithSteps(
+            new RecipeStep { StepNumber = 1, Description = "Rest.", DurationSeconds = 0 }));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName.Contains("DurationSeconds"));
+    }
+
+    [Fact]
+    public void Validate_StepWithNegativeDuration_FailsOnSteps()
+    {
+        var result = _validator.Validate(WithSteps(
+            new RecipeStep { StepNumber = 1, Description = "Rest.", DurationSeconds = -60 }));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName.Contains("DurationSeconds"));
+    }
+
+    [Fact]
+    public void Validate_StepWithDurationOverADay_FailsOnSteps()
+    {
+        var result = _validator.Validate(WithSteps(
+            new RecipeStep { StepNumber = 1, Description = "Cure.", DurationSeconds = RecipeStepRules.MaxDurationSeconds + 1 }));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName.Contains("DurationSeconds"));
+    }
+
+    [Fact]
+    public void Validate_StepWithNullDuration_IsValid()
+    {
+        var result = _validator.Validate(WithSteps(
+            new RecipeStep { StepNumber = 1, Description = "Season to taste.", DurationSeconds = null }));
+
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void Validate_StepAtAnOvenTemperature_IsValid()
+    {
+        var result = _validator.Validate(WithSteps(new RecipeStep
+        {
+            StepNumber = 1,
+            Description = "Bake.",
+            Temperature = new StepTemperature { Value = 180, Unit = TemperatureUnit.Celsius },
+        }));
+
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void Validate_TemperatureBoundsAreCheckedPerUnit()
+    {
+        // 400 is a hot-but-ordinary oven in Fahrenheit and a kiln in Celsius. One bound for
+        // both scales could only be wrong in one direction or the other, which is why
+        // RecipeStepRules carries two.
+        var fahrenheit = _validator.Validate(WithSteps(new RecipeStep
+        {
+            StepNumber = 1,
+            Description = "Bake.",
+            Temperature = new StepTemperature { Value = 400, Unit = TemperatureUnit.Fahrenheit },
+        }));
+        var celsius = _validator.Validate(WithSteps(new RecipeStep
+        {
+            StepNumber = 1,
+            Description = "Bake.",
+            Temperature = new StepTemperature { Value = 400, Unit = TemperatureUnit.Celsius },
+        }));
+
+        Assert.True(fahrenheit.IsValid);
+        Assert.False(celsius.IsValid);
+        Assert.Contains(celsius.Errors, e => e.PropertyName.Contains("Temperature"));
+    }
+
+    [Fact]
+    public void Validate_StepWithUndefinedTemperatureUnit_FailsOnSteps()
+    {
+        // The wire converter rejects an unknown NAME, but an undefined enum VALUE still
+        // binds — the same hole the IsInEnum rules above exist to close.
+        var result = _validator.Validate(WithSteps(new RecipeStep
+        {
+            StepNumber = 1,
+            Description = "Bake.",
+            Temperature = new StepTemperature { Value = 180, Unit = (TemperatureUnit)99 },
+        }));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.PropertyName.Contains("Temperature"));
+    }
 }

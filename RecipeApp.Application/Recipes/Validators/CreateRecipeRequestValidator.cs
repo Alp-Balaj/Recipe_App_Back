@@ -43,6 +43,26 @@ public class CreateRecipeRequestValidator : AbstractValidator<CreateRecipeReques
         {
             step.RuleFor(s => s.StepNumber).GreaterThan(0);
             step.RuleFor(s => s.Description).NotEmpty();
+
+            // Stream J. The duration replaces TimerSeconds, which had no rule at all — a
+            // negative timer was storable, and the detail page rendered it as an empty
+            // string, which is how it went unnoticed. Null stays legal: a step with no
+            // meaningful duration is the normal case, not a missing value.
+            step.RuleFor(s => s.DurationSeconds)
+                .InclusiveBetween(1, RecipeStepRules.MaxDurationSeconds)
+                .When(s => s.DurationSeconds is not null);
+
+            step.RuleFor(s => s.Temperature)
+                .Must(RecipeStepRules.TemperatureIsValid)
+                .WithMessage(RecipeStepRules.TemperatureMessage);
         });
+
+        // Decision D16, the rule that makes an index reference safe at rest. It cannot live
+        // in the ChildRules block above: an index is only meaningful against the SIBLING
+        // ingredient list, and a child validator sees the step alone.
+        RuleForEach(x => x.Steps)
+            .Must((request, step) =>
+                RecipeStepRules.IngredientIndexesAreValid(step, request.Ingredients?.Count ?? 0))
+            .WithMessage(RecipeStepRules.IngredientIndexesMessage);
     }
 }

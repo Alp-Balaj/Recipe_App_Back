@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Recipes.Abstractions;
+using RecipeApp.Application.Recipes.Validators;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.Services;
@@ -60,8 +61,13 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
     private const decimal MaxQuantity = 100_000m;
     private const int MaxSteps = 40;
     private const int MaxStepDescriptionLength = 1000;
-    private const int MaxTimerSeconds = 24 * 60 * 60;
     private const int MaxTags = 10;
+
+    // Stream J. Taken FROM the validator's own rules rather than restated here: the duration
+    // bound and the per-unit temperature ranges are the same numbers the human write path
+    // enforces, and this file's contract is that a generated row is always a row a human
+    // could have typed. A restated copy is a copy that can drift.
+    private const int MaxDurationSeconds = RecipeStepRules.MaxDurationSeconds;
 
     // MaxCuisineLength, MaxUnitLength and MaxTagLength went with stream G's typing: a closed
     // vocabulary has no length to bound. Their replacement is membership — a value that is
@@ -84,6 +90,7 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
     private static readonly string[] UnitNames = Enum.GetNames<UnitOfMeasure>();
     private static readonly string[] CuisineNames = Enum.GetNames<Cuisine>();
     private static readonly string[] TagNames = Enum.GetNames<RecipeTag>();
+    private static readonly string[] TemperatureUnitNames = Enum.GetNames<TemperatureUnit>();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -131,6 +138,12 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
                     required = new[] { "name", "quantity", "unit" },
                 },
             },
+            // STREAM J types the step. Two of the three new fields are the kind the schema
+            // can only shape, not mean (a duration, a temperature value); the third —
+            // ingredientIndexes — is the one the schema cannot police at all, because
+            // "in range" is a claim about a SIBLING array the dialect has no way to
+            // reference. NormaliseSteps is where that is enforced, and it has to be: the
+            // indexes are relative to a list that normalisation itself can shorten.
             steps = new
             {
                 type = "ARRAY",
@@ -140,7 +153,18 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
                     properties = new
                     {
                         description = new { type = "STRING" },
-                        timerSeconds = new { type = "NUMBER" },
+                        durationSeconds = new { type = "NUMBER" },
+                        ingredientIndexes = new { type = "ARRAY", items = new { type = "NUMBER" } },
+                        temperature = new
+                        {
+                            type = "OBJECT",
+                            properties = new
+                            {
+                                value = new { type = "NUMBER" },
+                                unit = new { type = "STRING", @enum = TemperatureUnitNames },
+                            },
+                            required = new[] { "value", "unit" },
+                        },
                     },
                     required = new[] { "description" },
                 },
@@ -244,7 +268,17 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
         sb.AppendLine($"- cuisineType: EXACTLY one of [{string.Join(", ", CuisineNames)}]. Omit it entirely when the dish belongs to no particular cuisine — do not force a near match, and use Other only for a real cuisine missing from that list.");
         sb.AppendLine("- caloriesPerServing: your best estimate per serving, or omit it when you cannot estimate honestly. Never guess wildly.");
         sb.AppendLine($"- ingredients: every ingredient needed, each with a name, a quantity GREATER THAN ZERO, and a unit that is EXACTLY one of [{string.Join(", ", UnitNames)}]. Quantities must match the servings figure. Do not put the quantity or the unit inside the name. Prefer Gram and Millilitre for anything weighed or poured; use Piece, Clove, Slice, Can, Package or Bunch for whole items; use Pinch, Dash, Splash, Handful or ToTaste only where a real cook would not measure.");
-        sb.AppendLine("- steps: the method in order, one instruction per step. Do not number them yourself. Set timerSeconds only on a step with a real unattended wait; omit it otherwise.");
+        // Stream J. The step is a typed object now, and the three additions are worded to
+        // resist the three ways a model gets this wrong: it numbers steps that are already
+        // numbered; it lists every ingredient on every step; and it repeats the quantity in
+        // the prose, which is what makes serving scaling go stale (D17). The last line is
+        // the one that matters most — the reference exists precisely so the prose does not
+        // have to carry the amount.
+        sb.AppendLine("- steps: the method in order, one instruction per step. Do not number them yourself.");
+        sb.AppendLine($"- steps[].durationSeconds: how long the step takes, in whole seconds, at most {MaxDurationSeconds}. Include it for anything with a real elapsed time — chopping, simmering, resting, proving. Omit it for an instant step such as \"season to taste\".");
+        sb.AppendLine("- steps[].ingredientIndexes: the 0-based positions, in the ingredients array you just wrote, of ONLY the ingredients this step actually uses. A step that uses none (\"preheat the oven\") omits it. Never list the same position twice, and never list every ingredient on every step.");
+        sb.AppendLine($"- steps[].temperature: an object {{ value, unit }} where unit is EXACTLY one of [{string.Join(", ", TemperatureUnitNames)}], on steps carried out at a temperature that matters — an oven setting, a frying temperature, a chilling target. Omit it entirely otherwise; do not guess one for a step done on an ordinary hob.");
+        sb.AppendLine("- Write the step prose WITHOUT repeating the quantity: say \"stir in the butter\", not \"stir in 2 tbsp butter\". The ingredient reference carries the amount, and the app shows it beside the instruction.");
         sb.AppendLine($"- tags: up to {MaxTags}, each EXACTLY one of [{string.Join(", ", TagNames)}]. Pick only the ones that are genuinely true of the dish; an empty list is fine. Never invent a tag outside that list.");
         sb.AppendLine();
         sb.AppendLine("If the request is not about food at all, still return a sensible recipe that is as close to the request as a cooking app can honestly get.");
@@ -312,13 +346,17 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
             throw new InvalidOperationException("recipe generator returned a recipe with no title.");
         }
 
-        var ingredients = NormaliseIngredients(raw.Ingredients);
+        // Stream J: normalising ingredients can DROP lines (a nameless one carries nothing),
+        // which renumbers every line after it — so the steps' 0-based references must be
+        // translated through the same pass that did the dropping, not applied to the raw
+        // positions the model wrote. That is why NormaliseIngredients hands back a map.
+        var (ingredients, ingredientIndexMap) = NormaliseIngredients(raw.Ingredients);
         if (ingredients.Count == 0)
         {
             throw new InvalidOperationException("recipe generator returned a recipe with no usable ingredients.");
         }
 
-        var steps = NormaliseSteps(raw.Steps);
+        var steps = NormaliseSteps(raw.Steps, ingredientIndexMap);
         if (steps.Count == 0)
         {
             throw new InvalidOperationException("recipe generator returned a recipe with no usable steps.");
@@ -361,16 +399,27 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
             NormaliseTags(raw.Tags));
     }
 
-    private static List<RecipeIngredient> NormaliseIngredients(List<RawIngredient?>? raw)
+    /// <summary>
+    /// Returns the surviving ingredient lines AND a map from the model's own 0-based
+    /// position to the position the line ended up at, or -1 where the line was dropped or
+    /// fell past the cap. Stream J needs the map because the steps reference lines BY
+    /// POSITION (D16) and this method is what moves them.
+    /// </summary>
+    private static (List<RecipeIngredient> Ingredients, int[] IndexMap) NormaliseIngredients(
+        List<RawIngredient?>? raw)
     {
         var result = new List<RecipeIngredient>();
         if (raw is null)
         {
-            return result;
+            return (result, []);
         }
 
-        foreach (var item in raw)
+        var indexMap = new int[raw.Count];
+        Array.Fill(indexMap, -1);
+
+        for (var rawIndex = 0; rawIndex < raw.Count; rawIndex++)
         {
+            var item = raw[rawIndex];
             if (result.Count >= MaxIngredients)
             {
                 break;
@@ -391,6 +440,7 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
             // to Piece rather than being approximated — see the FallbackUnit note.
             var unit = Units.TryParse(item?.Unit, out var parsedUnit) ? parsedUnit : FallbackUnit;
 
+            indexMap[rawIndex] = result.Count;
             result.Add(new RecipeIngredient
             {
                 Name = name,
@@ -399,10 +449,10 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
             });
         }
 
-        return result;
+        return (result, indexMap);
     }
 
-    private static List<RecipeStep> NormaliseSteps(List<RawStep?>? raw)
+    private static List<RecipeStep> NormaliseSteps(List<RawStep?>? raw, int[] ingredientIndexMap)
     {
         var result = new List<RecipeStep>();
         if (raw is null)
@@ -430,13 +480,78 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
                 // which is what the human path's validator and the detail page assume.
                 StepNumber = result.Count + 1,
                 Description = description,
-                // 0 / absent both mean "no unattended wait here", which is null — the same
-                // reasoning as calories, and what the entity's own comment asks for.
-                TimerSeconds = DropBelowMinimum(item?.TimerSeconds, 1, MaxTimerSeconds),
+                // 0 / absent both mean "no meaningful duration here", which is null — the
+                // same reasoning as calories, and what the entity's own comment asks for.
+                DurationSeconds = DropBelowMinimum(item?.DurationSeconds, 1, MaxDurationSeconds),
+                IngredientIndexes = NormaliseIngredientIndexes(item?.IngredientIndexes, ingredientIndexMap),
+                Temperature = NormaliseTemperature(item?.Temperature),
             });
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Stream J, decision D16. The model wrote positions into the ingredient array IT
+    /// returned; <see cref="NormaliseIngredients"/> may have dropped lines out of that array.
+    /// So every reference is translated through the map, and anything that does not land on
+    /// a surviving line is DROPPED — never clamped to a neighbour, which would silently
+    /// attach the wrong ingredient to a step and read as deliberate.
+    ///
+    /// The result satisfies RecipeStepRules.IngredientIndexesAreValid by construction:
+    /// in range, because the map only ever yields surviving positions, and distinct, because
+    /// of the HashSet. That is the property that lets the endpoint store a generated recipe
+    /// without running it back through the human path's validator.
+    /// </summary>
+    private static List<int> NormaliseIngredientIndexes(List<double?>? raw, int[] ingredientIndexMap)
+    {
+        var result = new List<int>();
+        if (raw is null || raw.Count == 0)
+        {
+            return result;
+        }
+
+        var seen = new HashSet<int>();
+        foreach (var value in raw)
+        {
+            var rawIndex = ClampInt(value, 0, int.MaxValue);
+            if (rawIndex is not int i || i >= ingredientIndexMap.Length)
+            {
+                continue;
+            }
+
+            var mapped = ingredientIndexMap[i];
+            if (mapped >= 0 && seen.Add(mapped))
+            {
+                result.Add(mapped);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// A temperature the model could not state coherently becomes NULL rather than a clamped
+    /// number. Same rule as calories and for the same reason: "this step has no particular
+    /// temperature" is a true statement about a lot of cooking, whereas 300 °C standing in
+    /// for a returned 900 is a claim nobody made. An unrecognised unit likewise drops the
+    /// whole object — a value without a scale is not a temperature.
+    /// </summary>
+    private static StepTemperature? NormaliseTemperature(RawTemperature? raw)
+    {
+        if (raw is null || !Vocabulary.TryParseMember<TemperatureUnit>(raw.Unit, out var unit))
+        {
+            return null;
+        }
+
+        var value = ClampInt(raw.Value, int.MinValue, int.MaxValue);
+        if (value is not int degrees)
+        {
+            return null;
+        }
+
+        var temperature = new StepTemperature { Value = degrees, Unit = unit };
+        return RecipeStepRules.TemperatureIsValid(temperature) ? temperature : null;
     }
 
     // Stream G: membership replaces clipping. A tag outside the curated vocabulary is
@@ -519,7 +634,13 @@ public class RecipeGenerationAssistant : IRecipeGenerationAssistant
     // shapes become domain values.
     private sealed record RawIngredient(string? Name, decimal? Quantity, string? Unit);
 
-    private sealed record RawStep(string? Description, double? TimerSeconds);
+    private sealed record RawTemperature(double? Value, string? Unit);
+
+    private sealed record RawStep(
+        string? Description,
+        double? DurationSeconds,
+        List<double?>? IngredientIndexes,
+        RawTemperature? Temperature);
 
     private sealed record RawRecipe(
         string? Title,

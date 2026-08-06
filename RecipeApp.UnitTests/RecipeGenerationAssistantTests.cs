@@ -58,7 +58,7 @@ public class RecipeGenerationAssistantTests
           ],
           "steps": [
             { "description": "Season the cod." },
-            { "description": "Fry in butter.", "timerSeconds": 300 }
+            { "description": "Fry in butter.", "durationSeconds": 300 }
           ],
           "tags": ["fish", "quick"]
         }
@@ -88,7 +88,7 @@ public class RecipeGenerationAssistantTests
         Assert.Equal(2m, draft.Ingredients[0].Quantity);
         Assert.Equal(UnitOfMeasure.Piece, draft.Ingredients[0].Unit);
         Assert.Equal([RecipeTag.Quick], draft.Tags);
-        Assert.Equal(300, draft.Steps[1].TimerSeconds);
+        Assert.Equal(300, draft.Steps[1].DurationSeconds);
     }
 
     [Fact]
@@ -236,17 +236,17 @@ public class RecipeGenerationAssistantTests
     }
 
     [Fact]
-    public async Task ZeroTimerSeconds_BecomesNull()
+    public async Task ZeroDurationSeconds_BecomesNull()
     {
         var json = """
             { "title": "Soup", "description": "d",
               "ingredients": [{"name":"stock","quantity":1,"unit":"l"}],
-              "steps": [{"description":"heat it","timerSeconds":0}] }
+              "steps": [{"description":"heat it","durationSeconds":0}] }
             """;
 
         var draft = await DraftAsync(json);
 
-        Assert.Null(draft.Steps[0].TimerSeconds);
+        Assert.Null(draft.Steps[0].DurationSeconds);
     }
 
     [Fact]
@@ -448,5 +448,109 @@ public class RecipeGenerationAssistantTests
 
         Assert.True(recipe.IsAiGenerated);
         Assert.Null(recipe.SourceConversationId);
+    }
+
+    // ── Stream J: the typed step ─────────────────────────────────────────────────────
+    // The free lane's usual bargain applies — the model invents these too, so each test
+    // below names the corruption normalisation prevents.
+
+    [Fact]
+    public async Task StepIngredientIndexes_AreRemappedAroundADroppedIngredient()
+    {
+        // THE decision-D16 hazard on this path, and the reason NormaliseIngredients returns
+        // a map. The model wrote three ingredients and referenced positions 0 and 2; the
+        // middle one has no name and is dropped, which slides "chilli" from 2 to 1. Applying
+        // the raw index to the shortened list would attach the WRONG ingredient to the step —
+        // silently, and in a way no round-trip test could see.
+        var json = """
+            { "title": "Noodles", "description": "d",
+              "ingredients": [
+                {"name":"noodles","quantity":200,"unit":"g"},
+                {"name":"","quantity":1,"unit":"g"},
+                {"name":"chilli","quantity":2,"unit":"pcs"}
+              ],
+              "steps": [{"description":"Toss together.","ingredientIndexes":[0,2]}] }
+            """;
+
+        var draft = await DraftAsync(json);
+
+        Assert.Equal(["noodles", "chilli"], draft.Ingredients.Select(i => i.Name));
+        Assert.Equal([0, 1], draft.Steps[0].IngredientIndexes);
+    }
+
+    [Fact]
+    public async Task StepIngredientIndexes_DropReferencesToNothing()
+    {
+        // Out of range, negative, and a duplicate. None is clamped to a neighbour: attaching
+        // an arbitrary nearby ingredient to a step reads as deliberate and is unfalsifiable.
+        var json = """
+            { "title": "Soup", "description": "d",
+              "ingredients": [{"name":"stock","quantity":1,"unit":"l"}],
+              "steps": [{"description":"Heat it.","ingredientIndexes":[0,0,7,-3]}] }
+            """;
+
+        var draft = await DraftAsync(json);
+
+        Assert.Equal([0], draft.Steps[0].IngredientIndexes);
+    }
+
+    [Fact]
+    public async Task StepWithNoIngredientIndexes_GetsAnEmptyList()
+    {
+        // Never null — "preheat the oven" consumes nothing, and a null here would make every
+        // reader on the frontend defend against it.
+        var draft = await DraftAsync(ValidJson);
+
+        Assert.Empty(draft.Steps[0].IngredientIndexes);
+    }
+
+    [Fact]
+    public async Task StepTemperature_IsKeptInTheUnitTheModelWroteIt()
+    {
+        var json = """
+            { "title": "Bread", "description": "d",
+              "ingredients": [{"name":"flour","quantity":500,"unit":"g"}],
+              "steps": [{"description":"Bake.","temperature":{"value":425,"unit":"Fahrenheit"}}] }
+            """;
+
+        var draft = await DraftAsync(json);
+
+        Assert.Equal(425, draft.Steps[0].Temperature!.Value);
+        Assert.Equal(TemperatureUnit.Fahrenheit, draft.Steps[0].Temperature!.Unit);
+    }
+
+    [Fact]
+    public async Task ImplausibleOrUnscaledTemperature_BecomesNullRatherThanClamped()
+    {
+        // Same rule as calories: a wrong number is worse than no number. 900 °C is the model
+        // being wrong, and 300 standing in for it is a claim nobody made; a temperature with
+        // an unrecognised unit is not a temperature at all.
+        var tooHot = """
+            { "title": "Bread", "description": "d",
+              "ingredients": [{"name":"flour","quantity":500,"unit":"g"}],
+              "steps": [{"description":"Bake.","temperature":{"value":900,"unit":"Celsius"}}] }
+            """;
+        var noScale = """
+            { "title": "Bread", "description": "d",
+              "ingredients": [{"name":"flour","quantity":500,"unit":"g"}],
+              "steps": [{"description":"Bake.","temperature":{"value":180,"unit":"Kelvin"}}] }
+            """;
+
+        Assert.Null((await DraftAsync(tooHot)).Steps[0].Temperature);
+        Assert.Null((await DraftAsync(noScale)).Steps[0].Temperature);
+    }
+
+    [Fact]
+    public async Task Prompt_TellsTheModelNotToRepeatQuantitiesInStepProse()
+    {
+        // The reference exists so the prose does not have to carry the amount (decision D17's
+        // third answer). A model that writes "stir in 2 tbsp butter" anyway makes the recipe
+        // go stale the moment servings change, which is the whole thing J is avoiding.
+        var caller = new FakeCaller(ValidJson);
+
+        await new RecipeGenerationAssistant(caller).GenerateAsync("go", [], []);
+
+        Assert.Contains("ingredientIndexes", caller.CapturedSystemPrompt);
+        Assert.Contains("WITHOUT repeating the quantity", caller.CapturedSystemPrompt);
     }
 }
