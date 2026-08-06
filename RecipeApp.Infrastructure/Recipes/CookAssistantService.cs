@@ -101,11 +101,20 @@ public class CookAssistantService : ICookAssistantService
         {
             answer = await _assistant.AskAsync(context, history, request.Question, cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             // Same funnel as the other three lanes: any failure becomes AssistantUnavailable →
             // 502, with nothing billed. Cancellation propagates — a cancelled request is not an
             // assistant failure, and cook mode cancels often (the cook closed the sheet).
+            //
+            // THE SECOND HALF OF THAT CONDITION IS NOT DECORATION, and the browser pass is what
+            // found it. `HttpClient.Timeout` elapsing throws TaskCanceledException, which IS an
+            // OperationCanceledException — so the sibling lanes' plain `is not
+            // OperationCanceledException` filter lets a provider timeout sail past the funnel and
+            // out as an unhandled 500. Observed live: a 30-second Gemini stall answered this
+            // endpoint with a 500 and no problem body. Asking whether the CALLER'S token is the
+            // one that cancelled separates the two cases exactly: caller cancelled → propagate,
+            // anything else (including a timeout) → 502.
             _logger.LogError(ex, "Cook assistant failed for user {UserId} on recipe {RecipeId}.", userId, recipeId);
             return CookAssistantResult<CookAnswerResponse>.AssistantUnavailable();
         }
