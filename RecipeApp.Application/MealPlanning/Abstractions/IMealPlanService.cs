@@ -63,4 +63,23 @@ public interface IMealPlanService
     /// user's plan (never Forbidden — no visibility tier, same rule as GetMealPlanByIdAsync).
     /// </summary>
     Task<MealPlanResult<GroceryInsightResponse>> GetGroceryInsightAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default);
+
+    // --- computed nutrition (day ribbon, stream I / D12) -----------------------------------
+
+    /// <summary>
+    /// The plan's computed nutrition, one row per day that has entries — ONE read for
+    /// the whole week rather than an insights call per entry (which would be up to 21
+    /// requests for a full week, the N-per-view mistake the planning surfaces already
+    /// refused twice).
+    ///
+    /// Each day sums ONE SERVING per planned meal, matching the day page's author-typed
+    /// calorie strip so the computed figure and the typed one are comparable; a dish
+    /// planned twice in a day counts twice. Coverage is summed per entry alongside the
+    /// figures, and a day below D12's floor comes back flagged insufficiently covered
+    /// rather than silently rendered as a confident total. Entries whose recipe is
+    /// soft-deleted drop out, exactly as they do from GetMealPlanByIdAsync, so the
+    /// ribbon can never count a meal the page cannot show. Caller-scoped, NotFound for
+    /// an unknown id or another user's plan.
+    /// </summary>
+    Task<MealPlanResult<MealPlanNutritionResponse>> GetNutritionAsync(Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default);
 }

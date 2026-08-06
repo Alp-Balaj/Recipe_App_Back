@@ -6,6 +6,7 @@ using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
 
@@ -319,5 +320,91 @@ public class MealPlanService : IMealPlanService
 
         return MealPlanResult<GroceryInsightResponse>.Success(
             new GroceryInsightResponse(distinctIngredientCount, sharedIngredientCount, outlier));
+    }
+
+    // --- computed nutrition (day ribbon, stream I / D12) -----------------------------------
+
+    public async Task<MealPlanResult<MealPlanNutritionResponse>> GetNutritionAsync(
+        Guid mealPlanId, Guid userId, CancellationToken cancellationToken = default)
+    {
+        // Caller-scoped, never 403 — same rule as GetMealPlanByIdAsync
+        // (meal-planning-v1-semantics / 404-never-403).
+        var plan = await _db.MealPlans.SingleOrDefaultAsync(
+            mp => mp.Id == mealPlanId && mp.UserId == userId, cancellationToken);
+        if (plan is null)
+        {
+            return MealPlanResult<MealPlanNutritionResponse>.NotFound();
+        }
+
+        // Per ENTRY, not per distinct recipe — the opposite of the grocery insight above,
+        // and deliberately: an outlier is a property of a dish, but eating the same dish
+        // twice on Sunday really is twice the calories. Joining _db.Recipes (global
+        // !IsDeleted filter) drops entries whose recipe was soft-deleted, so the ribbon
+        // can never total a meal GET /meal-plans/{id} refuses to render.
+        var entries = await _db.MealPlanEntries
+            .Where(e => e.MealPlanId == mealPlanId)
+            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new { e.DayOfWeek, RecipeId = r.Id })
+            .ToListAsync(cancellationToken);
+
+        if (entries.Count == 0)
+        {
+            return MealPlanResult<MealPlanNutritionResponse>.Success(
+                new MealPlanNutritionResponse(plan.Id, []));
+        }
+
+        // Two-query hydrate, then ONE catalogue read for the whole week — the reason this
+        // endpoint exists at all. The alternative shape, a /recipes/{id}/insights call per
+        // entry, is up to 21 requests and 21 catalogue loads for one week.
+        var recipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
+        var recipes = await _db.Recipes
+            .Where(r => recipeIds.Contains(r.Id))
+            .ToListAsync(cancellationToken);
+
+        var resolvedIds = recipes
+            .SelectMany(r => r.Ingredients)
+            .Where(i => i.IngredientId is not null)
+            .Select(i => i.IngredientId!.Value)
+            .Distinct()
+            .ToList();
+
+        var catalogue = resolvedIds.Count == 0
+            ? []
+            : await _db.Ingredients
+                .Where(i => resolvedIds.Contains(i.Id))
+                .ToDictionaryAsync(i => i.Id, cancellationToken);
+
+        // Computed once per DISTINCT recipe even though it is counted once per entry:
+        // the same dish twice costs two servings but only one pass over its lines.
+        var perServing = recipes.ToDictionary(
+            r => r.Id,
+            r => RecipeNutrition.PerServing(r, catalogue));
+
+        var days = entries
+            .GroupBy(e => e.DayOfWeek)
+            .OrderBy(g => g.Key)
+            .Select(g =>
+            {
+                var totals = g.Aggregate(
+                    NutritionTotals.Nothing,
+                    (running, entry) => running.Plus(perServing[entry.RecipeId]));
+
+                // Rounded HERE, once, after the day is whole — rounding each meal first
+                // would leave a day's total disagreeing with the meals it is showing.
+                return new DayNutritionResponse(
+                    g.Key,
+                    g.Count(),
+                    totals.Kcal is double kcal ? (int)Math.Round(kcal, MidpointRounding.AwayFromZero) : null,
+                    totals.ProteinG is double protein ? Math.Round(protein, 1) : null,
+                    totals.FatG is double fat ? Math.Round(fat, 1) : null,
+                    totals.CarbsG is double carbs ? Math.Round(carbs, 1) : null,
+                    totals.FibreG is double fibre ? Math.Round(fibre, 1) : null,
+                    totals.CoveredLines,
+                    totals.TotalLines,
+                    totals.IsSufficientlyCovered);
+            })
+            .ToList();
+
+        return MealPlanResult<MealPlanNutritionResponse>.Success(
+            new MealPlanNutritionResponse(plan.Id, days));
     }
 }
