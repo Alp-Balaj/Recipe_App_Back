@@ -923,6 +923,96 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         Assert.Equal(weekStart.AddDays(6), carrot.Parts[1].Date);
     }
 
+    // --- the aisle-only fallback ----------------------------------------------------------
+
+    // On a live week "Other" was the LARGEST heading on the page, and none of the names that
+    // put it there were exotic. Each of these misses the alias table as a qualified compound
+    // while its head noun is catalogued perfectly well, so the projection retries the tail.
+    [Fact]
+    public async Task A_qualified_compound_is_shelved_by_its_head_noun_rather_than_in_other()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        // The four names measured on a real week, plus one the catalogue genuinely cannot
+        // place — "gochujang" has no catalogued tail and must stay where it was.
+        var dinner = await CreateRecipeAsync(client, "Traybake", [
+            ("Plum tomatoes", 400m, UnitOfMeasure.Gram),
+            ("New potatoes", 500m, UnitOfMeasure.Gram),
+            ("Spring onion", 2m, UnitOfMeasure.Piece),
+            ("Udon noodles", 200m, UnitOfMeasure.Gram),
+            ("Gochujang", 1m, UnitOfMeasure.Tablespoon),
+        ]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", dinner);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        string AisleOf(string name) => Assert.Single(week.Groups, g => g.DisplayName == name).Aisle;
+
+        Assert.Equal("Produce", AisleOf("Plum tomatoes"));
+        Assert.Equal("Produce", AisleOf("New potatoes"));
+        Assert.Equal("Produce", AisleOf("Spring onion"));
+        Assert.Equal("Pantry", AisleOf("Udon noodles"));
+
+        // No catalogued tail, so nothing was invented for it.
+        Assert.Equal(ShoppingAisles.Other, AisleOf("Gochujang"));
+    }
+
+    // THE GUARDRAIL. The fallback is allowed to be a weaker matcher than IngredientKey only
+    // because its failure mode is a wrong HEADING. The instant it could set an IngredientId
+    // it would be deciding identity — nutrition, dietary conflicts, density collapsing and
+    // whether two rows merge — under a matcher that is explicitly not trusted with any of
+    // that. Break the aisle-only rule and this test fails.
+    [Fact]
+    public async Task A_rescued_row_is_shelved_without_ever_gaining_an_ingredient_id()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        var recipeId = await CreateRecipeAsync(client, "Salad", [("Plum tomatoes", 400m, UnitOfMeasure.Gram)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", recipeId);
+
+        var group = Assert.Single(Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks).Groups);
+
+        // Shelved...
+        Assert.Equal("Produce", group.Aisle);
+        // ...but still keyed by its own NAME, not by a catalogue id. An id-keyed group would
+        // merge this row with every other line that resolved to red tomatoes.
+        Assert.DoesNotContain(ShoppingListKeys.IngredientPrefix, group.Key);
+
+        // And nothing was written back to the recipe. This is the assertion that actually
+        // holds the line: the aisle is a projection-time decision and leaves no trace.
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var saved = await db.Recipes.SingleAsync(r => r.Id == recipeId);
+        Assert.All(saved.Ingredients, i => Assert.Null(i.IngredientId));
+    }
+
+    // Two lines that share a head noun but are different products stay two rows. The fallback
+    // agrees with them about the SHELF and says nothing about their identity — which is the
+    // whole distinction it rests on, made visible.
+    [Fact]
+    public async Task Sharing_an_aisle_never_merges_two_unresolved_rows()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        var stew = await CreateRecipeAsync(client, "Stew", [
+            ("Plum tomatoes", 400m, UnitOfMeasure.Gram),
+            ("San Marzano tomatoes", 200m, UnitOfMeasure.Gram),
+        ]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", stew);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        var tomatoes = week.Groups.Where(g => g.Aisle == "Produce").ToList();
+
+        Assert.Equal(2, tomatoes.Count);
+        Assert.All(tomatoes, g => Assert.Single(g.Parts));
+        Assert.Distinct(tomatoes.Select(g => g.Key));
+    }
+
     // A manual row serves no planned dish, so it has no day to name — and a fabricated one
     // would put "Bin bags" in somebody's Monday.
     [Fact]

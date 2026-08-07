@@ -263,6 +263,34 @@ public class ShoppingListService : IShoppingListService
             .Where(e => e.Value.GramsPerMillilitre is not null)
             .ToDictionary(e => e.Key, e => e.Value.GramsPerMillilitre!.Value);
 
+        // The other half of the aisle question, and the one the query above cannot answer: a
+        // group that resolved to NOTHING still needs a heading, and it has no id to fetch by.
+        // "Other" was the largest heading on a real week because of exactly this.
+        //
+        // So the lookup is BY KEY. ShoppingAisles.FallbackKeysFor names the candidate keys it
+        // would walk for one group ("plum tomato", then "tomato"); collecting them across the
+        // whole week first means one query answers every unresolved group at once, in the same
+        // shape the density lookup uses. One extra query per week projection — never one per
+        // row, which is what a per-group lookup would have cost.
+        //
+        // The join reaches Ingredients for the CATEGORY only. Nothing here can return an id
+        // and nothing writes back: the fallback shelves a row and leaves it otherwise exactly
+        // as unresolved as it was.
+        var fallbackKeys = parts
+            .Where(p => p.IngredientId is null)
+            .Select(p => p.Key)
+            .Distinct(StringComparer.Ordinal)
+            .SelectMany(ShoppingAisles.FallbackKeysFor)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var fallbackCategories = fallbackKeys.Count == 0
+            ? []
+            : await _db.IngredientAliases
+                .Where(a => fallbackKeys.Contains(a.MatchKey))
+                .Join(_db.Ingredients, a => a.IngredientId, i => i.Id, (a, i) => new { a.MatchKey, i.Category })
+                .ToDictionaryAsync(x => x.MatchKey, x => x.Category, StringComparer.Ordinal, ct);
+
         var markByKey = marks
             .Where(m => m.WeekStartDate == weekStart)
             .ToDictionary(m => m.Key, StringComparer.Ordinal);
@@ -289,7 +317,7 @@ public class ShoppingListService : IShoppingListService
                 ShoppingListGroupOrigin.Derived,
                 null,
                 SumWithinDimensions(group, DensityFor(group, densities)),
-                AisleFor(group, catalogue)));
+                AisleFor(group.Key, group, catalogue, fallbackCategories)));
         }
 
         // Manual rows stay one group each, keyed for tick storage but never merged into a
@@ -360,17 +388,26 @@ public class ShoppingListService : IShoppingListService
     /// The aisle a group is shelved in: its catalogue category, mapped by ShoppingAisles.
     ///
     /// A group's parts all share one ingredient id when they resolved at all (the id IS the
-    /// key), so the first resolved part answers for the group. An unresolved group has no id,
-    /// finds no category, and lands in "Other" — the same place manual rows go.
+    /// key), so the first resolved part answers for the group.
+    ///
+    /// An unresolved group has no id and no category, and used to stop there — in "Other",
+    /// beside the manual rows, which on a real week made "Other" the biggest heading on the
+    /// page. It now gets a second, deliberately WEAKER attempt: its key is the keyed form of
+    /// its own name, and ShoppingAisles walks that name's tail for a head noun the catalogue
+    /// does know ("plum tomato" → "tomato"). That walk may answer with an AISLE and can reach
+    /// nothing else — the group keeps its name-derived key, its null id, and its absence from
+    /// every nutrition and dietary figure. A wrong heading is cheap; a wrong identity is not.
     /// </summary>
     private static string AisleFor(
+        string key,
         IEnumerable<ProjectedPart> parts,
-        IReadOnlyDictionary<Guid, (string Category, double? GramsPerMillilitre)> catalogue)
+        IReadOnlyDictionary<Guid, (string Category, double? GramsPerMillilitre)> catalogue,
+        IReadOnlyDictionary<string, string> fallbackCategories)
     {
         var id = parts.Select(p => p.IngredientId).FirstOrDefault(i => i is not null);
         return id is Guid resolved && catalogue.TryGetValue(resolved, out var row)
             ? ShoppingAisles.ForCategory(row.Category)
-            : ShoppingAisles.Other;
+            : ShoppingAisles.FallbackAisleFor(key, fallbackCategories);
     }
 
     /// <summary>
