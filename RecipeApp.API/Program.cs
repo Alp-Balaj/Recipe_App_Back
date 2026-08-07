@@ -29,6 +29,7 @@ using RecipeApp.Infrastructure.Notifications;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
 using RecipeApp.Infrastructure.Recipes.Import;
+using RecipeApp.Infrastructure.Scanning;
 using RecipeApp.Infrastructure.Social;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -153,6 +154,11 @@ builder.Services.AddContentModeration(builder.Configuration);
 // rather than reusing the default one AddChatAssistant sets up. See GuardedHttpHandler.
 builder.Services.AddRecipeImport(builder.Configuration);
 
+// Stream N: the food scanner (D13's two modes). Shares the vision seam with import through
+// the hoisted, idempotent AddVisionCaller — both extensions call it and neither owns it —
+// and persists nothing but its usage rows (D19): no storage registration, no new writers.
+builder.Services.AddFoodScanner(builder.Configuration);
+
 // Structured error responses: RFC-7807 ProblemDetails everywhere, with a global handler
 // (GlobalExceptionHandler) that logs unhandled exceptions and returns a 500 ProblemDetails
 // without leaking a stack trace. Wired into the pipeline via app.UseExceptionHandler() below.
@@ -184,6 +190,9 @@ var mealPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:MealPer
 // a second fetch downloading a multi-MB image — so 10/min is both a cost ceiling here and a
 // politeness ceiling on the sites being imported from.
 var importPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:ImportPermitLimit") ?? 10;
+// Stream N: between Images (20) and Import (10), per the RateLimitPolicies note — a scan is
+// a multi-MB upload plus a paid vision call, but no outbound fetch to a caller-named address.
+var scanPermitLimit = builder.Configuration.GetValue<int?>("RateLimiting:ScanPermitLimit") ?? 15;
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -238,6 +247,15 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = importPermitLimit,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+    options.AddPolicy(RateLimitPolicies.Scan, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = scanPermitLimit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));
@@ -447,6 +465,7 @@ app.MapMealPlanEndpoints();
 app.MapReportEndpoints();
 app.MapAdminEndpoints();
 app.MapNotificationEndpoints();
+app.MapScanEndpoints();
 
 // Anonymous liveness probe (audit 4.5): must return 200 without a bearer, otherwise the
 // fallback RequireAuthenticatedUser policy makes an uptime check read the API as down.

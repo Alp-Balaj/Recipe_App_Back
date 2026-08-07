@@ -8,6 +8,7 @@ using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes.Abstractions;
+using RecipeApp.Application.Scanning.Abstractions;
 using RecipeApp.Infrastructure.Persistence;
 using Testcontainers.PostgreSql;
 
@@ -58,6 +59,8 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
         // (10/min), which the suite would trip within a single test class — the real 429 is
         // verified live, like every other lane's.
         builder.UseSetting("RateLimiting:ImportPermitLimit", "1000000");
+        // And the scan lane (stream N), for the same reason as all of the above.
+        builder.UseSetting("RateLimiting:ScanPermitLimit", "1000000");
 
         // social-feed cp4: point IImageStorage (and the /images static-file mount) at the
         // per-factory temp root above instead of the repo tree.
@@ -126,6 +129,16 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
 
             services.RemoveAll<IRecipeExtractionAssistant>();
             services.AddScoped<IRecipeExtractionAssistant, FakeRecipeExtractionAssistant>();
+
+            // Stream N: the food scanner's detection seam, faked for the usual reason — it
+            // is the Gemini vision seam for both scan modes. Replacing the assistant rather
+            // than the vision caller beneath it keeps IVisionMessageCaller's factory lambda
+            // unresolved, so its API-key check never fires. The real FoodScanService under
+            // test — budget gate, catalogue resolution, deterministic coverage matching,
+            // and the usage row that is the ONLY thing a scan persists (D19) — runs against
+            // the container DB.
+            services.RemoveAll<IFoodScanAssistant>();
+            services.AddScoped<IFoodScanAssistant, FakeFoodScanAssistant>();
 
             // Built through the shared configurator, exactly like Program.cs and the
             // design-time factory. Two things ride on that: the dynamic-JSON opt-in (the jsonb

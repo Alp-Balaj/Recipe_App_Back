@@ -86,6 +86,17 @@ public static class AiUsageLanes
     // import's popularity will undercount it, badly, and should count the recipes carrying a
     // SourceUrl instead.
     public const string Import = "recipe-import";
+
+    // Stream N: the food scanner, both modes (pantry photo → detections, receipt photo →
+    // draft list) — the seventh lane. Gated like Import's photo tier (GetBudgetAsync before
+    // the call → 429, RecordCall staged on the same unit of work), NOT like the ungated
+    // ContentModeration exception above: a scan is a button a user pressed.
+    //
+    // Unlike Import, EVERY scan spends — there is no deterministic free path through a
+    // photograph — so this lane's figures mean exactly what they appear to mean: one row
+    // per scan, and counting rows here IS counting scans. Import's comment warns the
+    // opposite about itself; do not carry that caveat over.
+    public const string FoodScan = "food-scan";
 }
 
 // A user's AI budget for one UTC day. The window is the calendar day in UTC — simple to
