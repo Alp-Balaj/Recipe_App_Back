@@ -30,6 +30,13 @@
     <ProjectReference Include="..\RecipeApp.Application\RecipeApp.Application.csproj" />
     <ProjectReference Include="..\RecipeApp.Domain\RecipeApp.Domain.csproj" />
     <ProjectReference Include="..\RecipeApp.Infrastructure\RecipeApp.Infrastructure.csproj" />
+    <!-- AliasMergeTests. The seed builder is a by-hand tool and stays out of RecipeApp.slnx as
+         a top-level project, but its MERGE step decides what enters IngredientAliases — and an
+         alias sets ingredient identity, which is the thing IngredientKey's no-fuzzy-matching
+         prohibition protects. Referencing it here puts that one gate under
+         `dotnet test RecipeApp.slnx`. Nothing else in the tool is exercised, and no USDA data
+         is read: only the pure merge rules run. -->
+    <ProjectReference Include="..\tools\IngredientSeedBuilder\IngredientSeedBuilder.csproj" />
   </ItemGroup>
 
 </Project>

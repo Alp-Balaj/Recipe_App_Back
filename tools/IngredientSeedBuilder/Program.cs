@@ -13,7 +13,7 @@ using RecipeApp.Tools.IngredientSeedBuilder;
 // its output is committed, so nothing in the build, the test run or the deploy ever
 // downloads or parses USDA data.
 //
-//   dotnet run --project tools/IngredientSeedBuilder -- \
+//   dotnet run --project tools/IngredientSeedBuilder -- build \
 //       --usda <dir containing the extracted sr_legacy and foundation CSV folders> \
 //       --out  RecipeApp.Infrastructure/Seed/ingredients.seed.json \
 //       [--corpus "<postgres connection string>"]
@@ -25,14 +25,39 @@ using RecipeApp.Tools.IngredientSeedBuilder;
 //
 // --corpus is optional and is the second half of D9: the dataset supplies canonical
 // entries, nutrition and densities, but the spellings real users type come from the
-// recipes already in the database. See BuildCorpusAliases for what that can and cannot
+// recipes already in the database. See MeasureCorpusCoverage for what that can and cannot
 // do — it is exact-match only, per D8.
+//
+// ── the other two verbs ─────────────────────────────────────────────────────────────
+// MeasureCorpusCoverage reports the names the catalogue cannot resolve, and has been doing
+// so since G2 without anything ever acting on the report. These two close that loop, and
+// NEITHER READS USDA DATA — they work from the committed seed, because the bulk export is
+// not in the repository and a loop that needed it would never close on a machine that has
+// the recipes but not the CSVs.
+//
+//   propose  --seed <seed.json> --review <review.json> [--corpus <cs>] [--gemini-key <k>]
+//   merge    --seed <seed.json> --review <review.json> [--dry-run]
+//
+// propose asks an offline canonicaliser for a catalogue entry per unresolved name and
+// writes every answer to the review file UNDECIDED. merge lands the rows a human marked
+// accepted, and refuses any whose MatchKey the catalogue already owns. See Commands.cs and
+// AliasMerge.cs — the gate between them is the point of the whole arrangement, because an
+// alias sets IDENTITY.
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
-var options = ParseArgs(args);
+switch (args.FirstOrDefault())
+{
+    case "propose": return await Commands.ProposeAsync(args[1..]);
+    case "merge": return await Commands.MergeAsync(args[1..]);
+}
+
+// "build" is optional, so every invocation written before the verbs existed still works.
+var options = ParseArgs(args.FirstOrDefault() == "build" ? args[1..] : args);
 if (options is null)
 {
-    Console.Error.WriteLine("usage: --usda <dir> --out <file> [--corpus <connection string>] [--max <n>]");
+    Console.Error.WriteLine("usage: build --usda <dir> --out <file> [--corpus <connection string>] [--max <n>]");
+    Console.Error.WriteLine("       propose --seed <file> --review <file> [--corpus <cs>] [--gemini-key <k>]");
+    Console.Error.WriteLine("       merge --seed <file> --review <file> [--dry-run]");
     return 1;
 }
 
@@ -207,7 +232,7 @@ foreach (var missing in synonymsMissingTarget)
 var corpus = new CorpusReport(0, 0, []);
 if (options.CorpusConnectionString is not null)
 {
-    corpus = BuildCorpusAliases(options.CorpusConnectionString, aliasOwner);
+    corpus = MeasureCorpusCoverage(options.CorpusConnectionString, aliasOwner);
     Console.WriteLine($"  corpus: {corpus.DistinctNames:N0} distinct names, {corpus.Resolved:N0} resolve, "
                     + $"{corpus.Unresolved.Count:N0} do not");
 }
@@ -509,35 +534,23 @@ static double MillilitresFromModifier(string modifier)
 /// keyed with the REAL <see cref="IngredientKey"/> and looked up in the alias table the
 /// dataset produced.
 ///
-/// What this can do: confirm coverage, and report the misses. What it deliberately does
-/// NOT do: invent a mapping for a name that misses. D8's resolver is exact-match only,
-/// and a tool that guessed here would be edit-distance matching moved one step earlier —
-/// the same wrong merge, just committed to a file instead of computed at runtime. The
-/// unresolved list is written into the seed file so the gap is visible and a human can
-/// close it deliberately.
+/// This MEASURES; it builds nothing, and it was called BuildCorpusAliases for a while,
+/// which was a lie worth removing — the name promised the loop this function only ever
+/// reported on. What it does: confirm coverage, and write the misses into the seed as
+/// UnresolvedCorpusNames so the gap is visible in a committed file. What it deliberately
+/// does NOT do: invent a mapping. D8's resolver is exact-match only, and guessing here
+/// would be edit-distance matching moved one step earlier — the same wrong merge, just
+/// committed to a file instead of computed at runtime.
+///
+/// The list it writes is the INPUT to the propose verb (see Commands.ProposeAsync), which
+/// is where a mapping may finally be suggested — offline, and only ever to a human.
 /// </summary>
-static CorpusReport BuildCorpusAliases(string connectionString, Dictionary<string, Guid> aliasOwner)
+static CorpusReport MeasureCorpusCoverage(string connectionString, Dictionary<string, Guid> aliasOwner)
 {
-    var names = new List<string>();
+    List<string> names;
     try
     {
-        using var connection = new NpgsqlConnection(connectionString);
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT DISTINCT jsonb_array_elements("Ingredients")->>'Name' AS name
-            FROM "Recipes"
-            WHERE jsonb_typeof("Ingredients") = 'array'
-            """;
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
-        {
-            if (!reader.IsDBNull(0))
-            {
-                names.Add(reader.GetString(0));
-            }
-        }
+        names = Corpus.ReadNames(connectionString);
     }
     catch (Exception ex)
     {
@@ -604,23 +617,5 @@ internal sealed record Options(string UsdaDirectory, string OutputPath, string? 
 
 internal sealed record CorpusReport(int DistinctNames, int Resolved, List<string> Unresolved);
 
-internal sealed record SeedIngredient(
-    Guid Id,
-    string Name,
-    string Category,
-    double? GramsPerMillilitre,
-    double? GramsPerPiece,
-    double? Kcal,
-    double? ProteinG,
-    double? FatG,
-    double? CarbsG,
-    double? FibreG,
-    int FdcId);
-
-internal sealed record SeedAlias(string MatchKey, Guid IngredientId);
-
-internal sealed record SeedFile(
-    string GeneratedFrom,
-    List<SeedIngredient> Ingredients,
-    List<SeedAlias> Aliases,
-    List<string> UnresolvedCorpusNames);
+// SeedIngredient / SeedAlias / SeedFile now live in SeedDocument.cs, because the propose and
+// merge modes have to READ the committed seed rather than rebuild it.

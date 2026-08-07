@@ -1,0 +1,204 @@
+{
+  "GeneratedFrom": "gemini-flash-latest over 22 unresolved corpus name(s)",
+  "HowToUse": "Set \u0022Accepted\u0022: true on the rows you want, false on the ones you do not, and leave null on anything you have not decided. Then run the merge mode. Only true lands, and a MatchKey the catalogue already owns is refused even when accepted.",
+  "Proposals": [
+    {
+      "Name": "Juice of lime",
+      "MatchKey": "juice of lime",
+      "ProposedIngredient": "Lime juice",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-4752dc900200",
+      "Confidence": "high",
+      "Why": "Juice of lime is lime juice",
+      "Accepted": null
+    },
+    {
+      "Name": "New potatoes",
+      "MatchKey": "new potato",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "Plum tomatoes",
+      "MatchKey": "plum tomato",
+      "ProposedIngredient": "Roma tomato",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-475252b51a00",
+      "Confidence": "high",
+      "Why": "Roma tomato is the standard catalogue entry for plum tomatoes",
+      "Accepted": null
+    },
+    {
+      "Name": "Spring onion",
+      "MatchKey": "spring onion",
+      "ProposedIngredient": "Young green onions",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-475216980200",
+      "Confidence": "high",
+      "Why": "Spring onion is synonymous with young green onion",
+      "Accepted": null
+    },
+    {
+      "Name": "TEST",
+      "MatchKey": "test",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "Udon noodles",
+      "MatchKey": "udon noodle",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "baking powder",
+      "MatchKey": "baking powder",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "butter, softened",
+      "MatchKey": "butter softened",
+      "ProposedIngredient": "Butter",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-475276a50200",
+      "Confidence": "high",
+      "Why": "Softened indicates state of butter",
+      "Accepted": null
+    },
+    {
+      "Name": "caster sugar to serve (optional)",
+      "MatchKey": "caster sugar to serve",
+      "ProposedIngredient": "Granulated sugars",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-4752a7190500",
+      "Confidence": "high",
+      "Why": "Caster sugar is a type of granulated sugar",
+      "Accepted": null
+    },
+    {
+      "Name": "chopped Jalape\u00F1o OR 2 tablespoons of crushed red pepper OR 1 tablespoon of cayenne pepper",
+      "MatchKey": "chopped jalape\u00F1o or 2 tablespoon of crushed red pepper or 1 tablespoon of cayenne pepper",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "ground black pepper",
+      "MatchKey": "ground black pepper",
+      "ProposedIngredient": "Black pepper",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-4752b39b0200",
+      "Confidence": "high",
+      "Why": "Ground is a form of black pepper",
+      "Accepted": null
+    },
+    {
+      "Name": "juice of lemons",
+      "MatchKey": "juice of lemon",
+      "ProposedIngredient": "Lemon juice",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-4752438f0200",
+      "Confidence": "high",
+      "Why": "Juice of lemons is lemon juice",
+      "Accepted": null
+    },
+    {
+      "Name": "lemon wedges to serve (optional)",
+      "MatchKey": "lemon wedge to serve",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "minced garlic",
+      "MatchKey": "minced garlic",
+      "ProposedIngredient": "Garlic",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-475207db1000",
+      "Confidence": "high",
+      "Why": "Minced is a form of garlic",
+      "Accepted": null
+    },
+    {
+      "Name": "minced jalape\u00F1o OR 2 minced serrano chiles OR 2 tablespoon minced of any chile pepper like (adjust f",
+      "MatchKey": "minced jalape\u00F1o or 2 minced serrano chile or 2 tablespoon minced of any chile pepper like",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "mixed vegetables",
+      "MatchKey": "mixed vegetable",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "pico de gallo",
+      "MatchKey": "pico de gallo",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "ramen noodles",
+      "MatchKey": "ramen noodle",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "self-raising flour",
+      "MatchKey": "self raising flour",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "sunflower or vegetable oil plus a little extra for frying",
+      "MatchKey": "sunflower or vegetable oil plus a little extra for frying",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "white miso paste",
+      "MatchKey": "white miso paste",
+      "ProposedIngredient": "",
+      "ProposedIngredientId": null,
+      "Confidence": "none",
+      "Why": "the model found no catalogue entry for it",
+      "Accepted": null
+    },
+    {
+      "Name": "zest of lemons",
+      "MatchKey": "zest of lemon",
+      "ProposedIngredient": "Lemon peel",
+      "ProposedIngredientId": "552d3247-4453-2d41-494e-4752458f0200",
+      "Confidence": "high",
+      "Why": "Lemon zest is grated lemon peel",
+      "Accepted": null
+    }
+  ]
+}
