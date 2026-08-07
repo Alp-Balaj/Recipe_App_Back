@@ -42,4 +42,12 @@ public static class RateLimitPolicies
     // a user and somebody else's web server, so an unbounded import lane would let this app be
     // pointed at a third party as a traffic amplifier.
     public const string Import = "import";
+
+    // Stream N: the two /scan routes. Its own budget (RateLimiting:ScanPermitLimit), per
+    // this file's convention, sized BETWEEN Images and Import: a scan is a multi-MB upload
+    // plus a paid vision call — costlier per request than an image upload — but it makes no
+    // outbound fetch to a caller-named address, which is the thing that made Import the
+    // tightest lane in the app. The per-user daily AI budget sits behind this in the
+    // service; this IP window is the outer bound.
+    public const string Scan = "scan";
 }
