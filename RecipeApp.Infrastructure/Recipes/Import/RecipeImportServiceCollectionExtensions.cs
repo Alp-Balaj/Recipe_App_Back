@@ -6,8 +6,9 @@ using RecipeApp.Infrastructure.Chat;
 
 namespace RecipeApp.Infrastructure.Recipes.Import;
 
-// Stream L. Registers both import tiers: the guarded fetcher, the vision provider seam, the
-// extraction assistant, and the orchestrator.
+// Stream L. Registers both import tiers: the guarded fetcher, the extraction assistant, and
+// the orchestrator. (The vision provider seam moved to AddVisionCaller when stream N became
+// its second caller — see VisionServiceCollectionExtensions.)
 //
 // The registration idiom is ChatServiceCollectionExtensions', deliberately — factory lambdas
 // with LAZY key resolution, so an absent Gemini key breaks the first call that needs one and
@@ -20,9 +21,6 @@ public static class RecipeImportServiceCollectionExtensions
 {
     /// <summary>The named client for outbound page and image fetches.</summary>
     public const string FetchClientName = "recipe-import";
-
-    /// <summary>The named client for the vision provider call.</summary>
-    private const string VisionClientName = "recipe-import-vision";
 
     public static IServiceCollection AddRecipeImport(this IServiceCollection services, IConfiguration configuration)
     {
@@ -43,35 +41,17 @@ public static class RecipeImportServiceCollectionExtensions
             // timeout the fetcher controls rather than by two that can disagree.
             .ConfigureHttpClient(http => http.Timeout = Timeout.InfiniteTimeSpan);
 
-        // A separate named client for the provider: a vision request carries base64 image data
-        // and takes appreciably longer than a text turn, so it gets a longer ceiling than the
-        // chat client's 30 s rather than making every chat turn wait as long as a photo import.
-        services.AddHttpClient(VisionClientName)
-            .ConfigureHttpClient(http => http.Timeout = TimeSpan.FromSeconds(90));
+        // The vision provider seam used to be registered HERE, behind a private
+        // "recipe-import-vision" client — the one seam-level wart this file carried: the
+        // interface was clean but its wiring was import's. Stream N hoisted it into
+        // AddVisionCaller the moment a second caller existed, so neither feature depends on
+        // the other having run. Idempotent, so AddFoodScanner calling it too is fine.
+        services.AddVisionCaller(configuration);
 
         services.AddScoped<IRecipePageFetcher>(sp => new SafeRecipePageFetcher(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(FetchClientName),
             sp.GetRequiredService<RecipeImportOptions>(),
             sp.GetRequiredService<ILogger<SafeRecipePageFetcher>>()));
-
-        // Lazy key resolution, exactly as AddChatAssistant does it — see the class comment.
-        services.AddScoped<IVisionMessageCaller>(sp =>
-        {
-            var apiKey = configuration["Gemini:ApiKey"];
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                throw new InvalidOperationException(
-                    "Gemini:ApiKey not configured — set via user-secrets or Gemini__ApiKey env var. " +
-                    "The key is server-side only and must never be committed or sent to the browser.");
-            }
-
-            var geminiOptions = new GeminiOptions { ApiKey = apiKey };
-            configuration.GetSection(GeminiOptions.SectionName).Bind(geminiOptions);
-
-            return new GeminiVisionMessageCaller(
-                sp.GetRequiredService<IHttpClientFactory>().CreateClient(VisionClientName),
-                geminiOptions);
-        });
 
         // Depends on BOTH provider seams — the text caller for the page fallback, the vision
         // caller for photos — and neither resolves a key until it is actually called.
