@@ -133,8 +133,18 @@ public enum ShoppingListGroupOrigin { Derived, Manual }
 /// <summary>
 /// One dish's contribution to a group. Quantity is a display string — the per-dish breakdown
 /// answers "what is this for", and it stays itemised even when the group also carries a total.
+///
+/// <c>Date</c> and <c>Meal</c> arrive with the shop redesign, and they are what let the list
+/// say "Shakshuka · Mon" instead of just "Shakshuka". They also decide the row's OWNER: a
+/// shared ingredient is bought once, under the FIRST dish of the week that needs it, and
+/// "first" is a date the client had no way to know — the projection knew the plan entry's
+/// day and threw it away here. Parts are returned in (Date, Meal) order, so the owning dish
+/// is simply the first one.
+///
+/// Both are NULL on a manual row: you added it yourself, it serves no planned dish, and a
+/// fabricated date would put it in somebody's Monday.
 /// </summary>
-public record ShoppingListPartResponse(string Quantity, string DishTitle);
+public record ShoppingListPartResponse(string Quantity, string DishTitle, DateTime? Date, MealType? Meal);
 
 /// <summary>
 /// A summed quantity within one group (stream G). Before units were typed this could not
@@ -168,7 +178,11 @@ public record ShoppingListGroupResponse(
     // Appended last, per this file's convention, so existing positional constructions keep
     // compiling. Always empty for a Manual group: a manual row's quantity is free text the
     // user typed ("2 big bags"), never a typed measurement, so there is nothing to add up.
-    IReadOnlyList<ShoppingListTotalResponse> Totals);
+    IReadOnlyList<ShoppingListTotalResponse> Totals,
+    // The shop aisle this line is shelved in (shop redesign) — the redesigned list's
+    // HEADING, so it is never null: an unresolved name or a manual row answers "Other".
+    // See ShoppingAisles for the map and the walk order Groups are already sorted into.
+    string Aisle);
 
 public record ShoppingListWeekResponse(
     DateTime WeekStartDate,

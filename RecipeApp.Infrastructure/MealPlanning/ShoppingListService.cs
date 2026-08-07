@@ -164,7 +164,7 @@ public class ShoppingListService : IShoppingListService
         // can add its parts up, which is the whole point of the slice.
         // IngredientId rides along since slice G3: it decides the group's KEY (an id
         // beats a spelling) and unlocks the density that lets mass and volume merge.
-        var parts = new List<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, Guid? IngredientId, string Dish)>();
+        var parts = new List<ProjectedPart>();
 
         if (plan is not null)
         {
@@ -178,11 +178,18 @@ public class ShoppingListService : IShoppingListService
             // expects). MealPlanService's own queries have the same latent quirk; it is
             // invisible there because those results are keyed by day/meal rather than read as a
             // sequence.
+            //
+            // The DAY sort goes through DayOffset rather than the enum, and the shop redesign
+            // is what made that matter. System.DayOfWeek numbers Sunday 0, so ordering by the
+            // enum in a MONDAY-start week put Sunday's dishes first — harmless while the order
+            // was only a display sequence, wrong now that the FIRST part is the row's owning
+            // dish ("bought once, under the first dish of the week that needs it"). A Sunday
+            // roast would have owned every ingredient it shared with Monday's dinner.
             var entries = (await _db.MealPlanEntries
                 .Where(e => e.MealPlanId == plan.Id)
                 .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new { e.DayOfWeek, e.MealType, RecipeId = r.Id })
                 .ToListAsync(ct))
-                .OrderBy(e => e.DayOfWeek)
+                .OrderBy(e => DayOffset(e.DayOfWeek))
                 .ThenBy(e => e.MealType)
                 .ToList();
 
@@ -198,7 +205,7 @@ public class ShoppingListService : IShoppingListService
                 var recipe = recipes[entry.RecipeId];
                 foreach (var ingredient in recipe.Ingredients)
                 {
-                    parts.Add((
+                    parts.Add(new ProjectedPart(
                         // Slice G3: the catalogue id when the line resolved, the name's
                         // key when it did not. "prawns" and "shrimp" become ONE row.
                         ingredient.IngredientId is Guid resolved
@@ -208,7 +215,12 @@ public class ShoppingListService : IShoppingListService
                         ingredient.Quantity,
                         ingredient.Unit,
                         ingredient.IngredientId,
-                        recipe.Title));
+                        recipe.Title,
+                        // The calendar date the entry sits on, not the day name: the client
+                        // renders "Mon" from it, and comparing dates is what orders the
+                        // owning dish first.
+                        weekStart.AddDays(DayOffset(entry.DayOfWeek)),
+                        entry.MealType));
                 }
             }
         }
@@ -225,20 +237,31 @@ public class ShoppingListService : IShoppingListService
             .OrderBy(i => i.CreatedAt)
             .ToListAsync(ct);
 
-        // Densities for every ingredient this week resolved to — one query, then a
-        // dictionary lookup per group. Only the resolved ones have a density to fetch,
-        // which is exactly why the catalogue had to exist before this could work.
+        // The catalogue rows for every ingredient this week resolved to — one query, then a
+        // dictionary lookup per group. Only the resolved ones have anything to fetch, which
+        // is exactly why the catalogue had to exist before either of these could work.
+        //
+        // Two fields come back now. The density (slice G3) collapses volume into mass; the
+        // CATEGORY (shop redesign) becomes the aisle the row is shelved under. The rows are
+        // no longer filtered to `GramsPerMillilitre != null` — an ingredient with no density
+        // still has an aisle, and filtering it out here would shelve half the catalogue in
+        // "Other".
         var ingredientIds = parts
             .Where(p => p.IngredientId is not null)
             .Select(p => p.IngredientId!.Value)
             .Distinct()
             .ToList();
 
-        var densities = ingredientIds.Count == 0
+        var catalogue = ingredientIds.Count == 0
             ? []
             : await _db.Ingredients
-                .Where(i => ingredientIds.Contains(i.Id) && i.GramsPerMillilitre != null)
-                .ToDictionaryAsync(i => i.Id, i => i.GramsPerMillilitre!.Value, ct);
+                .Where(i => ingredientIds.Contains(i.Id))
+                .Select(i => new { i.Id, i.Category, i.GramsPerMillilitre })
+                .ToDictionaryAsync(i => i.Id, i => (i.Category, i.GramsPerMillilitre), ct);
+
+        var densities = catalogue
+            .Where(e => e.Value.GramsPerMillilitre is not null)
+            .ToDictionary(e => e.Key, e => e.Value.GramsPerMillilitre!.Value);
 
         var markByKey = marks
             .Where(m => m.WeekStartDate == weekStart)
@@ -246,8 +269,11 @@ public class ShoppingListService : IShoppingListService
 
         var groups = new List<ShoppingListGroupResponse>();
 
-        // Derived groups: one per exact key, ordered by display name so the list is stable
-        // across reads (there is no aisle order to honour — see the design's Q7).
+        // Derived groups: one per exact key. Parts (and therefore Dishes) come out in
+        // (date, meal) order, which is the shop redesign's buy-once rule made mechanical —
+        // the first part is the dish the row is filed under, the rest are the "+ also"
+        // names. Entries were already sorted that way above, and GroupBy preserves
+        // encounter order within a group, so there is nothing to re-sort here.
         foreach (var group in parts.GroupBy(p => p.Key, StringComparer.Ordinal))
         {
             markByKey.TryGetValue(group.Key, out var mark);
@@ -256,12 +282,14 @@ public class ShoppingListService : IShoppingListService
             groups.Add(new ShoppingListGroupResponse(
                 group.Key,
                 IngredientKey.DisplayNameFor(group.Select(p => p.RawName)),
-                group.Select(p => new ShoppingListPartResponse(Units.Format(p.Quantity, p.Unit), p.Dish)).ToList(),
+                group.Select(p => new ShoppingListPartResponse(
+                    Units.Format(p.Quantity, p.Unit), p.Dish, p.Date, p.Meal)).ToList(),
                 group.Select(p => p.Dish).Distinct(StringComparer.Ordinal).ToList(),
                 mark?.IsPurchased ?? false,
                 ShoppingListGroupOrigin.Derived,
                 null,
-                SumWithinDimensions(group, DensityFor(group, densities))));
+                SumWithinDimensions(group, DensityFor(group, densities)),
+                AisleFor(group, catalogue)));
         }
 
         // Manual rows stay one group each, keyed for tick storage but never merged into a
@@ -274,18 +302,25 @@ public class ShoppingListService : IShoppingListService
             groups.Add(new ShoppingListGroupResponse(
                 key,
                 item.Ingredient,
-                [new ShoppingListPartResponse(item.Quantity, "Added by you")],
+                // No date and no meal: a manual row serves no planned dish, so there is no
+                // day to name and nothing for it to be the "first dish" of.
+                [new ShoppingListPartResponse(item.Quantity, "Added by you", null, null)],
                 [],
                 mark?.IsPurchased ?? false,
                 ShoppingListGroupOrigin.Manual,
                 item.Id,
                 // A manual row's quantity is free text ("a couple of bags"), deliberately —
                 // it is a note to self, not a measurement. Nothing to sum.
-                []));
+                [],
+                // Free text resolves to nothing, so there is no category to shelve it by.
+                ShoppingAisles.Other));
         }
 
+        // Aisle WALK order, not alphabetical (shop redesign): the list is read while walking
+        // a shop, so produce leads and drinks trail. Origin no longer needs its own sort —
+        // manual rows are all in "Other", which ranks last by construction.
         var ordered = groups
-            .OrderBy(g => g.Origin)
+            .OrderBy(g => ShoppingAisles.RankOf(g.Aisle))
             .ThenBy(g => g.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -294,6 +329,48 @@ public class ShoppingListService : IShoppingListService
             ordered,
             ordered.Count(g => g.IsPurchased),
             ordered.Count);
+    }
+
+    /// <summary>
+    /// One recipe line on its way into a group — the working shape of the projection, before
+    /// parts are grouped by key and rendered.
+    ///
+    /// A record rather than the tuple it replaced: it grew a Date and a Meal with the shop
+    /// redesign, and an eight-field tuple spelled out in three signatures is a change nobody
+    /// can make safely.
+    /// </summary>
+    private sealed record ProjectedPart(
+        string Key,
+        string RawName,
+        decimal Quantity,
+        UnitOfMeasure Unit,
+        Guid? IngredientId,
+        string Dish,
+        DateTime Date,
+        MealType Meal);
+
+    /// <summary>
+    /// Days from the week's Monday. System.DayOfWeek numbers Sunday 0, and every week here
+    /// starts on a Monday — so this is the only correct way to turn an entry's day into a
+    /// position in the week, or into a date.
+    /// </summary>
+    private static int DayOffset(DayOfWeek day) => ((int)day + 6) % 7;
+
+    /// <summary>
+    /// The aisle a group is shelved in: its catalogue category, mapped by ShoppingAisles.
+    ///
+    /// A group's parts all share one ingredient id when they resolved at all (the id IS the
+    /// key), so the first resolved part answers for the group. An unresolved group has no id,
+    /// finds no category, and lands in "Other" — the same place manual rows go.
+    /// </summary>
+    private static string AisleFor(
+        IEnumerable<ProjectedPart> parts,
+        IReadOnlyDictionary<Guid, (string Category, double? GramsPerMillilitre)> catalogue)
+    {
+        var id = parts.Select(p => p.IngredientId).FirstOrDefault(i => i is not null);
+        return id is Guid resolved && catalogue.TryGetValue(resolved, out var row)
+            ? ShoppingAisles.ForCategory(row.Category)
+            : ShoppingAisles.Other;
     }
 
     /// <summary>
@@ -312,7 +389,7 @@ public class ShoppingListService : IShoppingListService
     /// keyed BY the id, so every part in it shares one.
     /// </summary>
     private static decimal? DensityFor(
-        IEnumerable<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, Guid? IngredientId, string Dish)> parts,
+        IEnumerable<ProjectedPart> parts,
         IReadOnlyDictionary<Guid, double> densities)
     {
         var id = parts.Select(p => p.IngredientId).FirstOrDefault(i => i is not null);
@@ -339,7 +416,7 @@ public class ShoppingListService : IShoppingListService
     /// reasoning as the group ordering itself.
     /// </summary>
     private static List<ShoppingListTotalResponse> SumWithinDimensions(
-        IEnumerable<(string Key, string RawName, decimal Quantity, UnitOfMeasure Unit, Guid? IngredientId, string Dish)> parts,
+        IEnumerable<ProjectedPart> parts,
         decimal? gramsPerMillilitre)
     {
         var convertible = new Dictionary<UnitDimension, decimal>();

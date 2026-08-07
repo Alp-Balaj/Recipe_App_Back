@@ -858,6 +858,91 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         Assert.Equal(["Toast", "Sandwich", "Mash"], butter.Parts.Select(p => p.DishTitle).ToArray());
     }
 
+    // --- shop redesign: aisles and dated parts --------------------------------------------
+
+    // The redesigned list is AISLE-LED, so the aisle has to survive the projection and the
+    // groups have to arrive in walk order — a client that re-sorted alphabetically would put
+    // Drinks before Produce, which is nobody's route through a shop.
+    [Fact]
+    public async Task Groups_carry_a_shop_aisle_and_arrive_in_walk_order()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        // One catalogued vegetable, one catalogued pantry staple, and a name the catalogue
+        // has never heard of — the three outcomes the aisle map has to cover.
+        var stew = await CreateRecipeAsync(client, "Stew", [
+            ("Carrot", 3m, UnitOfMeasure.Piece),
+            ("Flour", 200m, UnitOfMeasure.Gram),
+            ("Zzzz goop", 1m, UnitOfMeasure.Gram),
+        ]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", stew);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+
+        Assert.Equal("Produce", Assert.Single(week.Groups, g => g.DisplayName is "Carrot" or "carrot").Aisle);
+        Assert.Equal("Pantry", Assert.Single(week.Groups, g => g.DisplayName is "Flour" or "flour").Aisle);
+        // Never resolved, so there is no category to shelve it by.
+        Assert.Equal("Other", Assert.Single(week.Groups, g => g.DisplayName is "Zzzz goop" or "zzzz goop").Aisle);
+
+        // Walk order: produce at the door, the uncatalogued remainder last.
+        var aisles = week.Groups.Select(g => g.Aisle).ToList();
+        Assert.Equal(aisles.OrderBy(ShoppingAisles.RankOf).ToList(), aisles);
+    }
+
+    // "Bought once, under the FIRST dish of the week that needs it" is the redesign's
+    // buy-once rule, and it is decided here: the client reads Parts[0] as the owning dish.
+    //
+    // Sunday is the regression this guards. System.DayOfWeek numbers it 0, so ordering by
+    // the enum in a Monday-start week made a Sunday roast own everything it shared with
+    // Monday's dinner.
+    [Fact]
+    public async Task Parts_carry_their_date_and_the_first_one_is_the_owning_dish()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        var roast = await CreateRecipeAsync(client, "Roast", [("Carrot", 4m, UnitOfMeasure.Piece)]);
+        var soup = await CreateRecipeAsync(client, "Soup", [("carrot", 2m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+
+        await AddEntryAsync(client, planId, "Sunday", "Dinner", roast);
+        await AddEntryAsync(client, planId, "Wednesday", "Lunch", soup);
+
+        var carrot = Assert.Single(
+            Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks).Groups,
+            g => g.DisplayName is "Carrot" or "carrot");
+
+        // Wednesday owns it; Sunday is the "+ also" name, because Sunday ENDS this week.
+        Assert.Equal(["Soup", "Roast"], carrot.Parts.Select(p => p.DishTitle).ToArray());
+        Assert.Equal(["Soup", "Roast"], carrot.Dishes.ToArray());
+
+        Assert.Equal(weekStart.AddDays(2), carrot.Parts[0].Date);
+        Assert.Equal(MealType.Lunch, carrot.Parts[0].Meal);
+        Assert.Equal(weekStart.AddDays(6), carrot.Parts[1].Date);
+    }
+
+    // A manual row serves no planned dish, so it has no day to name — and a fabricated one
+    // would put "Bin bags" in somebody's Monday.
+    [Fact]
+    public async Task A_manual_row_has_no_date_and_sits_in_other()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = MealPlanTestHelper.NextMonday().AddDays(-7);
+
+        await AddManualAsync(client, "Bin bags", "1 roll", weekStart);
+
+        var group = Assert.Single(
+            Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks).Groups,
+            g => g.DisplayName == "Bin bags");
+
+        Assert.Equal("Other", group.Aisle);
+        var part = Assert.Single(group.Parts);
+        Assert.Null(part.Date);
+        Assert.Null(part.Meal);
+    }
+
     // --- helpers ------------------------------------------------------------------------
     // Thin adapters over the shared MealPlanTestHelper (extracted from MealPlanEndpointsTests /
     // GenerateShoppingListEndpointsTests) so this file adds no third copy of the arrange posts.
