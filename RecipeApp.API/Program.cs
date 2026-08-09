@@ -98,6 +98,7 @@ builder.Services.AddScoped<IShoppingListService, ShoppingListService>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IReportService, ReportService>();
 builder.Services.AddScoped<IAdminService, AdminService>();
+builder.Services.AddScoped<IAdminAnalyticsService, AdminAnalyticsService>();
 builder.Services.AddScoped<IUserSecurityStateService, UserSecurityStateService>();
 // Admin Rework: the best-effort observability write seam. Singleton over
 // IServiceScopeFactory (the ContentModerationWorker precedent) — see AppEventService.
@@ -470,6 +471,7 @@ app.MapImageEndpoints();
 app.MapMealPlanEndpoints();
 app.MapReportEndpoints();
 app.MapAdminEndpoints();
+app.MapAdminAnalyticsEndpoints();
 app.MapNotificationEndpoints();
 app.MapScanEndpoints();
 
