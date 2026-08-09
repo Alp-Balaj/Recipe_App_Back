@@ -36,11 +36,6 @@ public record ReportResponse(
 
 public record ReportListResponse(IReadOnlyList<ReportResponse> Items, string? NextCursor);
 
-// GET /admin/overview — the three honest counts (band 03 part 4: counts, not a chart
-// dashboard). TotalRecipes counts non-deleted rows of every visibility; HiddenRecipes
-// would be a fourth count and was deliberately left out of the minimal surface.
-public record AdminOverviewResponse(int TotalUsers, int TotalRecipes, int OpenReports);
-
 // Bodies of the admin actions. Reason/Note is optional free text that lands in the
 // audit log (and, for report triage, on the report row).
 public record ResolveReportRequest(string? Note);

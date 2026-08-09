@@ -23,7 +23,7 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
     {
         var client = factory.CreateClient();
 
-        var response = await client.GetAsync("/admin/overview");
+        var response = await client.GetAsync("/admin/reports");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
@@ -34,23 +34,23 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
 
-        var response = await client.GetAsync("/admin/overview");
+        var response = await client.GetAsync("/admin/reports");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     [Fact]
-    public async Task PromotedAdmin_TokenCarriesRole_AndOverviewAnswers()
+    public async Task PromotedAdmin_TokenCarriesRole_AndAdminRoutesAnswer()
     {
         var client = factory.CreateClient();
         var admin = await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, client);
 
         Assert.Equal(UserRole.Admin, admin.Role);
 
-        var response = await client.GetAsync("/admin/overview");
+        var response = await client.GetAsync("/admin/reports");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = (await response.Content.ReadFromJsonAsync<AdminOverviewResponse>(TestJson.Options))!;
-        Assert.True(body.TotalUsers >= 1);
+        var body = (await response.Content.ReadFromJsonAsync<ReportListResponse>(TestJson.Options))!;
+        Assert.NotNull(body.Items);
     }
 
     // --- report triage ------------------------------------------------------------------
