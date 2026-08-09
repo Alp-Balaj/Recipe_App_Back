@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Chat.Dtos;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
@@ -47,6 +48,7 @@ public class MealPlanProposalService : IMealPlanProposalService
     private readonly IMealPlanAssistantService _assistant;
     private readonly IAiUsageService _aiUsage;
     private readonly IDietaryCheckService _dietaryChecks;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<MealPlanProposalService> _logger;
 
     public MealPlanProposalService(
@@ -54,12 +56,14 @@ public class MealPlanProposalService : IMealPlanProposalService
         IMealPlanAssistantService assistant,
         IAiUsageService aiUsage,
         IDietaryCheckService dietaryChecks,
+        IAppEventLogger events,
         ILogger<MealPlanProposalService> logger)
     {
         _db = db;
         _assistant = assistant;
         _aiUsage = aiUsage;
         _dietaryChecks = dietaryChecks;
+        _events = events;
         _logger = logger;
     }
 
@@ -133,6 +137,7 @@ public class MealPlanProposalService : IMealPlanProposalService
         // the same reason the other two lanes do: an exhausted budget must not cost money.
         if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
         {
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.MealPlanProposal} — quota-exhausted");
             return MealPlanResult<ProposeWeekResponse>.QuotaExceeded();
         }
 
@@ -149,6 +154,7 @@ public class MealPlanProposalService : IMealPlanProposalService
             // Nothing is recorded on this path — a failed call produced nothing and costs the
             // user nothing, matching chat and the generator.
             _logger.LogError(ex, "Meal-plan assistant failed for user {UserId}.", userId);
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.MealPlanProposal} — provider-error");
             return MealPlanResult<ProposeWeekResponse>.AssistantUnavailable();
         }
 

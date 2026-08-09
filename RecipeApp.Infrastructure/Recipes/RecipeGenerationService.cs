@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Chat.Dtos;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
@@ -37,6 +38,7 @@ public class RecipeGenerationService : IRecipeGenerationService
     private readonly IIngredientResolver _ingredientResolver;
     private readonly IDietaryCheckService _dietaryChecks;
     private readonly IContentModerationQueue _moderationQueue;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<RecipeGenerationService> _logger;
 
     public RecipeGenerationService(
@@ -46,6 +48,7 @@ public class RecipeGenerationService : IRecipeGenerationService
         IIngredientResolver ingredientResolver,
         IDietaryCheckService dietaryChecks,
         IContentModerationQueue moderationQueue,
+        IAppEventLogger events,
         ILogger<RecipeGenerationService> logger)
     {
         _db = db;
@@ -54,6 +57,7 @@ public class RecipeGenerationService : IRecipeGenerationService
         _ingredientResolver = ingredientResolver;
         _dietaryChecks = dietaryChecks;
         _moderationQueue = moderationQueue;
+        _events = events;
         _logger = logger;
     }
 
@@ -83,6 +87,7 @@ public class RecipeGenerationService : IRecipeGenerationService
         // and BEFORE the provider call — an exhausted budget must not cost money.
         if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
         {
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.RecipeGeneration} — quota-exhausted");
             return RecipeGenerationResult<GenerateRecipeResponse>.QuotaExceeded();
         }
 
@@ -114,6 +119,7 @@ public class RecipeGenerationService : IRecipeGenerationService
             // becomes AssistantUnavailable -> 502, with nothing written and nothing billed.
             // Cancellation propagates — a cancelled request is not an assistant failure.
             _logger.LogError(ex, "Recipe generator failed for user {UserId}.", userId);
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.RecipeGeneration} — provider-error");
             return RecipeGenerationResult<GenerateRecipeResponse>.AssistantUnavailable();
         }
 

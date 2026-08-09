@@ -56,6 +56,9 @@ public class AppEventEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var admin = await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
 
         var actorClient = factory.CreateClient();
+        // Registering already logs UserRegistered for real now (Task 11's write-site hook) —
+        // that row IS the "actor known" Account-category marker, so this test seeds only the
+        // other two categories rather than adding a second, redundant UserRegistered row.
         var actor = await AuthTestHelper.RegisterAndAuthenticateAsync(actorClient);
 
         var logger = factory.Services.GetRequiredService<IAppEventLogger>();
@@ -64,9 +67,8 @@ public class AppEventEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var aiTarget = Guid.NewGuid();
 
         // Logged in this order, with a small gap so CreatedAt strictly orders them even at
-        // millisecond DateTime.UtcNow resolution: Account (actor known) -> Content (no actor)
-        // -> Ai (no actor). Newest-first means the reversed order on read.
-        await logger.LogAsync(AppEventType.UserRegistered, actorUserId: actor.UserId);
+        // millisecond DateTime.UtcNow resolution: Account (actor's registration, above) ->
+        // Content (no actor) -> Ai (no actor). Newest-first means the reversed order on read.
         await Task.Delay(5);
         await logger.LogAsync(AppEventType.RecipeCreated, targetId: recipeTarget);
         await Task.Delay(5);
