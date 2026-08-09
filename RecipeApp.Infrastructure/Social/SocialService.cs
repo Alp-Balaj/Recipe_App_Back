@@ -638,7 +638,7 @@ public class SocialService : ISocialService
         return SocialResult<bool>.Success(true);
     }
 
-    public async Task<SocialResult<FollowListResponse>> GetFollowersAsync(Guid targetUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
+    public async Task<SocialResult<FollowListResponse>> GetFollowersAsync(Guid targetUserId, Guid? viewerId, string? q, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
     {
         if (!await _db.Users.AnyAsync(u => u.Id == targetUserId, cancellationToken))
         {
@@ -646,6 +646,17 @@ public class SocialService : ISocialService
         }
 
         var follows = _db.UserFollows.Where(f => f.FollowingId == targetUserId);
+
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            // Escape backslash FIRST, then the two LIKE metacharacters — reversing the order
+            // would double-escape the escapes. Same treatment as IngredientCatalogueService.
+            var pattern = "%" + q.Trim()
+                .Replace("\\", "\\\\")
+                .Replace("%", "\\%")
+                .Replace("_", "\\_") + "%";
+            follows = follows.Where(f => EF.Functions.ILike(f.Follower.Username, pattern, "\\"));
+        }
 
         if (cursor is not null)
         {
@@ -656,6 +667,15 @@ public class SocialService : ISocialService
                 || (f.FollowedAt == cursorFollowedAt && f.FollowerId.CompareTo(cursorId) < 0));
         }
 
+        // Hoisted out of the expression tree: a captured bool short-circuits the EXISTS
+        // entirely for anonymous callers, and Guid.Empty keeps the comparison non-nullable.
+        var hasViewer = viewerId.HasValue;
+        var viewer = viewerId ?? Guid.Empty;
+
+        // Same caller-relative rule as GetUserProfileAsync — a row that advertises a number
+        // the previewed profile then contradicts is worse than no number at all.
+        var visibleRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(viewerId));
+
         var rows = await follows
             .OrderByDescending(f => f.FollowedAt)
             .ThenByDescending(f => f.FollowerId)
@@ -663,7 +683,12 @@ public class SocialService : ISocialService
             .Select(f => new
             {
                 f.FollowedAt,
-                Summary = new UserSummaryResponse(f.FollowerId, f.Follower.Username, f.Follower.ProfileImageUrl),
+                Item = new FollowListItemResponse(
+                    f.FollowerId,
+                    f.Follower.Username,
+                    f.Follower.ProfileImageUrl,
+                    hasViewer && _db.UserFollows.Any(x => x.FollowerId == viewer && x.FollowingId == f.FollowerId),
+                    visibleRecipes.Count(r => r.CreatedByUserId == f.FollowerId)),
             })
             .ToListAsync(cancellationToken);
 
@@ -672,14 +697,14 @@ public class SocialService : ISocialService
         {
             rows.RemoveAt(limit);
             var last = rows[^1];
-            nextCursor = new KeysetCursor(last.FollowedAt, last.Summary.Id).Encode();
+            nextCursor = new KeysetCursor(last.FollowedAt, last.Item.Id).Encode();
         }
 
         return SocialResult<FollowListResponse>.Success(
-            new FollowListResponse(rows.Select(r => r.Summary).ToList(), nextCursor));
+            new FollowListResponse(rows.Select(r => r.Item).ToList(), nextCursor));
     }
 
-    public async Task<SocialResult<FollowListResponse>> GetFollowingAsync(Guid targetUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
+    public async Task<SocialResult<FollowListResponse>> GetFollowingAsync(Guid targetUserId, Guid? viewerId, string? q, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
     {
         if (!await _db.Users.AnyAsync(u => u.Id == targetUserId, cancellationToken))
         {
@@ -687,6 +712,15 @@ public class SocialService : ISocialService
         }
 
         var follows = _db.UserFollows.Where(f => f.FollowerId == targetUserId);
+
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var pattern = "%" + q.Trim()
+                .Replace("\\", "\\\\")
+                .Replace("%", "\\%")
+                .Replace("_", "\\_") + "%";
+            follows = follows.Where(f => EF.Functions.ILike(f.Following.Username, pattern, "\\"));
+        }
 
         if (cursor is not null)
         {
@@ -697,6 +731,15 @@ public class SocialService : ISocialService
                 || (f.FollowedAt == cursorFollowedAt && f.FollowingId.CompareTo(cursorId) < 0));
         }
 
+        // Hoisted out of the expression tree: a captured bool short-circuits the EXISTS
+        // entirely for anonymous callers, and Guid.Empty keeps the comparison non-nullable.
+        var hasViewer = viewerId.HasValue;
+        var viewer = viewerId ?? Guid.Empty;
+
+        // Same caller-relative rule as GetUserProfileAsync — a row that advertises a number
+        // the previewed profile then contradicts is worse than no number at all.
+        var visibleRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(viewerId));
+
         var rows = await follows
             .OrderByDescending(f => f.FollowedAt)
             .ThenByDescending(f => f.FollowingId)
@@ -704,7 +747,12 @@ public class SocialService : ISocialService
             .Select(f => new
             {
                 f.FollowedAt,
-                Summary = new UserSummaryResponse(f.FollowingId, f.Following.Username, f.Following.ProfileImageUrl),
+                Item = new FollowListItemResponse(
+                    f.FollowingId,
+                    f.Following.Username,
+                    f.Following.ProfileImageUrl,
+                    hasViewer && _db.UserFollows.Any(x => x.FollowerId == viewer && x.FollowingId == f.FollowingId),
+                    visibleRecipes.Count(r => r.CreatedByUserId == f.FollowingId)),
             })
             .ToListAsync(cancellationToken);
 
@@ -713,11 +761,11 @@ public class SocialService : ISocialService
         {
             rows.RemoveAt(limit);
             var last = rows[^1];
-            nextCursor = new KeysetCursor(last.FollowedAt, last.Summary.Id).Encode();
+            nextCursor = new KeysetCursor(last.FollowedAt, last.Item.Id).Encode();
         }
 
         return SocialResult<FollowListResponse>.Success(
-            new FollowListResponse(rows.Select(r => r.Summary).ToList(), nextCursor));
+            new FollowListResponse(rows.Select(r => r.Item).ToList(), nextCursor));
     }
 
     public async Task<SocialResult<UserProfileResponse>> GetUserProfileAsync(Guid targetUserId, Guid? currentUserId, CancellationToken cancellationToken = default)

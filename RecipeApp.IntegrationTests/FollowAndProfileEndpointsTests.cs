@@ -265,6 +265,232 @@ public class FollowAndProfileEndpointsTests(IntegrationTestFactory factory) : IC
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Followers_FollowedByMe_IsTrueOnlyForPeopleTheViewerFollows()
+    {
+        var (aliceClient, alice) = await NewUserAsync();
+        var (bobClient, bob) = await NewUserAsync();
+        var (_, target) = await NewUserAsync();
+
+        // Both follow the target, so both appear in the target's follower list.
+        await FollowTestHelper.FollowOneWayAsync(aliceClient, target.UserId);
+        await FollowTestHelper.FollowOneWayAsync(bobClient, target.UserId);
+        // Alice follows Bob, but nobody follows Alice.
+        await FollowTestHelper.FollowOneWayAsync(aliceClient, bob.UserId);
+
+        var followers = await aliceClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+
+        var bobRow = Assert.Single(followers!.Items, u => u.Id == bob.UserId);
+        var aliceRow = Assert.Single(followers.Items, u => u.Id == alice.UserId);
+        Assert.True(bobRow.FollowedByMe);
+        Assert.False(aliceRow.FollowedByMe);
+    }
+
+    [Fact]
+    public async Task Followers_ForAnonymousCaller_FollowedByMeIsAlwaysFalse()
+    {
+        var (followerClient, follower) = await NewUserAsync();
+        var (_, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(followerClient, target.UserId);
+
+        var anonymous = factory.CreateClient();
+        var followers = await anonymous.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+
+        var row = Assert.Single(followers!.Items, u => u.Id == follower.UserId);
+        Assert.False(row.FollowedByMe);
+    }
+
+    [Fact]
+    public async Task Following_FollowedByMe_IsTrueOnlyForPeopleTheViewerFollows()
+    {
+        var (viewerClient, viewer) = await NewUserAsync();
+        var (targetClient, target) = await NewUserAsync();
+        var (_, followedByViewer) = await NewUserAsync();
+        var (_, notFollowedByViewer) = await NewUserAsync();
+
+        // Target follows both, so both appear in target's following list.
+        await FollowTestHelper.FollowOneWayAsync(targetClient, followedByViewer.UserId);
+        await FollowTestHelper.FollowOneWayAsync(targetClient, notFollowedByViewer.UserId);
+        // Viewer follows one of them but not the other.
+        await FollowTestHelper.FollowOneWayAsync(viewerClient, followedByViewer.UserId);
+
+        var following = await viewerClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/following", TestJson.Options);
+
+        var followedRow = Assert.Single(following!.Items, u => u.Id == followedByViewer.UserId);
+        var notFollowedRow = Assert.Single(following.Items, u => u.Id == notFollowedByViewer.UserId);
+        Assert.True(followedRow.FollowedByMe);
+        Assert.False(notFollowedRow.FollowedByMe);
+    }
+
+    [Fact]
+    public async Task Following_ForAnonymousCaller_FollowedByMeIsAlwaysFalse()
+    {
+        var (targetClient, target) = await NewUserAsync();
+        var (_, followee) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(targetClient, followee.UserId);
+
+        var anonymous = factory.CreateClient();
+        var following = await anonymous.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/following", TestJson.Options);
+
+        var row = Assert.Single(following!.Items, u => u.Id == followee.UserId);
+        Assert.False(row.FollowedByMe);
+    }
+
+    [Fact]
+    public async Task Followers_RecipeCount_IsCallerRelative_LikeTheProfileCount()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        await CreateRecipeAsync(authorClient);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.Private);
+
+        var (_, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(authorClient, target.UserId);
+
+        // A stranger sees only the public recipe.
+        var (strangerClient, _) = await NewUserAsync();
+        var strangerView = await strangerClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+        Assert.Equal(1, Assert.Single(strangerView!.Items, u => u.Id == author.UserId).RecipeCount);
+
+        // A mutual also sees the FriendsOnly one — never the Private one.
+        var (friendClient, friend) = await NewUserAsync();
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, authorClient, author.UserId);
+        await FollowTestHelper.FollowOneWayAsync(friendClient, target.UserId);
+
+        var friendView = await friendClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+        Assert.Equal(2, Assert.Single(friendView!.Items, u => u.Id == author.UserId).RecipeCount);
+    }
+
+    [Fact]
+    public async Task Followers_RecipeCount_ForAnonymousCaller_CountsPublicOnly()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        await CreateRecipeAsync(authorClient);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+
+        var (_, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(authorClient, target.UserId);
+
+        var anonymous = factory.CreateClient();
+        var view = await anonymous.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+
+        Assert.Equal(1, Assert.Single(view!.Items, u => u.Id == author.UserId).RecipeCount);
+    }
+
+    // Mirrors Followers_RecipeCount_IsCallerRelative_LikeTheProfileCount, but the edge
+    // under test is target-follows-author, read back through GET /users/{id}/following.
+    [Fact]
+    public async Task Following_RecipeCount_IsCallerRelative_LikeTheProfileCount()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        await CreateRecipeAsync(authorClient);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.Private);
+
+        var (targetClient, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(targetClient, author.UserId);
+
+        // A stranger sees only the public recipe.
+        var (strangerClient, _) = await NewUserAsync();
+        var strangerView = await strangerClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/following", TestJson.Options);
+        Assert.Equal(1, Assert.Single(strangerView!.Items, u => u.Id == author.UserId).RecipeCount);
+
+        // A mutual also sees the FriendsOnly one — never the Private one.
+        var (friendClient, friend) = await NewUserAsync();
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, authorClient, author.UserId);
+
+        var friendView = await friendClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/following", TestJson.Options);
+        Assert.Equal(2, Assert.Single(friendView!.Items, u => u.Id == author.UserId).RecipeCount);
+    }
+
+    [Fact]
+    public async Task Followers_Q_FiltersByUsername_CaseInsensitively()
+    {
+        var (targetClient, target) = await NewUserAsync();
+        var (aClient, a) = await NewUserAsync();
+        var (bClient, b) = await NewUserAsync();
+        await RenameUserAsync(a.UserId, "MiraCooks");
+        await RenameUserAsync(b.UserId, "tobias");
+        await FollowTestHelper.FollowOneWayAsync(aClient, target.UserId);
+        await FollowTestHelper.FollowOneWayAsync(bClient, target.UserId);
+
+        var hits = await targetClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers?q=mira", TestJson.Options);
+
+        Assert.Single(hits!.Items);
+        Assert.Equal(a.UserId, hits.Items[0].Id);
+    }
+
+    [Fact]
+    public async Task Followers_Q_TreatsPercentLiterally_NotAsAWildcard()
+    {
+        var (targetClient, target) = await NewUserAsync();
+        var (aClient, a) = await NewUserAsync();
+        var (bClient, b) = await NewUserAsync();
+        await RenameUserAsync(a.UserId, "cook100percent");
+        await RenameUserAsync(b.UserId, "plainname");
+        await FollowTestHelper.FollowOneWayAsync(aClient, target.UserId);
+        await FollowTestHelper.FollowOneWayAsync(bClient, target.UserId);
+
+        // An unescaped '%' would match every follower. Escaped, it matches nobody.
+        var hits = await targetClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers?q=%25", TestJson.Options);
+
+        Assert.Empty(hits!.Items);
+    }
+
+    [Fact]
+    public async Task Followers_Q_PagesWithTheKeysetCursor()
+    {
+        var (targetClient, target) = await NewUserAsync();
+        for (var i = 0; i < 3; i++)
+        {
+            var (client, user) = await NewUserAsync();
+            await RenameUserAsync(user.UserId, $"searchable{i}");
+            await FollowTestHelper.FollowOneWayAsync(client, target.UserId);
+        }
+
+        var first = await targetClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers?q=searchable&limit=2", TestJson.Options);
+        Assert.Equal(2, first!.Items.Count);
+        Assert.NotNull(first.NextCursor);
+
+        var second = await targetClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers?q=searchable&limit=2&cursor={Uri.EscapeDataString(first.NextCursor!)}",
+            TestJson.Options);
+        Assert.Single(second!.Items);
+        Assert.DoesNotContain(second.Items, u => first.Items.Any(f => f.Id == u.Id));
+    }
+
+    // Proves `following` filters on the *followed* user's username — the other side of
+    // the edge from `followers`, which filters on the *follower's* username.
+    [Fact]
+    public async Task Following_Q_FiltersByFollowedUsersUsername_CaseInsensitively()
+    {
+        var (targetClient, target) = await NewUserAsync();
+        var (_, a) = await NewUserAsync();
+        var (_, b) = await NewUserAsync();
+        await RenameUserAsync(a.UserId, "NoraBakes");
+        await RenameUserAsync(b.UserId, "quentin");
+        await FollowTestHelper.FollowOneWayAsync(targetClient, a.UserId);
+        await FollowTestHelper.FollowOneWayAsync(targetClient, b.UserId);
+
+        var hits = await targetClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/following?q=nora", TestJson.Options);
+
+        Assert.Single(hits!.Items);
+        Assert.Equal(a.UserId, hits.Items[0].Id);
+    }
+
     // --- helpers ------------------------------------------------------------------------
 
     private async Task<(HttpClient Client, RecipeApp.Application.Auth.Dtos.AuthResponse Auth)> NewUserAsync()
@@ -294,5 +520,14 @@ public class FollowAndProfileEndpointsTests(IntegrationTestFactory factory) : IC
         var response = await client.PostAsJsonAsync("/recipes", request, TestJson.Options);
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options))!;
+    }
+
+    private async Task RenameUserAsync(Guid userId, string username)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var user = await db.Users.SingleAsync(u => u.Id == userId);
+        user.Username = username;
+        await db.SaveChangesAsync();
     }
 }

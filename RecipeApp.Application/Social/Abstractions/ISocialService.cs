@@ -92,9 +92,16 @@ public interface ISocialService
     /// <summary>Idempotent unfollow. NotFound for an unknown target.</summary>
     Task<SocialResult<bool>> UnfollowUserAsync(Guid targetUserId, Guid currentUserId, CancellationToken cancellationToken = default);
 
-    Task<SocialResult<FollowListResponse>> GetFollowersAsync(Guid targetUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Followers of <paramref name="targetUserId"/>, FollowedAt DESC keyset.
+    /// <paramref name="viewerId"/> is the caller (null when anonymous) and makes both
+    /// FollowedByMe and RecipeCount caller-relative. <paramref name="q"/> filters by
+    /// username, case-insensitive contains; null or whitespace means no filter.
+    /// </summary>
+    Task<SocialResult<FollowListResponse>> GetFollowersAsync(Guid targetUserId, Guid? viewerId, string? q, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
 
-    Task<SocialResult<FollowListResponse>> GetFollowingAsync(Guid targetUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
+    /// <summary>Who <paramref name="targetUserId"/> follows. Same parameter contract as GetFollowersAsync.</summary>
+    Task<SocialResult<FollowListResponse>> GetFollowingAsync(Guid targetUserId, Guid? viewerId, string? q, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
 
     /// <summary>Public profile with counts. RecipeCount counts only recipes the caller can see.</summary>
     Task<SocialResult<UserProfileResponse>> GetUserProfileAsync(Guid targetUserId, Guid? currentUserId, CancellationToken cancellationToken = default);

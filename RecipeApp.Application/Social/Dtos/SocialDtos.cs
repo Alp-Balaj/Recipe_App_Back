@@ -40,7 +40,16 @@ public record CommentListResponse(IReadOnlyList<CommentResponse> Items, string? 
 
 public record UserSummaryResponse(Guid Id, string Username, string? ProfileImageUrl);
 
-public record FollowListResponse(IReadOnlyList<UserSummaryResponse> Items, string? NextCursor);
+// The follow-list row. Deliberately NOT UserSummaryResponse: that record is shared with the
+// feed envelope, and the follow lists need two caller-relative fields the feed has no use for.
+public record FollowListItemResponse(
+    Guid Id,
+    string Username,
+    string? ProfileImageUrl,
+    bool FollowedByMe,
+    int RecipeCount);
+
+public record FollowListResponse(IReadOnlyList<FollowListItemResponse> Items, string? NextCursor);
 
 public record UserProfileResponse(
     Guid Id,
