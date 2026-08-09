@@ -248,8 +248,10 @@ public class ContentModerationTests(IntegrationTestFactory factory) : IClassFixt
         {
             var response = await adminClient.GetAsync("/admin/reports?status=Open&limit=100");
             response.EnsureSuccessStatusCode();
-            var list = (await response.Content.ReadFromJsonAsync<ReportListResponse>(TestJson.Options))!;
-            var match = list.Items.FirstOrDefault(r => r.TargetId == targetId && r.Source == ReportSource.Automated);
+            var list = (await response.Content.ReadFromJsonAsync<AdminReportListResponse>(TestJson.Options))!;
+            var match = list.Items
+                .Select(i => i.Report)
+                .FirstOrDefault(r => r.TargetId == targetId && r.Source == ReportSource.Automated);
             if (match is not null)
             {
                 return match;

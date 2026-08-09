@@ -11,7 +11,7 @@ namespace RecipeApp.Application.Moderation.Abstractions;
 // called with the acting admin's id and appends one audit log row atomically with the act.
 public interface IAdminService
 {
-    Task<ReportListResponse> GetReportsAsync(
+    Task<AdminReportListResponse> GetReportsAsync(
         ReportStatus? status, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
 
     Task<ModerationResult<ReportResponse>> ResolveReportAsync(
@@ -41,6 +41,12 @@ public interface IAdminService
     Task<ModerationResult<bool>> BanUserAsync(Guid userId, Guid adminUserId, string? reason, CancellationToken cancellationToken = default);
 
     Task<ModerationResult<bool>> UnbanUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>Promote to Admin. Forbidden on self, Conflict when already Admin or banned.</summary>
+    Task<ModerationResult<bool>> PromoteUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>Demote to User. Forbidden on self, Conflict when not currently Admin.</summary>
+    Task<ModerationResult<bool>> DemoteUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default);
 
     Task<AuditLogListResponse> GetAuditLogAsync(
         KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);

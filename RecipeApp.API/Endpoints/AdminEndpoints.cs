@@ -130,6 +130,18 @@ public static class AdminEndpoints
             return ToActionResult(result.Outcome, Results.NoContent);
         });
 
+        group.MapPost("/users/{id:guid}/promote", async (Guid id, IAdminService admin, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await admin.PromoteUserAsync(id, GetUserId(user), cancellationToken);
+            return ToActionResult(result.Outcome, Results.NoContent);
+        });
+
+        group.MapPost("/users/{id:guid}/demote", async (Guid id, IAdminService admin, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await admin.DemoteUserAsync(id, GetUserId(user), cancellationToken);
+            return ToActionResult(result.Outcome, Results.NoContent);
+        });
+
         group.MapGet("/audit", async (string? cursor, int? limit, IAdminService admin, CancellationToken cancellationToken) =>
         {
             if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
