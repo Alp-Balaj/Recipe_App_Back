@@ -611,7 +611,7 @@ public class SocialService : ISocialService
         return SocialResult<bool>.Success(true);
     }
 
-    public async Task<SocialResult<FollowListResponse>> GetFollowersAsync(Guid targetUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
+    public async Task<SocialResult<FollowListResponse>> GetFollowersAsync(Guid targetUserId, Guid? viewerId, string? q, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
     {
         if (!await _db.Users.AnyAsync(u => u.Id == targetUserId, cancellationToken))
         {
@@ -629,6 +629,11 @@ public class SocialService : ISocialService
                 || (f.FollowedAt == cursorFollowedAt && f.FollowerId.CompareTo(cursorId) < 0));
         }
 
+        // Hoisted out of the expression tree: a captured bool short-circuits the EXISTS
+        // entirely for anonymous callers, and Guid.Empty keeps the comparison non-nullable.
+        var hasViewer = viewerId.HasValue;
+        var viewer = viewerId ?? Guid.Empty;
+
         var rows = await follows
             .OrderByDescending(f => f.FollowedAt)
             .ThenByDescending(f => f.FollowerId)
@@ -636,7 +641,12 @@ public class SocialService : ISocialService
             .Select(f => new
             {
                 f.FollowedAt,
-                Summary = new UserSummaryResponse(f.FollowerId, f.Follower.Username, f.Follower.ProfileImageUrl),
+                Item = new FollowListItemResponse(
+                    f.FollowerId,
+                    f.Follower.Username,
+                    f.Follower.ProfileImageUrl,
+                    hasViewer && _db.UserFollows.Any(x => x.FollowerId == viewer && x.FollowingId == f.FollowerId),
+                    0),
             })
             .ToListAsync(cancellationToken);
 
@@ -645,14 +655,14 @@ public class SocialService : ISocialService
         {
             rows.RemoveAt(limit);
             var last = rows[^1];
-            nextCursor = new KeysetCursor(last.FollowedAt, last.Summary.Id).Encode();
+            nextCursor = new KeysetCursor(last.FollowedAt, last.Item.Id).Encode();
         }
 
         return SocialResult<FollowListResponse>.Success(
-            new FollowListResponse(rows.Select(r => r.Summary).ToList(), nextCursor));
+            new FollowListResponse(rows.Select(r => r.Item).ToList(), nextCursor));
     }
 
-    public async Task<SocialResult<FollowListResponse>> GetFollowingAsync(Guid targetUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
+    public async Task<SocialResult<FollowListResponse>> GetFollowingAsync(Guid targetUserId, Guid? viewerId, string? q, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
     {
         if (!await _db.Users.AnyAsync(u => u.Id == targetUserId, cancellationToken))
         {
@@ -670,6 +680,9 @@ public class SocialService : ISocialService
                 || (f.FollowedAt == cursorFollowedAt && f.FollowingId.CompareTo(cursorId) < 0));
         }
 
+        var hasViewer = viewerId.HasValue;
+        var viewer = viewerId ?? Guid.Empty;
+
         var rows = await follows
             .OrderByDescending(f => f.FollowedAt)
             .ThenByDescending(f => f.FollowingId)
@@ -677,7 +690,12 @@ public class SocialService : ISocialService
             .Select(f => new
             {
                 f.FollowedAt,
-                Summary = new UserSummaryResponse(f.FollowingId, f.Following.Username, f.Following.ProfileImageUrl),
+                Item = new FollowListItemResponse(
+                    f.FollowingId,
+                    f.Following.Username,
+                    f.Following.ProfileImageUrl,
+                    hasViewer && _db.UserFollows.Any(x => x.FollowerId == viewer && x.FollowingId == f.FollowingId),
+                    0),
             })
             .ToListAsync(cancellationToken);
 
@@ -686,11 +704,11 @@ public class SocialService : ISocialService
         {
             rows.RemoveAt(limit);
             var last = rows[^1];
-            nextCursor = new KeysetCursor(last.FollowedAt, last.Summary.Id).Encode();
+            nextCursor = new KeysetCursor(last.FollowedAt, last.Item.Id).Encode();
         }
 
         return SocialResult<FollowListResponse>.Success(
-            new FollowListResponse(rows.Select(r => r.Summary).ToList(), nextCursor));
+            new FollowListResponse(rows.Select(r => r.Item).ToList(), nextCursor));
     }
 
     public async Task<SocialResult<UserProfileResponse>> GetUserProfileAsync(Guid targetUserId, Guid? currentUserId, CancellationToken cancellationToken = default)

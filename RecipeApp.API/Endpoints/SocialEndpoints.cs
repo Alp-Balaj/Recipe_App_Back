@@ -252,14 +252,14 @@ public static class SocialEndpoints
             return ToNoContent(result);
         });
 
-        group.MapGet("/{id:guid}/followers", async (Guid id, string? cursor, int? limit, ISocialService social, CancellationToken cancellationToken) =>
+        group.MapGet("/{id:guid}/followers", async (Guid id, string? cursor, int? limit, string? q, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
             {
                 return error!;
             }
 
-            var result = await social.GetFollowersAsync(id, decodedCursor, effectiveLimit, cancellationToken);
+            var result = await social.GetFollowersAsync(id, GetOptionalUserId(user), q, decodedCursor, effectiveLimit, cancellationToken);
             return result.Outcome switch
             {
                 SocialOutcome.Success => Results.Ok(result.Value),
@@ -268,14 +268,14 @@ public static class SocialEndpoints
         })
         .AllowAnonymous();
 
-        group.MapGet("/{id:guid}/following", async (Guid id, string? cursor, int? limit, ISocialService social, CancellationToken cancellationToken) =>
+        group.MapGet("/{id:guid}/following", async (Guid id, string? cursor, int? limit, string? q, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
             {
                 return error!;
             }
 
-            var result = await social.GetFollowingAsync(id, decodedCursor, effectiveLimit, cancellationToken);
+            var result = await social.GetFollowingAsync(id, GetOptionalUserId(user), q, decodedCursor, effectiveLimit, cancellationToken);
             return result.Outcome switch
             {
                 SocialOutcome.Success => Results.Ok(result.Value),

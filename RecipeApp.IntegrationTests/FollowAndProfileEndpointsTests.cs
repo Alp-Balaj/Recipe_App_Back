@@ -265,6 +265,57 @@ public class FollowAndProfileEndpointsTests(IntegrationTestFactory factory) : IC
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Followers_FollowedByMe_IsTrueOnlyForPeopleTheViewerFollows()
+    {
+        var (aliceClient, alice) = await NewUserAsync();
+        var (bobClient, bob) = await NewUserAsync();
+        var (_, target) = await NewUserAsync();
+
+        // Both follow the target, so both appear in the target's follower list.
+        await FollowTestHelper.FollowOneWayAsync(aliceClient, target.UserId);
+        await FollowTestHelper.FollowOneWayAsync(bobClient, target.UserId);
+        // Alice follows Bob, but nobody follows Alice.
+        await FollowTestHelper.FollowOneWayAsync(aliceClient, bob.UserId);
+
+        var followers = await aliceClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+
+        var bobRow = Assert.Single(followers!.Items, u => u.Id == bob.UserId);
+        var aliceRow = Assert.Single(followers.Items, u => u.Id == alice.UserId);
+        Assert.True(bobRow.FollowedByMe);
+        Assert.False(aliceRow.FollowedByMe);
+    }
+
+    [Fact]
+    public async Task Followers_ForAnonymousCaller_FollowedByMeIsAlwaysFalse()
+    {
+        var (followerClient, follower) = await NewUserAsync();
+        var (_, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(followerClient, target.UserId);
+
+        var anonymous = factory.CreateClient();
+        var followers = await anonymous.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+
+        var row = Assert.Single(followers!.Items, u => u.Id == follower.UserId);
+        Assert.False(row.FollowedByMe);
+    }
+
+    [Fact]
+    public async Task Following_FollowedByMe_IsTrueForTheViewersOwnFollowingList()
+    {
+        var (viewerClient, viewer) = await NewUserAsync();
+        var (_, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(viewerClient, target.UserId);
+
+        var following = await viewerClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{viewer.UserId}/following", TestJson.Options);
+
+        var row = Assert.Single(following!.Items, u => u.Id == target.UserId);
+        Assert.True(row.FollowedByMe);
+    }
+
     // --- helpers ------------------------------------------------------------------------
 
     private async Task<(HttpClient Client, RecipeApp.Application.Auth.Dtos.AuthResponse Auth)> NewUserAsync()
