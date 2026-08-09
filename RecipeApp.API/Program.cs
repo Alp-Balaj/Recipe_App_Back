@@ -102,6 +102,10 @@ builder.Services.AddScoped<IUserSecurityStateService, UserSecurityStateService>(
 // Admin Rework: the best-effort observability write seam. Singleton over
 // IServiceScopeFactory (the ContentModerationWorker precedent) — see AppEventService.
 builder.Services.AddSingleton<IAppEventLogger, AppEventService>();
+// Task 10: the reader shares the writer's own singleton instance rather than a second one —
+// GetEventsAsync and LogAsync both run through IServiceScopeFactory, so there is nothing
+// stateful being duplicated by resolving the same object under a second interface.
+builder.Services.AddSingleton<IAppEventReader>(sp => (AppEventService)sp.GetRequiredService<IAppEventLogger>());
 builder.Services.AddHostedService<AppEventPruneWorker>();
 // Stream C (AI week proposal): the assistant needs IChatMessageCaller, registered by
 // AddChatAssistant below — resolution is lazy, so order here doesn't matter.
@@ -470,6 +474,7 @@ app.MapImageEndpoints();
 app.MapMealPlanEndpoints();
 app.MapReportEndpoints();
 app.MapAdminEndpoints();
+app.MapAppEventEndpoints();
 app.MapNotificationEndpoints();
 app.MapScanEndpoints();
 
