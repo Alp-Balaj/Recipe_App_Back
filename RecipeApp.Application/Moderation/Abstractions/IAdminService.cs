@@ -11,7 +11,7 @@ namespace RecipeApp.Application.Moderation.Abstractions;
 // called with the acting admin's id and appends one audit log row atomically with the act.
 public interface IAdminService
 {
-    Task<ReportListResponse> GetReportsAsync(
+    Task<AdminReportListResponse> GetReportsAsync(
         ReportStatus? status, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
 
     Task<ModerationResult<ReportResponse>> ResolveReportAsync(

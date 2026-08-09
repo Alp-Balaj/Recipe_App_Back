@@ -49,7 +49,7 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
 
         var response = await client.GetAsync("/admin/reports");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = (await response.Content.ReadFromJsonAsync<ReportListResponse>(TestJson.Options))!;
+        var body = (await response.Content.ReadFromJsonAsync<AdminReportListResponse>(TestJson.Options))!;
         Assert.NotNull(body.Items);
     }
 
@@ -64,23 +64,69 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
 
         var queue = await GetReportsAsync(adminClient, "Open");
-        var item = queue.Items.Single(r => r.TargetId == recipe.Id);
-        Assert.Equal(ReportStatus.Open, item.Status);
+        var item = queue.Items.Single(i => i.Report.TargetId == recipe.Id);
+        Assert.Equal(ReportStatus.Open, item.Report.Status);
 
         var resolve = await adminClient.PostAsJsonAsync(
-            $"/admin/reports/{item.Id}/resolve", new ResolveReportRequest("Hidden the recipe."), TestJson.Options);
+            $"/admin/reports/{item.Report.Id}/resolve", new ResolveReportRequest("Hidden the recipe."), TestJson.Options);
         Assert.Equal(HttpStatusCode.OK, resolve.StatusCode);
         var resolved = (await resolve.Content.ReadFromJsonAsync<ReportResponse>(TestJson.Options))!;
         Assert.Equal(ReportStatus.Resolved, resolved.Status);
         Assert.NotNull(resolved.ResolvedAtUtc);
 
         var openAfter = await GetReportsAsync(adminClient, "Open");
-        Assert.DoesNotContain(openAfter.Items, r => r.Id == item.Id);
+        Assert.DoesNotContain(openAfter.Items, i => i.Report.Id == item.Report.Id);
 
         // Triage is once: the losing admin in a race sees 409, not a silent overwrite.
         var again = await adminClient.PostAsJsonAsync(
-            $"/admin/reports/{item.Id}/dismiss", new ResolveReportRequest(null), TestJson.Options);
+            $"/admin/reports/{item.Report.Id}/dismiss", new ResolveReportRequest(null), TestJson.Options);
         Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+    }
+
+    [Fact]
+    public async Task ReportQueue_CarriesReporterAndTargetAuthorReportCount()
+    {
+        var authorClient = factory.CreateClient();
+        var author = await AuthTestHelper.RegisterAndAuthenticateAsync(authorClient);
+        var recipe1 = await CreateRecipeAsync(authorClient);
+        var recipe2 = await CreateRecipeAsync(authorClient);
+
+        var reporterAClient = factory.CreateClient();
+        var reporterA = await AuthTestHelper.RegisterAndAuthenticateAsync(reporterAClient);
+        (await reporterAClient.PostAsJsonAsync("/reports",
+            new CreateReportRequest(ReportTargetType.Recipe, recipe1.Id, ReportReason.Spam, null), TestJson.Options))
+            .EnsureSuccessStatusCode();
+        (await reporterAClient.PostAsJsonAsync("/reports",
+            new CreateReportRequest(ReportTargetType.Recipe, recipe2.Id, ReportReason.Spam, null), TestJson.Options))
+            .EnsureSuccessStatusCode();
+
+        var reporterCClient = factory.CreateClient();
+        var reporterC = await AuthTestHelper.RegisterAndAuthenticateAsync(reporterCClient);
+        var report3Response = await reporterCClient.PostAsJsonAsync("/reports",
+            new CreateReportRequest(ReportTargetType.Recipe, recipe1.Id, ReportReason.Inappropriate, null), TestJson.Options);
+        report3Response.EnsureSuccessStatusCode();
+        var report3 = (await report3Response.Content.ReadFromJsonAsync<ReportResponse>(TestJson.Options))!;
+
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var queue = await GetReportsAsync(adminClient, "Open");
+        var ownItems = queue.Items.Where(i => i.TargetAuthor.Id == author.UserId).ToList();
+        Assert.Equal(3, ownItems.Count);
+        Assert.All(ownItems, i => Assert.Equal(author.Username, i.TargetAuthor.Username));
+        Assert.All(ownItems, i => Assert.Equal(3, i.TargetAuthor.TotalReportsAgainst));
+        Assert.Contains(ownItems, i => i.Reporter.Username == reporterA.Username);
+        Assert.Contains(ownItems, i => i.Reporter.Username == reporterC.Username);
+
+        // Resolve one — TotalReportsAgainst counts every status, so it must not drop.
+        var resolve = await adminClient.PostAsJsonAsync(
+            $"/admin/reports/{report3.Id}/resolve", new ResolveReportRequest(null), TestJson.Options);
+        Assert.Equal(HttpStatusCode.OK, resolve.StatusCode);
+
+        var queueAfter = await GetReportsAsync(adminClient, status: null);
+        var afterItems = queueAfter.Items.Where(i => i.TargetAuthor.Id == author.UserId).ToList();
+        Assert.Equal(3, afterItems.Count);
+        Assert.All(afterItems, i => Assert.Equal(3, i.TargetAuthor.TotalReportsAgainst));
     }
 
     // --- content actions + the separate admin read (D5) ---------------------------------
@@ -387,11 +433,12 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         return (recipe, report);
     }
 
-    private static async Task<ReportListResponse> GetReportsAsync(HttpClient adminClient, string status)
+    private static async Task<AdminReportListResponse> GetReportsAsync(HttpClient adminClient, string? status)
     {
-        var response = await adminClient.GetAsync($"/admin/reports?status={status}&limit=50");
+        var query = string.IsNullOrEmpty(status) ? "" : $"status={status}&";
+        var response = await adminClient.GetAsync($"/admin/reports?{query}limit=50");
         response.EnsureSuccessStatusCode();
-        return (await response.Content.ReadFromJsonAsync<ReportListResponse>(TestJson.Options))!;
+        return (await response.Content.ReadFromJsonAsync<AdminReportListResponse>(TestJson.Options))!;
     }
 
     private static async Task<RecipeResponse> CreateRecipeAsync(HttpClient client, RecipeVisibility visibility = RecipeVisibility.Public)

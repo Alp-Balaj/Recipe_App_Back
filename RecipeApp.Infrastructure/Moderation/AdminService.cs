@@ -35,7 +35,7 @@ public class AdminService : IAdminService
         _logger = logger;
     }
 
-    public async Task<ReportListResponse> GetReportsAsync(
+    public async Task<AdminReportListResponse> GetReportsAsync(
         ReportStatus? status, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
     {
         var reports = status is ReportStatus s
@@ -51,9 +51,12 @@ public class AdminService : IAdminService
                 || (r.CreatedAt == cursorCreatedAt && r.Id.CompareTo(cursorId) < 0));
         }
 
-        // limit + 1 keyset paging, same convention as every list. The reporter/resolver
-        // usernames ride the projection; the report row itself carries the target snapshot.
-        var rows = await reports
+        // limit + 1 keyset paging, same convention as every list — unchanged from before
+        // Task 14. The reporter/resolver usernames ride the projection; the report row
+        // itself carries the target snapshot. TargetAuthorId/Username resolve the ONE FK
+        // that is actually set (Recipe.CreatedByUserId, Comment.UserId, or TargetUserId
+        // itself) to whoever the report is effectively against.
+        var projected = reports
             .OrderByDescending(r => r.CreatedAt)
             .ThenByDescending(r => r.Id)
             .Take(limit + 1)
@@ -63,6 +66,31 @@ public class AdminService : IAdminService
                 ReporterUsername = r.Reporter.Username,
                 ReporterImageUrl = r.Reporter.ProfileImageUrl,
                 ResolvedByUsername = r.ResolvedByUser != null ? r.ResolvedByUser.Username : null,
+                TargetAuthorId = r.RecipeId != null ? r.Recipe!.CreatedByUserId
+                    : r.CommentId != null ? r.Comment!.UserId
+                    : r.TargetUserId!.Value,
+                TargetAuthorUsername = r.RecipeId != null ? r.Recipe!.CreatedByUser.Username
+                    : r.CommentId != null ? r.Comment!.User.Username
+                    : r.TargetUser!.Username,
+            });
+
+        // Second Select so the correlated count can reference TargetAuthorId above rather
+        // than repeating the three-way FK resolution inline. All statuses count — the
+        // spec-mandated behavior that a triaged report never shrinks the count the queue
+        // shows for the same target author.
+        var rows = await projected
+            .Select(p => new
+            {
+                p.Report,
+                p.ReporterUsername,
+                p.ReporterImageUrl,
+                p.ResolvedByUsername,
+                p.TargetAuthorId,
+                p.TargetAuthorUsername,
+                TotalReportsAgainst = _db.Reports.Count(x =>
+                    x.TargetUserId == p.TargetAuthorId
+                    || (x.RecipeId != null && x.Recipe!.CreatedByUserId == p.TargetAuthorId)
+                    || (x.CommentId != null && x.Comment!.UserId == p.TargetAuthorId)),
             })
             .ToListAsync(cancellationToken);
 
@@ -74,8 +102,12 @@ public class AdminService : IAdminService
             nextCursor = new KeysetCursor(last.CreatedAt, last.Id).Encode();
         }
 
-        return new ReportListResponse(
-            rows.Select(r => ReportService.ToResponse(r.Report, r.ReporterUsername, r.ReporterImageUrl, r.ResolvedByUsername)).ToList(),
+        return new AdminReportListResponse(
+            rows.Select(r => new AdminReportListItem(
+                ReportService.ToResponse(r.Report, r.ReporterUsername, r.ReporterImageUrl, r.ResolvedByUsername),
+                new UserSummaryResponse(r.Report.ReporterId, r.ReporterUsername, r.ReporterImageUrl),
+                new AdminReportTargetAuthor(r.TargetAuthorId, r.TargetAuthorUsername, r.TotalReportsAgainst)))
+                .ToList(),
             nextCursor);
     }
 
