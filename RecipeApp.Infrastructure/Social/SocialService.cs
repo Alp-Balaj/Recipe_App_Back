@@ -25,6 +25,11 @@ public class SocialService : ISocialService
     private readonly IAppEventLogger _events;
     private readonly ILogger<SocialService> _logger;
 
+    // Feed redesign (2026-08-09): how many makers ride the "N made this" row. The design
+    // overlaps three avatars before the count, so fetching more would be rows nobody paints —
+    // and the CAP is what keeps the nested projection cheap on a recipe hundreds have cooked.
+    private const int RecentMakerLimit = 3;
+
     public SocialService(
         ApplicationDbContext db,
         IContentModerationQueue moderationQueue,
@@ -542,28 +547,50 @@ public class SocialService : ISocialService
         var isAuthenticated = currentUserId is not null;
         var callerId = currentUserId ?? Guid.Empty;
 
+        // Anonymous projection then client-side construction, the same idiom BuildFeedPageAsync
+        // uses: the nested makers list has to come back as a plain shape EF can materialize,
+        // and the parity test below pins that both paths build the identical envelope.
         var envelope = await _db.Recipes
             .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
             .Where(r => r.Id == recipeId)
-            .Select(r => new RecipeSocialResponse(
-                new UserSummaryResponse(r.CreatedByUserId, r.CreatedByUser.Username, r.CreatedByUser.ProfileImageUrl),
-                r.Likes.Count(),
-                r.Comments.Count(),
-                isAuthenticated && r.Likes.Any(l => l.UserId == callerId),
-                isAuthenticated && r.SavedByUsers.Any(s => s.UserId == callerId),
+            .Select(r => new
+            {
+                Author = new UserSummaryResponse(r.CreatedByUserId, r.CreatedByUser.Username, r.CreatedByUser.ProfileImageUrl),
+                LikeCount = r.Likes.Count(),
+                CommentCount = r.Comments.Count(),
+                LikedByMe = isAuthenticated && r.Likes.Any(l => l.UserId == callerId),
+                SavedByMe = isAuthenticated && r.SavedByUsers.Any(s => s.UserId == callerId),
                 // AVG over no rows is SQL NULL, which is exactly the "nobody has rated this"
                 // signal — the cast to double? is what keeps it from collapsing to 0.
-                r.CookedBy.Where(c => c.Rating != null).Average(c => (double?)c.Rating),
-                r.CookedBy.Count(c => c.Rating != null),
-                isAuthenticated && r.CookedBy.Any(c => c.UserId == callerId),
+                AverageRating = r.CookedBy.Where(c => c.Rating != null).Average(c => (double?)c.Rating),
+                RatingCount = r.CookedBy.Count(c => c.Rating != null),
+                CookedByMe = isAuthenticated && r.CookedBy.Any(c => c.UserId == callerId),
                 // Guest callers carry Guid.Empty, which matches no row, so this is null for
                 // them without needing the isAuthenticated guard the booleans use.
-                r.CookedBy.Where(c => c.UserId == callerId).Select(c => c.Rating).FirstOrDefault()))
+                MyRating = r.CookedBy.Where(c => c.UserId == callerId).Select(c => c.Rating).FirstOrDefault(),
+                MadeItCount = r.CookedBy.Count(),
+                RecentMakers = r.CookedBy
+                    .OrderByDescending(c => c.LastCookedAt)
+                    .Take(RecentMakerLimit)
+                    .Select(c => new UserSummaryResponse(c.UserId, c.User.Username, c.User.ProfileImageUrl))
+                    .ToList(),
+            })
             .SingleOrDefaultAsync(cancellationToken);
 
         return envelope is null
             ? SocialResult<RecipeSocialResponse>.NotFound()
-            : SocialResult<RecipeSocialResponse>.Success(envelope);
+            : SocialResult<RecipeSocialResponse>.Success(new RecipeSocialResponse(
+                envelope.Author,
+                envelope.LikeCount,
+                envelope.CommentCount,
+                envelope.LikedByMe,
+                envelope.SavedByMe,
+                envelope.AverageRating,
+                envelope.RatingCount,
+                envelope.CookedByMe,
+                envelope.MyRating,
+                envelope.MadeItCount,
+                envelope.RecentMakers));
     }
 
     // --- cp02: graph + profiles ---------------------------------------------------------
@@ -975,6 +1002,15 @@ public class SocialService : ISocialService
                 RatingCount = r.CookedBy.Count(c => c.Rating != null),
                 CookedByMe = isAuthenticated && r.CookedBy.Any(c => c.UserId == callerIdValue),
                 MyRating = r.CookedBy.Where(c => c.UserId == callerIdValue).Select(c => c.Rating).FirstOrDefault(),
+                // Feed redesign: the "N made this" row. Count is every cook; RecentMakers is
+                // only the handful the avatars can hold — see FeedItemResponse for why the
+                // count is rows, not the sum of TimesCooked.
+                MadeItCount = r.CookedBy.Count(),
+                RecentMakers = r.CookedBy
+                    .OrderByDescending(c => c.LastCookedAt)
+                    .Take(RecentMakerLimit)
+                    .Select(c => new UserSummaryResponse(c.UserId, c.User.Username, c.User.ProfileImageUrl))
+                    .ToList(),
             })
             .ToListAsync(cancellationToken);
 
@@ -997,11 +1033,120 @@ public class SocialService : ISocialService
                 r.AverageRating,
                 r.RatingCount,
                 r.CookedByMe,
-                r.MyRating))
+                r.MyRating,
+                r.MadeItCount,
+                r.RecentMakers))
             .ToList();
 
         return new FeedListResponse(items, nextCursor, source);
     }
+
+    // --- feed redesign (2026-08-09): the activity strip ----------------------------------
+
+    public async Task<FeedActivityListResponse> GetFeedActivityAsync(int limit, Guid? currentUserId, FeedScope? scope = null, CancellationToken cancellationToken = default)
+    {
+        // Anonymous callers have no follow graph and no "self" to exclude, and the strip is
+        // explicitly about people you have a relationship with — so a guest gets nothing
+        // rather than a stranger's shoulder-surf of who liked what.
+        if (currentUserId is not Guid callerId)
+        {
+            return new FeedActivityListResponse([]);
+        }
+
+        var visible = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(callerId));
+
+        // Whose activity. Following (the default) narrows to the follow graph; ForYou opens
+        // it to everyone else. Either way the caller's own actions are excluded — a strip
+        // that told you what you just saved would be a mirror, not a signal.
+        IQueryable<Guid> actorIds;
+        if (scope == FeedScope.ForYou)
+        {
+            actorIds = _db.Users.Where(u => u.Id != callerId).Select(u => u.Id);
+        }
+        else
+        {
+            actorIds = _db.UserFollows.Where(f => f.FollowerId == callerId).Select(f => f.FollowingId);
+        }
+
+        // Four sources, four queries, merged in memory. A UNION would be one round trip, but
+        // these tables are keyed differently (Recipe.CreatedAt vs Like.CreatedAt vs
+        // SavedRecipe.SavedAt vs CookedRecipe.LastCookedAt) and each row still has to be
+        // ordered by its own column before the cap, so the union would be over four
+        // already-sorted subqueries anyway. `limit` bounds every leg, so the merge is over at
+        // most 4*limit rows and the final Take is what makes the answer correct: whichever
+        // leg holds the newest rows wins them, no leg is starved by a fixed per-leg quota.
+        var posted = await visible
+            .Where(r => actorIds.Contains(r.CreatedByUserId))
+            .OrderByDescending(r => r.CreatedAt)
+            .Take(limit)
+            .Select(r => new ActivityRow(
+                new UserSummaryResponse(r.CreatedByUserId, r.CreatedByUser.Username, r.CreatedByUser.ProfileImageUrl),
+                FeedActivityKind.Posted,
+                r.Id,
+                r.Title,
+                r.CreatedAt))
+            .ToListAsync(cancellationToken);
+
+        var liked = await _db.Likes
+            .Where(l => actorIds.Contains(l.UserId) && visible.Any(r => r.Id == l.RecipeId))
+            .OrderByDescending(l => l.CreatedAt)
+            .Take(limit)
+            .Select(l => new ActivityRow(
+                new UserSummaryResponse(l.UserId, l.User.Username, l.User.ProfileImageUrl),
+                FeedActivityKind.Liked,
+                l.RecipeId,
+                l.Recipe.Title,
+                l.CreatedAt))
+            .ToListAsync(cancellationToken);
+
+        var saved = await _db.SavedRecipes
+            .Where(s => actorIds.Contains(s.UserId) && visible.Any(r => r.Id == s.RecipeId))
+            .OrderByDescending(s => s.SavedAt)
+            .Take(limit)
+            .Select(s => new ActivityRow(
+                new UserSummaryResponse(s.UserId, s.User.Username, s.User.ProfileImageUrl),
+                FeedActivityKind.Saved,
+                s.RecipeId,
+                s.Recipe.Title,
+                s.SavedAt))
+            .ToListAsync(cancellationToken);
+
+        var cooked = await _db.CookedRecipes
+            .Where(c => actorIds.Contains(c.UserId) && visible.Any(r => r.Id == c.RecipeId))
+            .OrderByDescending(c => c.LastCookedAt)
+            .Take(limit)
+            .Select(c => new ActivityRow(
+                new UserSummaryResponse(c.UserId, c.User.Username, c.User.ProfileImageUrl),
+                FeedActivityKind.Cooked,
+                c.RecipeId,
+                c.Recipe.Title,
+                c.LastCookedAt))
+            .ToListAsync(cancellationToken);
+
+        var items = posted
+            .Concat(liked)
+            .Concat(saved)
+            .Concat(cooked)
+            .OrderByDescending(a => a.OccurredAt)
+            // One actor doing three things in a row would fill the whole strip with one
+            // person; one row per actor keeps it a picture of the kitchen, not of one cook.
+            .DistinctBy(a => a.Actor.Id)
+            .Take(limit)
+            .Select(a => new FeedActivityResponse(a.Actor, a.Kind, a.RecipeId, a.RecipeTitle, a.OccurredAt))
+            .ToList();
+
+        return new FeedActivityListResponse(items);
+    }
+
+    // The in-memory merge shape for GetFeedActivityAsync's four legs. A named record rather
+    // than an anonymous type because the legs are separate queries whose results have to
+    // Concat into one sequence.
+    private sealed record ActivityRow(
+        UserSummaryResponse Actor,
+        FeedActivityKind Kind,
+        Guid RecipeId,
+        string RecipeTitle,
+        DateTime OccurredAt);
 
     // --- helpers ------------------------------------------------------------------------
 

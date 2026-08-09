@@ -129,4 +129,18 @@ public interface ISocialService
     /// Following scope returns an empty page rather than throwing (guest-access plan §3.3).
     /// </summary>
     Task<FeedListResponse> GetFeedAsync(KeysetCursor? cursor, int limit, Guid? currentUserId, FeedScope? scope = null, CancellationToken cancellationToken = default);
+
+    // --- feed redesign (2026-08-09): the activity strip ----------------------------------
+
+    /// <summary>
+    /// The newest interactions (posted / liked / saved / cooked) on recipes the caller may
+    /// see, newest first. Scope selects WHOSE activity: Following (the default) = users the
+    /// caller follows; ForYou = anyone but the caller. Never the caller's own activity —
+    /// the strip is about other people's kitchens.
+    /// <para>
+    /// Uncursored by design (see FeedActivityResponse): <paramref name="limit"/> caps the
+    /// whole answer. An anonymous caller has no follow graph and gets an empty list.
+    /// </para>
+    /// </summary>
+    Task<FeedActivityListResponse> GetFeedActivityAsync(int limit, Guid? currentUserId, FeedScope? scope = null, CancellationToken cancellationToken = default);
 }

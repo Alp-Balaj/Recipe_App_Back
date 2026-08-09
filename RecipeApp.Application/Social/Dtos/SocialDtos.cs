@@ -103,6 +103,13 @@ public record CompleteOnboardingRequest(
 // carries only (CreatedAt, Id), so sorting on a computed average would break pagination —
 // that needs a denormalized column and a new cursor shape, and is out of scope here.
 // AverageRating is null when nobody has rated, never 0 — 0 is not a rating.
+//
+// Feed redesign (2026-08-09) appends the "made it" pair on the same terms — live-computed,
+// no new column. MadeItCount is how many DISTINCT users have logged a cook (CookedRecipe is
+// one row per user, so it is a plain row count, NOT the sum of TimesCooked: "3 made this"
+// is a social fact about people, and one cook who made it five times is still one person).
+// RecentMakers is the first few of them, most-recently-cooked first, for the overlapping
+// avatars beside the count — capped server-side so the row can never drag a long list.
 public record FeedItemResponse(
     RecipeResponse Recipe,
     UserSummaryResponse Author,
@@ -113,7 +120,9 @@ public record FeedItemResponse(
     double? AverageRating,
     int RatingCount,
     bool CookedByMe,
-    int? MyRating);
+    int? MyRating,
+    int MadeItCount,
+    IReadOnlyList<UserSummaryResponse> RecentMakers);
 
 // Caller-requested feed mode (?scope= on GET /feed, feed-tabs addition 2026-07-22):
 // ForYou = recent Public recipes by others (the discover query, on demand);
@@ -147,4 +156,36 @@ public record RecipeSocialResponse(
     double? AverageRating,
     int RatingCount,
     bool CookedByMe,
-    int? MyRating);
+    int? MyRating,
+    int MadeItCount,
+    IReadOnlyList<UserSummaryResponse> RecentMakers);
+
+// --- Feed redesign (2026-08-09): the "cooking right now" activity strip ---------------
+//
+// What a followed cook just DID, as opposed to what they posted — the feed already answers
+// the second question. Derived, not stored: there is no activity table and no fan-out, the
+// service unions the four interaction tables that already carry a timestamp
+// (Recipe.CreatedAt, Like.CreatedAt, SavedRecipe.SavedAt, CookedRecipe.LastCookedAt) and
+// takes the newest few. That is why this is a plain capped list with NO cursor: it is a
+// live strip, not a history, and paging a union of four differently-keyed tables would
+// need a composite cursor that buys nothing at three visible rows.
+public enum FeedActivityKind
+{
+    Posted,
+    Liked,
+    Saved,
+    Cooked,
+}
+
+// RecipeId/RecipeTitle name what the activity was ABOUT — enough for the rail row to read
+// "nadia saved Tomato tart" and link to the recipe, without shipping a whole RecipeResponse
+// per row. The recipe is always one the caller may see (the shared visibility policy is
+// composed first), so a row can never leak a private title.
+public record FeedActivityResponse(
+    UserSummaryResponse Actor,
+    FeedActivityKind Kind,
+    Guid RecipeId,
+    string RecipeTitle,
+    DateTime OccurredAt);
+
+public record FeedActivityListResponse(IReadOnlyList<FeedActivityResponse> Items);

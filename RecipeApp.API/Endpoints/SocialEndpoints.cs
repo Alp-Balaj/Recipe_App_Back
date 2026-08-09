@@ -327,24 +327,9 @@ public static class SocialEndpoints
 
             // Feed tabs (2026-07-22): ?scope=forYou|following selects the mode explicitly;
             // omitted keeps the original following-with-discover-fallback behavior.
-            FeedScope? feedScope = null;
-            if (!string.IsNullOrEmpty(scope))
+            if (!TryResolveScope(scope, out var feedScope, out var scopeError))
             {
-                if (string.Equals(scope, "forYou", StringComparison.OrdinalIgnoreCase))
-                {
-                    feedScope = FeedScope.ForYou;
-                }
-                else if (string.Equals(scope, "following", StringComparison.OrdinalIgnoreCase))
-                {
-                    feedScope = FeedScope.Following;
-                }
-                else
-                {
-                    return Results.ValidationProblem(new Dictionary<string, string[]>
-                    {
-                        ["scope"] = ["scope must be 'forYou' or 'following'."],
-                    });
-                }
+                return scopeError!;
             }
 
             var response = await social.GetFeedAsync(decodedCursor, effectiveLimit, GetOptionalUserId(user), feedScope, cancellationToken);
@@ -352,6 +337,63 @@ public static class SocialEndpoints
         })
         .AllowAnonymous()
         .RequireRateLimiting(RateLimitPolicies.Social);
+
+        // Feed redesign (2026-08-09): the "cooking right now" strip. A sibling literal route,
+        // not a segment of the one above — "activity" never matches /feed itself.
+        //
+        // Cursor-free (see FeedActivityResponse): only ?limit is honoured, clamped by the same
+        // page-size policy. AllowAnonymous deliberately, even though a guest's answer is always
+        // empty: requiring auth would answer 401, and the SPA's fetch wrapper treats ANY 401 as
+        // a dead session and signs the user out — so a guest browsing /feed would be logged out
+        // by a rail module. An empty list is the honest answer and costs a guest nothing.
+        app.MapGet("/feed/activity", async (int? limit, string? scope, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            if (!TryResolvePaging(null, limit, out _, out var effectiveLimit, out var error))
+            {
+                return error!;
+            }
+
+            if (!TryResolveScope(scope, out var feedScope, out var scopeError))
+            {
+                return scopeError!;
+            }
+
+            var response = await social.GetFeedActivityAsync(effectiveLimit, GetOptionalUserId(user), feedScope, cancellationToken);
+            return Results.Ok(response);
+        })
+        .AllowAnonymous()
+        .RequireRateLimiting(RateLimitPolicies.Social);
+    }
+
+    // Shared ?scope= parsing for the two feed routes: absent is null (each route's own
+    // default), anything but the two known modes is a 400 rather than a silent fallback.
+    private static bool TryResolveScope(string? scope, out FeedScope? feedScope, out IResult? error)
+    {
+        feedScope = null;
+        error = null;
+
+        if (string.IsNullOrEmpty(scope))
+        {
+            return true;
+        }
+
+        if (string.Equals(scope, "forYou", StringComparison.OrdinalIgnoreCase))
+        {
+            feedScope = FeedScope.ForYou;
+            return true;
+        }
+
+        if (string.Equals(scope, "following", StringComparison.OrdinalIgnoreCase))
+        {
+            feedScope = FeedScope.Following;
+            return true;
+        }
+
+        error = Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["scope"] = ["scope must be 'forYou' or 'following'."],
+        });
+        return false;
     }
 
     private static Guid GetUserId(ClaimsPrincipal user) =>
