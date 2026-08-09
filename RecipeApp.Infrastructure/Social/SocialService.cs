@@ -680,6 +680,8 @@ public class SocialService : ISocialService
                 || (f.FollowedAt == cursorFollowedAt && f.FollowingId.CompareTo(cursorId) < 0));
         }
 
+        // Hoisted out of the expression tree: a captured bool short-circuits the EXISTS
+        // entirely for anonymous callers, and Guid.Empty keeps the comparison non-nullable.
         var hasViewer = viewerId.HasValue;
         var viewer = viewerId ?? Guid.Empty;
 
