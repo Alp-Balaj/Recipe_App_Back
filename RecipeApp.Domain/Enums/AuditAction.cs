@@ -14,4 +14,6 @@ public enum AuditAction
     UserUnsuspended,
     UserBanned,
     UserUnbanned,
+    AdminPromoted,
+    AdminDemoted,
 }
