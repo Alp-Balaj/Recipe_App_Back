@@ -340,6 +340,79 @@ public class FollowAndProfileEndpointsTests(IntegrationTestFactory factory) : IC
         Assert.False(row.FollowedByMe);
     }
 
+    [Fact]
+    public async Task Followers_RecipeCount_IsCallerRelative_LikeTheProfileCount()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        await CreateRecipeAsync(authorClient);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.Private);
+
+        var (_, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(authorClient, target.UserId);
+
+        // A stranger sees only the public recipe.
+        var (strangerClient, _) = await NewUserAsync();
+        var strangerView = await strangerClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+        Assert.Equal(1, Assert.Single(strangerView!.Items, u => u.Id == author.UserId).RecipeCount);
+
+        // A mutual also sees the FriendsOnly one — never the Private one.
+        var (friendClient, friend) = await NewUserAsync();
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, authorClient, author.UserId);
+        await FollowTestHelper.FollowOneWayAsync(friendClient, target.UserId);
+
+        var friendView = await friendClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+        Assert.Equal(2, Assert.Single(friendView!.Items, u => u.Id == author.UserId).RecipeCount);
+    }
+
+    [Fact]
+    public async Task Followers_RecipeCount_ForAnonymousCaller_CountsPublicOnly()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        await CreateRecipeAsync(authorClient);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+
+        var (_, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(authorClient, target.UserId);
+
+        var anonymous = factory.CreateClient();
+        var view = await anonymous.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/followers", TestJson.Options);
+
+        Assert.Equal(1, Assert.Single(view!.Items, u => u.Id == author.UserId).RecipeCount);
+    }
+
+    // The plan's test lists have twice left `following` uncovered where `followers` was
+    // tested — mirrors Followers_RecipeCount_IsCallerRelative_LikeTheProfileCount, but the
+    // edge under test is target-follows-author, read back through GET /users/{id}/following.
+    [Fact]
+    public async Task Following_RecipeCount_IsCallerRelative_LikeTheProfileCount()
+    {
+        var (authorClient, author) = await NewUserAsync();
+        await CreateRecipeAsync(authorClient);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.FriendsOnly);
+        await CreateRecipeAsync(authorClient, RecipeVisibility.Private);
+
+        var (targetClient, target) = await NewUserAsync();
+        await FollowTestHelper.FollowOneWayAsync(targetClient, author.UserId);
+
+        // A stranger sees only the public recipe.
+        var (strangerClient, _) = await NewUserAsync();
+        var strangerView = await strangerClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/following", TestJson.Options);
+        Assert.Equal(1, Assert.Single(strangerView!.Items, u => u.Id == author.UserId).RecipeCount);
+
+        // A mutual also sees the FriendsOnly one — never the Private one.
+        var (friendClient, friend) = await NewUserAsync();
+        await FollowTestHelper.MakeMutualAsync(friendClient, friend.UserId, authorClient, author.UserId);
+
+        var friendView = await friendClient.GetFromJsonAsync<FollowListResponse>(
+            $"/users/{target.UserId}/following", TestJson.Options);
+        Assert.Equal(2, Assert.Single(friendView!.Items, u => u.Id == author.UserId).RecipeCount);
+    }
+
     // --- helpers ------------------------------------------------------------------------
 
     private async Task<(HttpClient Client, RecipeApp.Application.Auth.Dtos.AuthResponse Auth)> NewUserAsync()

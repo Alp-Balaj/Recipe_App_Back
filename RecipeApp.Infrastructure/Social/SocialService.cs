@@ -634,6 +634,10 @@ public class SocialService : ISocialService
         var hasViewer = viewerId.HasValue;
         var viewer = viewerId ?? Guid.Empty;
 
+        // Same caller-relative rule as GetUserProfileAsync — a row that advertises a number
+        // the previewed profile then contradicts is worse than no number at all.
+        var visibleRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(viewerId));
+
         var rows = await follows
             .OrderByDescending(f => f.FollowedAt)
             .ThenByDescending(f => f.FollowerId)
@@ -646,7 +650,7 @@ public class SocialService : ISocialService
                     f.Follower.Username,
                     f.Follower.ProfileImageUrl,
                     hasViewer && _db.UserFollows.Any(x => x.FollowerId == viewer && x.FollowingId == f.FollowerId),
-                    0),
+                    visibleRecipes.Count(r => r.CreatedByUserId == f.FollowerId)),
             })
             .ToListAsync(cancellationToken);
 
@@ -685,6 +689,10 @@ public class SocialService : ISocialService
         var hasViewer = viewerId.HasValue;
         var viewer = viewerId ?? Guid.Empty;
 
+        // Same caller-relative rule as GetUserProfileAsync — a row that advertises a number
+        // the previewed profile then contradicts is worse than no number at all.
+        var visibleRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(viewerId));
+
         var rows = await follows
             .OrderByDescending(f => f.FollowedAt)
             .ThenByDescending(f => f.FollowingId)
@@ -697,7 +705,7 @@ public class SocialService : ISocialService
                     f.Following.Username,
                     f.Following.ProfileImageUrl,
                     hasViewer && _db.UserFollows.Any(x => x.FollowerId == viewer && x.FollowingId == f.FollowingId),
-                    0),
+                    visibleRecipes.Count(r => r.CreatedByUserId == f.FollowingId)),
             })
             .ToListAsync(cancellationToken);
 
