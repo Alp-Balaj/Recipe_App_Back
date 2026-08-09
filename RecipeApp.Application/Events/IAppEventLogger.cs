@@ -1,3 +1,4 @@
+using RecipeApp.Application.Common;
 using RecipeApp.Domain.Enums;
 
 namespace RecipeApp.Application.Events;
@@ -11,4 +12,15 @@ public interface IAppEventLogger
 {
     /// <summary>Fire-and-mostly-forget. Never throws; a lost event is acceptable.</summary>
     Task LogAsync(AppEventType type, Guid? actorUserId = null, Guid? targetId = null, string? detail = null);
+}
+
+// Task 10: the read side of the log, behind GET /admin/events. A separate interface from
+// IAppEventLogger (rather than one fatter one) because the two have unrelated failure
+// contracts — the writer must never throw, the reader is an ordinary admin query that can
+// fail exactly like any other. AppEventService implements both; Program.cs registers the
+// reader against the SAME singleton instance the writer already is.
+public interface IAppEventReader
+{
+    Task<AppEventListResponse> GetEventsAsync(
+        AppEventCategory? category, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
 }

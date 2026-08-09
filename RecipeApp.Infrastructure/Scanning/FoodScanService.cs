@@ -3,12 +3,14 @@ using Microsoft.Extensions.Logging;
 using NpgsqlTypes;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Chat.Dtos;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Scanning;
 using RecipeApp.Application.Scanning.Abstractions;
 using RecipeApp.Application.Scanning.Dtos;
 using RecipeApp.Domain.Entities;
+using RecipeApp.Domain.Enums;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
 
@@ -54,17 +56,20 @@ public class FoodScanService : IFoodScanService
     private readonly ApplicationDbContext _db;
     private readonly IFoodScanAssistant _assistant;
     private readonly IAiUsageService _aiUsage;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<FoodScanService> _logger;
 
     public FoodScanService(
         ApplicationDbContext db,
         IFoodScanAssistant assistant,
         IAiUsageService aiUsage,
+        IAppEventLogger events,
         ILogger<FoodScanService> logger)
     {
         _db = db;
         _assistant = assistant;
         _aiUsage = aiUsage;
+        _events = events;
         _logger = logger;
     }
 
@@ -75,6 +80,7 @@ public class FoodScanService : IFoodScanService
         // user pressed, every scan spends, and an exhausted budget must not cost money.
         if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
         {
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.FoodScan} — quota-exhausted");
             return FoodScanResult<PantryScanResponse>.QuotaExceeded();
         }
 
@@ -87,6 +93,7 @@ public class FoodScanService : IFoodScanService
         {
             // Same funnel as every other AI lane: failure → 502, nothing billed.
             _logger.LogError(ex, "Pantry scan failed for user {UserId}.", userId);
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.FoodScan} — provider-error");
             return FoodScanResult<PantryScanResponse>.AssistantUnavailable();
         }
 
@@ -112,6 +119,7 @@ public class FoodScanService : IFoodScanService
     {
         if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
         {
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.FoodScan} — quota-exhausted");
             return FoodScanResult<ReceiptScanResponse>.QuotaExceeded();
         }
 
@@ -123,6 +131,7 @@ public class FoodScanService : IFoodScanService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Receipt scan failed for user {UserId}.", userId);
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.FoodScan} — provider-error");
             return FoodScanResult<ReceiptScanResponse>.AssistantUnavailable();
         }
 

@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Chat.Dtos;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.Images;
 using RecipeApp.Application.Images.Abstractions;
 using RecipeApp.Application.Moderation.Abstractions;
@@ -52,6 +53,7 @@ public class RecipeImportService : IRecipeImportService
     private readonly IContentModerationQueue _moderationQueue;
     private readonly IValidator<CreateRecipeRequest> _validator;
     private readonly RecipeImportOptions _options;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<RecipeImportService> _logger;
 
     public RecipeImportService(
@@ -64,6 +66,7 @@ public class RecipeImportService : IRecipeImportService
         IContentModerationQueue moderationQueue,
         IValidator<CreateRecipeRequest> validator,
         RecipeImportOptions options,
+        IAppEventLogger events,
         ILogger<RecipeImportService> logger)
     {
         _db = db;
@@ -75,6 +78,7 @@ public class RecipeImportService : IRecipeImportService
         _moderationQueue = moderationQueue;
         _validator = validator;
         _options = options;
+        _events = events;
         _logger = logger;
     }
 
@@ -115,6 +119,7 @@ public class RecipeImportService : IRecipeImportService
             // No usable structured data. NOW the model, and now the budget.
             if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
             {
+                await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Import} — quota-exhausted");
                 return RecipeImportResult<ImportRecipeResponse>.QuotaExceeded();
             }
 
@@ -134,6 +139,7 @@ public class RecipeImportService : IRecipeImportService
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogError(ex, "Recipe extraction failed for {Url}.", page.FinalUrl);
+                await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Import} — provider-error");
                 return RecipeImportResult<ImportRecipeResponse>.AssistantUnavailable();
             }
 
@@ -154,6 +160,7 @@ public class RecipeImportService : IRecipeImportService
         // unconditional and comes first.
         if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
         {
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Import} — quota-exhausted");
             return RecipeImportResult<ImportRecipeResponse>.QuotaExceeded();
         }
 
@@ -165,6 +172,7 @@ public class RecipeImportService : IRecipeImportService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Photo recipe extraction failed for user {UserId}.", userId);
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Import} — provider-error");
             return RecipeImportResult<ImportRecipeResponse>.AssistantUnavailable();
         }
 

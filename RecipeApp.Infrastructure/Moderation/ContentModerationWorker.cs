@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat.Abstractions;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Entities.Moderation;
@@ -36,17 +37,20 @@ public sealed class ContentModerationWorker : BackgroundService
     private readonly ContentModerationQueue _queue;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ModerationOptions _options;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<ContentModerationWorker> _logger;
 
     public ContentModerationWorker(
         ContentModerationQueue queue,
         IServiceScopeFactory scopeFactory,
         ModerationOptions options,
+        IAppEventLogger events,
         ILogger<ContentModerationWorker> logger)
     {
         _queue = queue;
         _scopeFactory = scopeFactory;
         _options = options;
+        _events = events;
         _logger = logger;
     }
 
@@ -81,6 +85,15 @@ public sealed class ContentModerationWorker : BackgroundService
                 _logger.LogError(
                     ex, "Moderation classification failed for {TargetType} {TargetId}; leaving it unflagged.",
                     item.TargetType, item.TargetId);
+                // No ungated quota path for this lane (see AiUsageLanes.ContentModeration) —
+                // provider-failure is the only outcome this worker's own actions can produce,
+                // so this is the lane's one hook. Attributed to the platform's own account,
+                // never the content's author (the author didn't spend anything here).
+                await _events.LogAsync(
+                    AppEventType.AiCallFailed,
+                    actorUserId: SystemUsers.ModerationId,
+                    targetId: item.TargetId,
+                    detail: $"{AiUsageLanes.ContentModeration} — provider-error");
             }
         }
     }
