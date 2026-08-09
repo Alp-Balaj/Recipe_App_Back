@@ -102,6 +102,7 @@ builder.Services.AddScoped<IUserSecurityStateService, UserSecurityStateService>(
 // Admin Rework: the best-effort observability write seam. Singleton over
 // IServiceScopeFactory (the ContentModerationWorker precedent) — see AppEventService.
 builder.Services.AddSingleton<IAppEventLogger, AppEventService>();
+builder.Services.AddHostedService<AppEventPruneWorker>();
 // Stream C (AI week proposal): the assistant needs IChatMessageCaller, registered by
 // AddChatAssistant below — resolution is lazy, so order here doesn't matter.
 builder.Services.AddScoped<IMealPlanAssistantService, MealPlanAssistantService>();
