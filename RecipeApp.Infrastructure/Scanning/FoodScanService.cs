@@ -89,9 +89,10 @@ public class FoodScanService : IFoodScanService
         {
             detection = await _assistant.DetectPantryAsync([image], cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            // Same funnel as every other AI lane: failure → 502, nothing billed.
+            // Same funnel as every other AI lane: failure → 502, nothing billed. The token half
+            // of the filter keeps a provider timeout inside it — see ChatService.InvokeAssistantAsync.
             _logger.LogError(ex, "Pantry scan failed for user {UserId}.", userId);
             await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.FoodScan} — provider-error");
             return FoodScanResult<PantryScanResponse>.AssistantUnavailable();
@@ -128,8 +129,9 @@ public class FoodScanService : IFoodScanService
         {
             read = await _assistant.ReadReceiptAsync([image], cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
+            // Timeout stays inside the funnel — see ChatService.InvokeAssistantAsync.
             _logger.LogError(ex, "Receipt scan failed for user {UserId}.", userId);
             await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.FoodScan} — provider-error");
             return FoodScanResult<ReceiptScanResponse>.AssistantUnavailable();

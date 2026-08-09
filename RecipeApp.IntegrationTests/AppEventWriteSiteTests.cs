@@ -210,6 +210,29 @@ public class AppEventWriteSiteTests(IntegrationTestFactory factory) : IClassFixt
         Assert.False(await db.AiUsageRecords.AnyAsync(r => r.UserId == auth.UserId));
     }
 
+    // Regression guard for the follow-up fix to the Admin Rework: a provider TIMEOUT throws
+    // TaskCanceledException, which IS an OperationCanceledException. Every AI lane except cook
+    // mode filtered its catch on `ex is not OperationCanceledException`, so a timeout escaped the
+    // funnel entirely — out as an unhandled 500, and with no AiCallFailed row for what is in
+    // practice the most common way an AI call fails. Adding the event hooks did not cause that
+    // hole, it inherited it. Revert either half of ChatService's filter and this test fails.
+    [Fact]
+    public async Task Chat_ProviderTimeout_IsFunnelled_AndLogsAiCallFailed()
+    {
+        var client = factory.CreateClient();
+        var auth = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+
+        var response = await client.PostAsJsonAsync("/chat/conversations",
+            new SendMessageRequest($"please stall {FakeChatAssistantService.TimeoutSentinel}"), TestJson.Options);
+
+        // Not 500: the timeout is an assistant failure, so it takes the same 502 exit as any other.
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+
+        var row = await SingleEventAsync(e => e.Type == AppEventType.AiCallFailed && e.ActorUserId == auth.UserId);
+        Assert.Equal($"{AiUsageLanes.Chat} — provider-error", row.Detail);
+        Assert.Equal(AppEventCategory.Ai, row.Category);
+    }
+
     [Fact]
     public async Task Chat_QuotaExhausted_LogsAiCallFailed()
     {

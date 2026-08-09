@@ -147,10 +147,11 @@ public class MealPlanProposalService : IMealPlanProposalService
             proposal = await _assistant.ProposeWeekAsync(
                 openSlots, candidates, dietaryRestrictions.Select(Vocabulary.Describe).ToList(), cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             // Same funnel as ChatService.InvokeAssistantAsync: any assistant failure (network,
-            // malformed output) becomes AssistantUnavailable → 502. Cancellation propagates.
+            // malformed output) becomes AssistantUnavailable → 502. CALLER cancellation
+            // propagates; a provider timeout does not — see that method's filter note.
             // Nothing is recorded on this path — a failed call produced nothing and costs the
             // user nothing, matching chat and the generator.
             _logger.LogError(ex, "Meal-plan assistant failed for user {UserId}.", userId);

@@ -112,12 +112,13 @@ public class RecipeGenerationService : IRecipeGenerationService
                     author.CuisinePreferences.Select(Vocabulary.Describe).ToList()),
                 cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             // Same funnel as ChatService.InvokeAssistantAsync and MealPlanProposalService:
             // any failure (network, malformed output, a response with no usable steps)
             // becomes AssistantUnavailable -> 502, with nothing written and nothing billed.
-            // Cancellation propagates — a cancelled request is not an assistant failure.
+            // CALLER cancellation propagates — a cancelled request is not an assistant failure —
+            // but a provider timeout does NOT: see the filter note in InvokeAssistantAsync.
             _logger.LogError(ex, "Recipe generator failed for user {UserId}.", userId);
             await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.RecipeGeneration} — provider-error");
             return RecipeGenerationResult<GenerateRecipeResponse>.AssistantUnavailable();

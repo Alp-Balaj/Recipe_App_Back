@@ -17,6 +17,14 @@ public sealed class FakeChatAssistantService : IChatAssistantService
 {
     public const string FailSentinel = "__FAIL__";
 
+    // A message containing this sentinel throws TaskCanceledException while the CALLER's token is
+    // still live — the exact shape `HttpClient.Timeout` elapsing produces. It is a separate
+    // sentinel from FailSentinel because it exercises a different code path: TaskCanceledException
+    // IS an OperationCanceledException, so a lane whose catch filter reads only
+    // `ex is not OperationCanceledException` lets it escape as an unhandled 500 with no
+    // AiCallFailed row. See Chat_ProviderTimeout_IsFunnelled_AndLogsAiCallFailed.
+    public const string TimeoutSentinel = "__TIMEOUT__";
+
     // ai-quotas: every fake call reports this fixed usage, so tests can assert exact
     // accounting (N turns → N × these numbers) without a real provider.
     public static readonly ChatTokenUsage Usage = new(100, 25, 150);
@@ -35,6 +43,13 @@ public sealed class FakeChatAssistantService : IChatAssistantService
         if (userMessage.Contains(FailSentinel, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Simulated chat assistant failure.");
+        }
+
+        if (userMessage.Contains(TimeoutSentinel, StringComparison.Ordinal))
+        {
+            // Deliberately NOT tied to cancellationToken: a provider timeout is not a caller
+            // cancellation, and telling the two apart is the whole point of the lane's filter.
+            throw new TaskCanceledException("Simulated provider timeout.");
         }
 
         var candidateIds = candidates.Select(c => c.Id).ToHashSet();

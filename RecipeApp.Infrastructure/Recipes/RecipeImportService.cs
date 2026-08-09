@@ -136,8 +136,9 @@ public class RecipeImportService : IRecipeImportService
                 extracted = await _extractor.ExtractFromPageAsync(
                     text, page.FinalUrl.ToString(), cancellationToken);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
+                // Timeout stays inside the funnel — see ChatService.InvokeAssistantAsync.
                 _logger.LogError(ex, "Recipe extraction failed for {Url}.", page.FinalUrl);
                 await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Import} — provider-error");
                 return RecipeImportResult<ImportRecipeResponse>.AssistantUnavailable();
@@ -169,8 +170,9 @@ public class RecipeImportService : IRecipeImportService
         {
             extracted = await _extractor.ExtractFromImagesAsync([image], cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
+            // Timeout stays inside the funnel — see ChatService.InvokeAssistantAsync.
             _logger.LogError(ex, "Photo recipe extraction failed for user {UserId}.", userId);
             await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Import} — provider-error");
             return RecipeImportResult<ImportRecipeResponse>.AssistantUnavailable();

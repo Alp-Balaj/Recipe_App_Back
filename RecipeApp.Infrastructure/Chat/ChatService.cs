@@ -294,8 +294,16 @@ public class ChatService : IChatService
                     preferences.CuisinePreferences.Select(Vocabulary.Describe).ToList()),
                 cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
+            // The second half of this filter is load-bearing, and CookAssistantService's browser
+            // pass is what found it. HttpClient.Timeout elapsing throws TaskCanceledException,
+            // which IS an OperationCanceledException — so the plain `is not
+            // OperationCanceledException` this lane used to carry let a provider TIMEOUT sail
+            // past the funnel and out as an unhandled 500, and (once the Admin Rework hung an
+            // event off this catch) with no AiCallFailed row for the most common AI failure
+            // there is. Asking whether the CALLER'S token cancelled separates the two cases
+            // exactly: caller cancelled → propagate, anything else incl. a timeout → 502, logged.
             _logger.LogError(ex, "Chat assistant failed for user {UserId}.", userId);
             await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Chat} — provider-error");
             return null;
