@@ -23,7 +23,7 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
     {
         var client = factory.CreateClient();
 
-        var response = await client.GetAsync("/admin/overview");
+        var response = await client.GetAsync("/admin/reports");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
@@ -34,23 +34,23 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
 
-        var response = await client.GetAsync("/admin/overview");
+        var response = await client.GetAsync("/admin/reports");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     [Fact]
-    public async Task PromotedAdmin_TokenCarriesRole_AndOverviewAnswers()
+    public async Task PromotedAdmin_TokenCarriesRole_AndAdminRoutesAnswer()
     {
         var client = factory.CreateClient();
         var admin = await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, client);
 
         Assert.Equal(UserRole.Admin, admin.Role);
 
-        var response = await client.GetAsync("/admin/overview");
+        var response = await client.GetAsync("/admin/reports");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = (await response.Content.ReadFromJsonAsync<AdminOverviewResponse>(TestJson.Options))!;
-        Assert.True(body.TotalUsers >= 1);
+        var body = (await response.Content.ReadFromJsonAsync<AdminReportListResponse>(TestJson.Options))!;
+        Assert.NotNull(body.Items);
     }
 
     // --- report triage ------------------------------------------------------------------
@@ -64,23 +64,69 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
 
         var queue = await GetReportsAsync(adminClient, "Open");
-        var item = queue.Items.Single(r => r.TargetId == recipe.Id);
-        Assert.Equal(ReportStatus.Open, item.Status);
+        var item = queue.Items.Single(i => i.Report.TargetId == recipe.Id);
+        Assert.Equal(ReportStatus.Open, item.Report.Status);
 
         var resolve = await adminClient.PostAsJsonAsync(
-            $"/admin/reports/{item.Id}/resolve", new ResolveReportRequest("Hidden the recipe."), TestJson.Options);
+            $"/admin/reports/{item.Report.Id}/resolve", new ResolveReportRequest("Hidden the recipe."), TestJson.Options);
         Assert.Equal(HttpStatusCode.OK, resolve.StatusCode);
         var resolved = (await resolve.Content.ReadFromJsonAsync<ReportResponse>(TestJson.Options))!;
         Assert.Equal(ReportStatus.Resolved, resolved.Status);
         Assert.NotNull(resolved.ResolvedAtUtc);
 
         var openAfter = await GetReportsAsync(adminClient, "Open");
-        Assert.DoesNotContain(openAfter.Items, r => r.Id == item.Id);
+        Assert.DoesNotContain(openAfter.Items, i => i.Report.Id == item.Report.Id);
 
         // Triage is once: the losing admin in a race sees 409, not a silent overwrite.
         var again = await adminClient.PostAsJsonAsync(
-            $"/admin/reports/{item.Id}/dismiss", new ResolveReportRequest(null), TestJson.Options);
+            $"/admin/reports/{item.Report.Id}/dismiss", new ResolveReportRequest(null), TestJson.Options);
         Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+    }
+
+    [Fact]
+    public async Task ReportQueue_CarriesReporterAndTargetAuthorReportCount()
+    {
+        var authorClient = factory.CreateClient();
+        var author = await AuthTestHelper.RegisterAndAuthenticateAsync(authorClient);
+        var recipe1 = await CreateRecipeAsync(authorClient);
+        var recipe2 = await CreateRecipeAsync(authorClient);
+
+        var reporterAClient = factory.CreateClient();
+        var reporterA = await AuthTestHelper.RegisterAndAuthenticateAsync(reporterAClient);
+        (await reporterAClient.PostAsJsonAsync("/reports",
+            new CreateReportRequest(ReportTargetType.Recipe, recipe1.Id, ReportReason.Spam, null), TestJson.Options))
+            .EnsureSuccessStatusCode();
+        (await reporterAClient.PostAsJsonAsync("/reports",
+            new CreateReportRequest(ReportTargetType.Recipe, recipe2.Id, ReportReason.Spam, null), TestJson.Options))
+            .EnsureSuccessStatusCode();
+
+        var reporterCClient = factory.CreateClient();
+        var reporterC = await AuthTestHelper.RegisterAndAuthenticateAsync(reporterCClient);
+        var report3Response = await reporterCClient.PostAsJsonAsync("/reports",
+            new CreateReportRequest(ReportTargetType.Recipe, recipe1.Id, ReportReason.Inappropriate, null), TestJson.Options);
+        report3Response.EnsureSuccessStatusCode();
+        var report3 = (await report3Response.Content.ReadFromJsonAsync<ReportResponse>(TestJson.Options))!;
+
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var queue = await GetReportsAsync(adminClient, "Open");
+        var ownItems = queue.Items.Where(i => i.TargetAuthor.Id == author.UserId).ToList();
+        Assert.Equal(3, ownItems.Count);
+        Assert.All(ownItems, i => Assert.Equal(author.Username, i.TargetAuthor.Username));
+        Assert.All(ownItems, i => Assert.Equal(3, i.TargetAuthor.TotalReportsAgainst));
+        Assert.Contains(ownItems, i => i.Reporter.Username == reporterA.Username);
+        Assert.Contains(ownItems, i => i.Reporter.Username == reporterC.Username);
+
+        // Resolve one — TotalReportsAgainst counts every status, so it must not drop.
+        var resolve = await adminClient.PostAsJsonAsync(
+            $"/admin/reports/{report3.Id}/resolve", new ResolveReportRequest(null), TestJson.Options);
+        Assert.Equal(HttpStatusCode.OK, resolve.StatusCode);
+
+        var queueAfter = await GetReportsAsync(adminClient, status: null);
+        var afterItems = queueAfter.Items.Where(i => i.TargetAuthor.Id == author.UserId).ToList();
+        Assert.Equal(3, afterItems.Count);
+        Assert.All(afterItems, i => Assert.Equal(3, i.TargetAuthor.TotalReportsAgainst));
     }
 
     // --- content actions + the separate admin read (D5) ---------------------------------
@@ -242,6 +288,86 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
+    // --- promote / demote ----------------------------------------------------------------
+
+    [Fact]
+    public async Task Promote_FlipsRole_BumpsTokenVersion_Audits_KillsOldToken()
+    {
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var userClient = factory.CreateClient();
+        var user = await AuthTestHelper.RegisterAndAuthenticateAsync(userClient);
+        Assert.Equal(HttpStatusCode.OK, (await userClient.GetAsync("/auth/me")).StatusCode);
+
+        var promote = await adminClient.PostAsync($"/admin/users/{user.UserId}/promote", null);
+        Assert.Equal(HttpStatusCode.NoContent, promote.StatusCode);
+
+        // Old token died with the version bump (same assertion shape as the ban tests):
+        Assert.Equal(HttpStatusCode.Unauthorized, (await userClient.GetAsync("/auth/me")).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Equal(UserRole.Admin, db.Users.Single(u => u.Id == user.UserId).Role);
+        Assert.Contains(db.AuditLog, a => a.Action == AuditAction.AdminPromoted && a.TargetId == user.UserId);
+    }
+
+    [Fact]
+    public async Task Demote_FlipsRoleBack_BumpsTokenVersion_Audits()
+    {
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var targetClient = factory.CreateClient();
+        var target = await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, targetClient);
+        Assert.Equal(HttpStatusCode.OK, (await targetClient.GetAsync("/auth/me")).StatusCode);
+
+        var demote = await adminClient.PostAsync($"/admin/users/{target.UserId}/demote", null);
+        Assert.Equal(HttpStatusCode.NoContent, demote.StatusCode);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await targetClient.GetAsync("/auth/me")).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Equal(UserRole.User, db.Users.Single(u => u.Id == target.UserId).Role);
+        Assert.Contains(db.AuditLog, a => a.Action == AuditAction.AdminDemoted && a.TargetId == target.UserId);
+    }
+
+    [Fact]
+    public async Task PromoteDemote_Guards()
+    {
+        var adminClient = factory.CreateClient();
+        var admin = await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var userClient = factory.CreateClient();
+        var user = await AuthTestHelper.RegisterAndAuthenticateAsync(userClient);
+
+        // self → 403
+        Assert.Equal(HttpStatusCode.Forbidden, (await adminClient.PostAsync($"/admin/users/{admin.UserId}/demote", null)).StatusCode);
+        // demote a non-admin → 409
+        Assert.Equal(HttpStatusCode.Conflict, (await adminClient.PostAsync($"/admin/users/{user.UserId}/demote", null)).StatusCode);
+        // promote, then promote again → 409 (already Admin)
+        Assert.Equal(HttpStatusCode.NoContent, (await adminClient.PostAsync($"/admin/users/{user.UserId}/promote", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await adminClient.PostAsync($"/admin/users/{user.UserId}/promote", null)).StatusCode);
+        // unknown id → 404
+        Assert.Equal(HttpStatusCode.NotFound, (await adminClient.PostAsync($"/admin/users/{Guid.NewGuid()}/promote", null)).StatusCode);
+    }
+
+    [Fact]
+    public async Task PromoteBannedUser_Returns409()
+    {
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var userClient = factory.CreateClient();
+        var user = await AuthTestHelper.RegisterAndAuthenticateAsync(userClient);
+
+        (await adminClient.PostAsJsonAsync($"/admin/users/{user.UserId}/ban", new AdminActionRequest(null), TestJson.Options))
+            .EnsureSuccessStatusCode();
+
+        Assert.Equal(HttpStatusCode.Conflict, (await adminClient.PostAsync($"/admin/users/{user.UserId}/promote", null)).StatusCode);
+    }
+
     // --- the audit log ------------------------------------------------------------------
 
     [Fact]
@@ -307,11 +433,12 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         return (recipe, report);
     }
 
-    private static async Task<ReportListResponse> GetReportsAsync(HttpClient adminClient, string status)
+    private static async Task<AdminReportListResponse> GetReportsAsync(HttpClient adminClient, string? status)
     {
-        var response = await adminClient.GetAsync($"/admin/reports?status={status}&limit=50");
+        var query = string.IsNullOrEmpty(status) ? "" : $"status={status}&";
+        var response = await adminClient.GetAsync($"/admin/reports?{query}limit=50");
         response.EnsureSuccessStatusCode();
-        return (await response.Content.ReadFromJsonAsync<ReportListResponse>(TestJson.Options))!;
+        return (await response.Content.ReadFromJsonAsync<AdminReportListResponse>(TestJson.Options))!;
     }
 
     private static async Task<RecipeResponse> CreateRecipeAsync(HttpClient client, RecipeVisibility visibility = RecipeVisibility.Public)

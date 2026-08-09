@@ -1,0 +1,26 @@
+using RecipeApp.Application.Common;
+using RecipeApp.Domain.Enums;
+
+namespace RecipeApp.Application.Events;
+
+// Admin Rework: the observability write seam — the deliberate OPPOSITE of
+// AdminService.Append. Audit rides the caller's SaveChanges (accountability,
+// atomic); this writes in its own scope and swallows its own failures
+// (observability, best-effort). An AI failure usually rolls back the request's
+// unit of work, and a login failure has none — both must still land here.
+public interface IAppEventLogger
+{
+    /// <summary>Fire-and-mostly-forget. Never throws; a lost event is acceptable.</summary>
+    Task LogAsync(AppEventType type, Guid? actorUserId = null, Guid? targetId = null, string? detail = null);
+}
+
+// Task 10: the read side of the log, behind GET /admin/events. A separate interface from
+// IAppEventLogger (rather than one fatter one) because the two have unrelated failure
+// contracts — the writer must never throw, the reader is an ordinary admin query that can
+// fail exactly like any other. AppEventService implements both; Program.cs registers the
+// reader against the SAME singleton instance the writer already is.
+public interface IAppEventReader
+{
+    Task<AppEventListResponse> GetEventsAsync(
+        AppEventCategory? category, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
+}

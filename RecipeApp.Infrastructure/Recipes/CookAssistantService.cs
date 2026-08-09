@@ -2,9 +2,11 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Chat.Dtos;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
 using RecipeApp.Application.Recipes.Dtos;
+using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.Services;
 using RecipeApp.Infrastructure.Persistence;
 
@@ -24,17 +26,20 @@ public class CookAssistantService : ICookAssistantService
     private readonly ApplicationDbContext _db;
     private readonly ICookAssistant _assistant;
     private readonly IAiUsageService _aiUsage;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<CookAssistantService> _logger;
 
     public CookAssistantService(
         ApplicationDbContext db,
         ICookAssistant assistant,
         IAiUsageService aiUsage,
+        IAppEventLogger events,
         ILogger<CookAssistantService> logger)
     {
         _db = db;
         _assistant = assistant;
         _aiUsage = aiUsage;
+        _events = events;
         _logger = logger;
     }
 
@@ -66,6 +71,7 @@ public class CookAssistantService : ICookAssistantService
         // metered like the rest rather than waved through as "just a small call".
         if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
         {
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.CookAssistant} — quota-exhausted");
             return CookAssistantResult<CookAnswerResponse>.QuotaExceeded();
         }
 
@@ -116,6 +122,7 @@ public class CookAssistantService : ICookAssistantService
             // one that cancelled separates the two cases exactly: caller cancelled → propagate,
             // anything else (including a timeout) → 502.
             _logger.LogError(ex, "Cook assistant failed for user {UserId} on recipe {RecipeId}.", userId, recipeId);
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.CookAssistant} — provider-error");
             return CookAssistantResult<CookAnswerResponse>.AssistantUnavailable();
         }
 

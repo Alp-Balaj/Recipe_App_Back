@@ -14,6 +14,7 @@ using RecipeApp.API;
 using RecipeApp.API.Endpoints;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Common;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Notifications.Abstractions;
@@ -22,6 +23,7 @@ using RecipeApp.Application.Social.Abstractions;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Infrastructure.Auth;
 using RecipeApp.Infrastructure.Chat;
+using RecipeApp.Infrastructure.Events;
 using RecipeApp.Infrastructure.Images;
 using RecipeApp.Infrastructure.MealPlanning;
 using RecipeApp.Infrastructure.Moderation;
@@ -96,7 +98,16 @@ builder.Services.AddScoped<IShoppingListService, ShoppingListService>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IReportService, ReportService>();
 builder.Services.AddScoped<IAdminService, AdminService>();
+builder.Services.AddScoped<IAdminAnalyticsService, AdminAnalyticsService>();
 builder.Services.AddScoped<IUserSecurityStateService, UserSecurityStateService>();
+// Admin Rework: the best-effort observability write seam. Singleton over
+// IServiceScopeFactory (the ContentModerationWorker precedent) — see AppEventService.
+builder.Services.AddSingleton<IAppEventLogger, AppEventService>();
+// Task 10: the reader shares the writer's own singleton instance rather than a second one —
+// GetEventsAsync and LogAsync both run through IServiceScopeFactory, so there is nothing
+// stateful being duplicated by resolving the same object under a second interface.
+builder.Services.AddSingleton<IAppEventReader>(sp => (AppEventService)sp.GetRequiredService<IAppEventLogger>());
+builder.Services.AddHostedService<AppEventPruneWorker>();
 // Stream C (AI week proposal): the assistant needs IChatMessageCaller, registered by
 // AddChatAssistant below — resolution is lazy, so order here doesn't matter.
 builder.Services.AddScoped<IMealPlanAssistantService, MealPlanAssistantService>();
@@ -464,6 +475,8 @@ app.MapImageEndpoints();
 app.MapMealPlanEndpoints();
 app.MapReportEndpoints();
 app.MapAdminEndpoints();
+app.MapAdminAnalyticsEndpoints();
+app.MapAppEventEndpoints();
 app.MapNotificationEndpoints();
 app.MapScanEndpoints();
 

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NpgsqlTypes;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Abstractions;
@@ -17,17 +18,20 @@ public class RecipeService : IRecipeService
     private readonly ApplicationDbContext _db;
     private readonly IIngredientResolver _ingredientResolver;
     private readonly IContentModerationQueue _moderationQueue;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<RecipeService> _logger;
 
     public RecipeService(
         ApplicationDbContext db,
         IIngredientResolver ingredientResolver,
         IContentModerationQueue moderationQueue,
+        IAppEventLogger events,
         ILogger<RecipeService> logger)
     {
         _db = db;
         _ingredientResolver = ingredientResolver;
         _moderationQueue = moderationQueue;
+        _events = events;
         _logger = logger;
     }
 
@@ -52,6 +56,7 @@ public class RecipeService : IRecipeService
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User {UserId} created recipe {RecipeId}.", createdByUserId, recipe.Id);
+        await _events.LogAsync(AppEventType.RecipeCreated, actorUserId: createdByUserId, targetId: recipe.Id);
 
         // Stream X: offer the new recipe for classification — AFTER the commit, deliberately.
         // TryEnqueue is synchronous, never blocks, never throws and never touches the
@@ -281,6 +286,7 @@ public class RecipeService : IRecipeService
         recipe.DeletedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(cancellationToken);
 
+        await _events.LogAsync(AppEventType.RecipeDeleted, actorUserId: currentUserId, targetId: id);
         return RecipeResult<bool>.Success(true);
     }
 

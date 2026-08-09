@@ -45,6 +45,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<AuditLogEntry> AuditLog => Set<AuditLogEntry>();
     // open-loops slice 3: the social loop's return path.
     public DbSet<Notification> Notifications => Set<Notification>();
+    // Admin Rework: app-wide observability events; best-effort writes, 90-day retention.
+    public DbSet<AppEvent> AppEvents => Set<AppEvent>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -229,6 +231,25 @@ public class ApplicationDbContext : DbContext
         // Backs the audit list, newest first.
         builder.Entity<AuditLogEntry>()
             .HasIndex(a => new { a.CreatedAt, a.Id })
+            .IsDescending();
+
+        // ── Admin Rework: app events ─────────────────────────────────────────────
+        // Text enums like everything else. No FK to Users (see the entity's note).
+        builder.Entity<AppEvent>()
+            .Property(e => e.Category)
+            .HasConversion<string>();
+
+        builder.Entity<AppEvent>()
+            .Property(e => e.Type)
+            .HasConversion<string>();
+
+        builder.Entity<AppEvent>()
+            .Property(e => e.Detail)
+            .HasMaxLength(500);
+
+        // Backs the admin feed, newest first — same shape as the audit index.
+        builder.Entity<AppEvent>()
+            .HasIndex(e => new { e.CreatedAt, e.Id })
             .IsDescending();
 
         builder.Entity<Recipe>()

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Chat;
 using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Chat.Dtos;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Domain.Entities;
@@ -32,13 +33,20 @@ public class ChatService : IChatService
     private readonly ApplicationDbContext _db;
     private readonly IChatAssistantService _assistant;
     private readonly IAiUsageService _aiUsage;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<ChatService> _logger;
 
-    public ChatService(ApplicationDbContext db, IChatAssistantService assistant, IAiUsageService aiUsage, ILogger<ChatService> logger)
+    public ChatService(
+        ApplicationDbContext db,
+        IChatAssistantService assistant,
+        IAiUsageService aiUsage,
+        IAppEventLogger events,
+        ILogger<ChatService> logger)
     {
         _db = db;
         _assistant = assistant;
         _aiUsage = aiUsage;
+        _events = events;
         _logger = logger;
     }
 
@@ -48,6 +56,7 @@ public class ChatService : IChatService
         // ai-quotas: refuse BEFORE the provider call — an exhausted budget must not cost money.
         if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
         {
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Chat} — quota-exhausted");
             return ChatResult<StartConversationResponse>.QuotaExceeded();
         }
 
@@ -106,6 +115,7 @@ public class ChatService : IChatService
         // ai-quotas: after the ownership check (404 semantics stay untouched), before spending.
         if ((await _aiUsage.GetBudgetAsync(userId, cancellationToken)).IsExhausted)
         {
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Chat} — quota-exhausted");
             return ChatResult<TurnResponse>.QuotaExceeded();
         }
 
@@ -287,6 +297,7 @@ public class ChatService : IChatService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Chat assistant failed for user {UserId}.", userId);
+            await _events.LogAsync(AppEventType.AiCallFailed, actorUserId: userId, detail: $"{AiUsageLanes.Chat} — provider-error");
             return null;
         }
     }

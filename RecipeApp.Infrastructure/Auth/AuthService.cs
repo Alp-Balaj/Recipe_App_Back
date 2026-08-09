@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using RecipeApp.Application.Auth;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
+using RecipeApp.Application.Events;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Infrastructure.Persistence;
@@ -16,14 +17,22 @@ public class AuthService : IAuthService
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenService _jwtTokenService;
     private readonly IConfiguration _configuration;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<AuthService> _logger;
 
-    public AuthService(ApplicationDbContext db, IPasswordHasher passwordHasher, IJwtTokenService jwtTokenService, IConfiguration configuration, ILogger<AuthService> logger)
+    public AuthService(
+        ApplicationDbContext db,
+        IPasswordHasher passwordHasher,
+        IJwtTokenService jwtTokenService,
+        IConfiguration configuration,
+        IAppEventLogger events,
+        ILogger<AuthService> logger)
     {
         _db = db;
         _passwordHasher = passwordHasher;
         _jwtTokenService = jwtTokenService;
         _configuration = configuration;
+        _events = events;
         _logger = logger;
     }
 
@@ -50,6 +59,7 @@ public class AuthService : IAuthService
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("Registered new user {UserId}.", user.Id);
+        await _events.LogAsync(AppEventType.UserRegistered, actorUserId: user.Id);
         return AuthResult.Success(ToAuthResponse(user));
     }
 
@@ -71,12 +81,14 @@ public class AuthService : IAuthService
             _dummyPasswordHash ??= _passwordHasher.HashPassword(DummyUser, Guid.NewGuid().ToString("N"));
             _passwordHasher.VerifyPassword(DummyUser, _dummyPasswordHash, request.Password);
             _logger.LogWarning("Failed login attempt.");
+            await _events.LogAsync(AppEventType.UserLoginFailed, detail: "unknown-account");
             return AuthResult.Failure("Invalid username/email or password.");
         }
 
         if (!_passwordHasher.VerifyPassword(user, user.PasswordHash, request.Password))
         {
             _logger.LogWarning("Failed login attempt.");
+            await _events.LogAsync(AppEventType.UserLoginFailed, actorUserId: user.Id, detail: "bad-password");
             return AuthResult.Failure("Invalid username/email or password.");
         }
 
@@ -85,12 +97,14 @@ public class AuthService : IAuthService
         if (user.IsBanned)
         {
             _logger.LogWarning("Banned user {UserId} attempted to log in.", user.Id);
+            await _events.LogAsync(AppEventType.UserLoginFailed, actorUserId: user.Id, detail: "banned");
             return AuthResult.Failure("This account has been banned.");
         }
 
         if (user.SuspendedUntilUtc is DateTime suspendedUntil && suspendedUntil > DateTime.UtcNow)
         {
             _logger.LogWarning("Suspended user {UserId} attempted to log in.", user.Id);
+            await _events.LogAsync(AppEventType.UserLoginFailed, actorUserId: user.Id, detail: "suspended");
             return AuthResult.Failure("This account is suspended.");
         }
 

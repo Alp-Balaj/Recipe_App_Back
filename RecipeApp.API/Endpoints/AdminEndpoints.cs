@@ -26,9 +26,6 @@ public static class AdminEndpoints
             .RequireAuthorization(AuthorizationPolicies.AdminOnly)
             .RequireRateLimiting(RateLimitPolicies.Social);
 
-        group.MapGet("/overview", async (IAdminService admin, CancellationToken cancellationToken) =>
-            Results.Ok(await admin.GetOverviewAsync(cancellationToken)));
-
         group.MapGet("/reports", async (string? status, string? cursor, int? limit, IAdminService admin, CancellationToken cancellationToken) =>
         {
             ReportStatus? statusFilter = null;
@@ -130,6 +127,18 @@ public static class AdminEndpoints
         group.MapPost("/users/{id:guid}/unban", async (Guid id, IAdminService admin, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var result = await admin.UnbanUserAsync(id, GetUserId(user), cancellationToken);
+            return ToActionResult(result.Outcome, Results.NoContent);
+        });
+
+        group.MapPost("/users/{id:guid}/promote", async (Guid id, IAdminService admin, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await admin.PromoteUserAsync(id, GetUserId(user), cancellationToken);
+            return ToActionResult(result.Outcome, Results.NoContent);
+        });
+
+        group.MapPost("/users/{id:guid}/demote", async (Guid id, IAdminService admin, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await admin.DemoteUserAsync(id, GetUserId(user), cancellationToken);
             return ToActionResult(result.Outcome, Results.NoContent);
         });
 

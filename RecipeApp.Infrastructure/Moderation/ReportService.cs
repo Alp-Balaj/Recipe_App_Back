@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.Moderation;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Moderation.Dtos;
@@ -20,11 +21,13 @@ public class ReportService : IReportService
     private const int SummaryMaxLength = 200;
 
     private readonly ApplicationDbContext _db;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<ReportService> _logger;
 
-    public ReportService(ApplicationDbContext db, ILogger<ReportService> logger)
+    public ReportService(ApplicationDbContext db, IAppEventLogger events, ILogger<ReportService> logger)
     {
         _db = db;
+        _events = events;
         _logger = logger;
     }
 
@@ -147,6 +150,7 @@ public class ReportService : IReportService
         _logger.LogInformation(
             "User {UserId} reported {TargetType} {TargetId} ({Reason}).",
             reporterId, request.TargetType, request.TargetId, request.Reason);
+        await _events.LogAsync(AppEventType.ReportFiled, actorUserId: reporterId, targetId: report.Id);
 
         var reporterUsername = await _db.Users
             .Where(u => u.Id == reporterId)

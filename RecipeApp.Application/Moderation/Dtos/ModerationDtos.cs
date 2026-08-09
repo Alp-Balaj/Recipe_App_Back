@@ -34,12 +34,14 @@ public record ReportResponse(
     ReportSource Source,
     double? Confidence);
 
-public record ReportListResponse(IReadOnlyList<ReportResponse> Items, string? NextCursor);
+// GET /admin/reports — triage context riding beside each report row (stream BE-C, Task
+// 14): who is being reported against, and how many reports (any status) already name
+// them, so an admin can spot a repeat target without opening their user record.
+public record AdminReportTargetAuthor(Guid Id, string Username, int TotalReportsAgainst);
 
-// GET /admin/overview — the three honest counts (band 03 part 4: counts, not a chart
-// dashboard). TotalRecipes counts non-deleted rows of every visibility; HiddenRecipes
-// would be a fourth count and was deliberately left out of the minimal surface.
-public record AdminOverviewResponse(int TotalUsers, int TotalRecipes, int OpenReports);
+public record AdminReportListItem(ReportResponse Report, UserSummaryResponse Reporter, AdminReportTargetAuthor TargetAuthor);
+
+public record AdminReportListResponse(IReadOnlyList<AdminReportListItem> Items, string? NextCursor);
 
 // Bodies of the admin actions. Reason/Note is optional free text that lands in the
 // audit log (and, for report triage, on the report row).
