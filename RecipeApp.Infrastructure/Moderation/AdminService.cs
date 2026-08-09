@@ -35,17 +35,6 @@ public class AdminService : IAdminService
         _logger = logger;
     }
 
-    public async Task<AdminOverviewResponse> GetOverviewAsync(CancellationToken cancellationToken = default)
-    {
-        // Three honest counts (band 03 part 4). Recipes counts what the catalogue really
-        // holds — every visibility, minus hidden/deleted rows (the global filter applies:
-        // this read deliberately matches the user-facing definition of "a live recipe").
-        var totalUsers = await _db.Users.CountAsync(cancellationToken);
-        var totalRecipes = await _db.Recipes.CountAsync(cancellationToken);
-        var openReports = await _db.Reports.CountAsync(r => r.Status == ReportStatus.Open, cancellationToken);
-        return new AdminOverviewResponse(totalUsers, totalRecipes, openReports);
-    }
-
     public async Task<ReportListResponse> GetReportsAsync(
         ReportStatus? status, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
     {

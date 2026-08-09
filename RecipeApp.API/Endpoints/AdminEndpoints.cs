@@ -26,9 +26,6 @@ public static class AdminEndpoints
             .RequireAuthorization(AuthorizationPolicies.AdminOnly)
             .RequireRateLimiting(RateLimitPolicies.Social);
 
-        group.MapGet("/overview", async (IAdminService admin, CancellationToken cancellationToken) =>
-            Results.Ok(await admin.GetOverviewAsync(cancellationToken)));
-
         group.MapGet("/reports", async (string? status, string? cursor, int? limit, IAdminService admin, CancellationToken cancellationToken) =>
         {
             ReportStatus? statusFilter = null;
