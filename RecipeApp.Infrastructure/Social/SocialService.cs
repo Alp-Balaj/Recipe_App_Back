@@ -620,6 +620,17 @@ public class SocialService : ISocialService
 
         var follows = _db.UserFollows.Where(f => f.FollowingId == targetUserId);
 
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            // Escape backslash FIRST, then the two LIKE metacharacters — reversing the order
+            // would double-escape the escapes. Same treatment as IngredientCatalogueService.
+            var pattern = "%" + q.Trim()
+                .Replace("\\", "\\\\")
+                .Replace("%", "\\%")
+                .Replace("_", "\\_") + "%";
+            follows = follows.Where(f => EF.Functions.ILike(f.Follower.Username, pattern, "\\"));
+        }
+
         if (cursor is not null)
         {
             var cursorFollowedAt = cursor.Timestamp;
@@ -674,6 +685,15 @@ public class SocialService : ISocialService
         }
 
         var follows = _db.UserFollows.Where(f => f.FollowerId == targetUserId);
+
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var pattern = "%" + q.Trim()
+                .Replace("\\", "\\\\")
+                .Replace("%", "\\%")
+                .Replace("_", "\\_") + "%";
+            follows = follows.Where(f => EF.Functions.ILike(f.Following.Username, pattern, "\\"));
+        }
 
         if (cursor is not null)
         {
