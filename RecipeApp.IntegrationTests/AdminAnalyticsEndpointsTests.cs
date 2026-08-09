@@ -51,4 +51,74 @@ public class AdminAnalyticsEndpointsTests(IntegrationTestFactory factory) : ICla
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
+
+    // --- GET /admin/users: search / filter / sort / offset paging -----------------------
+
+    [Fact]
+    public async Task Users_SearchMatchesUsernameOrEmail_CaseInsensitive()
+    {
+        var client = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, client);
+        await SeedUserAsync("searchme_zed", "zed@example.com");
+
+        var byName = await client.GetFromJsonAsync<AdminUserListResponse>("/admin/users?search=SEARCHME", TestJson.Options);
+        var byEmail = await client.GetFromJsonAsync<AdminUserListResponse>("/admin/users?search=zed@example", TestJson.Options);
+
+        Assert.Contains(byName!.Items, u => u.Username == "searchme_zed");
+        Assert.Contains(byEmail!.Items, u => u.Username == "searchme_zed");
+    }
+
+    [Fact]
+    public async Task Users_StatusFilterAndTokenSort()
+    {
+        var client = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, client);
+        var heavy = await SeedUserAsync("heavy_user", "heavy@example.com");
+        await SeedUsageAsync(heavy, totalTokens: 5000);
+        var banned = await SeedUserAsync("banned_user", "banned@example.com", isBanned: true);
+
+        var bannedOnly = await client.GetFromJsonAsync<AdminUserListResponse>("/admin/users?status=banned", TestJson.Options);
+        Assert.All(bannedOnly!.Items, u => Assert.True(u.IsBanned));
+
+        var byTokens = await client.GetFromJsonAsync<AdminUserListResponse>("/admin/users?sort=tokens", TestJson.Options);
+        Assert.Equal("heavy_user", byTokens!.Items.First().Username);
+        Assert.Equal(5000, byTokens.Items.First().AllTimeTokens);
+    }
+
+    [Fact]
+    public async Task Users_BadPagingIs400()
+    {
+        var client = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, client);
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/admin/users?page=0")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/admin/users?status=frozen")).StatusCode);
+    }
+
+    // --- helpers --------------------------------------------------------------------------
+
+    private async Task<Guid> SeedUserAsync(string username, string email, bool isBanned = false)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var user = new User { Id = Guid.NewGuid(), Username = username, Email = email, PasswordHash = "h", IsBanned = isBanned };
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+        return user.Id;
+    }
+
+    private async Task SeedUsageAsync(Guid userId, long totalTokens)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        db.AiUsageRecords.Add(new AiUsageRecord
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            Lane = "chat",
+            TotalTokens = (int)totalTokens,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
 }

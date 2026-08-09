@@ -8,4 +8,5 @@ namespace RecipeApp.Application.Moderation.Abstractions;
 public interface IAdminAnalyticsService
 {
     Task<AdminOverviewResponse> GetOverviewAsync(CancellationToken cancellationToken = default);
+    Task<AdminUserListResponse> GetUsersAsync(string? search, AdminUserStatusFilter status, AdminUserSort sort, int page, int pageSize, CancellationToken cancellationToken = default);
 }

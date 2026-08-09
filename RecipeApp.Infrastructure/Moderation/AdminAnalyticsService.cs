@@ -76,4 +76,48 @@ public class AdminAnalyticsService : IAdminAnalyticsService
             new AdminCommentCounts(comments), reports,
             new AdminAiToday(byLane.Sum(l => l.Calls), byLane.Sum(l => l.Tokens), byLane, topUsers));
     }
+
+    public async Task<AdminUserListResponse> GetUsersAsync(string? search, AdminUserStatusFilter status, AdminUserSort sort, int page, int pageSize, CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var query = _db.Users.AsQueryable();
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var pattern = $"%{search.Trim()}%";
+            query = query.Where(u => EF.Functions.ILike(u.Username, pattern) || EF.Functions.ILike(u.Email, pattern));
+        }
+
+        query = status switch
+        {
+            AdminUserStatusFilter.Banned => query.Where(u => u.IsBanned),
+            AdminUserStatusFilter.Suspended => query.Where(u => u.SuspendedUntilUtc != null && u.SuspendedUntilUtc > now),
+            AdminUserStatusFilter.Admins => query.Where(u => u.Role == UserRole.Admin),
+            _ => query,
+        };
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        // Deviation from the plan's literal code: ordering the ALREADY-PROJECTED
+        // AdminUserListItem sequence (as the plan's sample does) fails to translate —
+        // EF Core cannot re-derive an ORDER BY key from a record projection that itself
+        // carries a correlated subquery column (AllTimeTokens). Ordering the User
+        // queryable first, then projecting after Skip/Take, translates fine and the
+        // subquery in the ORDER BY (tokens sort) and in the final Select both run once.
+        IOrderedQueryable<User> ordered = sort == AdminUserSort.Tokens
+            ? query.OrderByDescending(u => _db.AiUsageRecords.Where(r => r.UserId == u.Id).Sum(r => (long?)r.TotalTokens) ?? 0)
+                .ThenByDescending(u => u.CreatedAt).ThenByDescending(u => u.Id)
+            : query.OrderByDescending(u => u.CreatedAt).ThenByDescending(u => u.Id);
+
+        // Correlated all-time token subquery: fine at admin-only traffic over hundreds of rows.
+        var items = await ordered
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(u => new AdminUserListItem(
+                u.Id, u.Username, u.Email, u.Role, u.IsBanned, u.SuspendedUntilUtc, u.CreatedAt,
+                _db.AiUsageRecords.Where(r => r.UserId == u.Id).Sum(r => (long?)r.TotalTokens) ?? 0))
+            .ToListAsync(cancellationToken);
+        var totalPages = totalCount == 0 ? 0 : (int)Math.Ceiling(totalCount / (double)pageSize);
+        return new AdminUserListResponse(items, page, totalPages, totalCount);
+    }
 }
