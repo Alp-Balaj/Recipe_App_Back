@@ -15,11 +15,13 @@ namespace RecipeApp.Infrastructure.Moderation;
 public class AdminAnalyticsService : IAdminAnalyticsService
 {
     private readonly ApplicationDbContext _db;
+    private readonly IAiUsageService _aiUsage;
     private readonly ILogger<AdminAnalyticsService> _logger;
 
-    public AdminAnalyticsService(ApplicationDbContext db, ILogger<AdminAnalyticsService> logger)
+    public AdminAnalyticsService(ApplicationDbContext db, IAiUsageService aiUsage, ILogger<AdminAnalyticsService> logger)
     {
         _db = db;
+        _aiUsage = aiUsage;
         _logger = logger;
     }
 
@@ -119,5 +121,25 @@ public class AdminAnalyticsService : IAdminAnalyticsService
             .ToListAsync(cancellationToken);
         var totalPages = totalCount == 0 ? 0 : (int)Math.Ceiling(totalCount / (double)pageSize);
         return new AdminUserListResponse(items, page, totalPages, totalCount);
+    }
+
+    public async Task<AdminUserUsageResponse?> GetUserUsageAsync(Guid userId, CancellationToken cancellationToken = default)
+    {
+        if (!await _db.Users.AnyAsync(u => u.Id == userId, cancellationToken))
+        {
+            return null;
+        }
+        var dayStartUtc = DateTime.UtcNow.Date;
+        var today = await _db.AiUsageRecords
+            .Where(r => r.UserId == userId && r.CreatedAt >= dayStartUtc)
+            .GroupBy(_ => 1)
+            .Select(g => new { Calls = g.Count(), Tokens = g.Sum(r => (long)r.TotalTokens) })
+            .SingleOrDefaultAsync(cancellationToken);
+        var allTime = await _db.AiUsageRecords
+            .Where(r => r.UserId == userId)
+            .SumAsync(r => (long?)r.TotalTokens, cancellationToken) ?? 0;
+        var budget = await _aiUsage.GetBudgetAsync(userId, cancellationToken);
+        return new AdminUserUsageResponse(today?.Calls ?? 0, today?.Tokens ?? 0, allTime,
+            new AdminUserBudget(budget.CallsRemaining, budget.TokensRemaining, budget.ResetsAtUtc));
     }
 }

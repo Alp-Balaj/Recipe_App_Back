@@ -37,5 +37,11 @@ public static class AdminAnalyticsEndpoints
             var effectiveSize = Math.Min(Math.Max(pageSize ?? 20, 1), 50);
             return Results.Ok(await analytics.GetUsersAsync(search, statusFilter, sortOrder, effectivePage, effectiveSize, cancellationToken));
         });
+
+        group.MapGet("/users/{id:guid}/usage", async (Guid id, IAdminAnalyticsService analytics, CancellationToken cancellationToken) =>
+        {
+            var usage = await analytics.GetUserUsageAsync(id, cancellationToken);
+            return usage is null ? Results.NotFound() : Results.Ok(usage);
+        });
     }
 }

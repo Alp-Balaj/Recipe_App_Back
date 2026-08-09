@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using RecipeApp.Application.Chat.Abstractions;
 using RecipeApp.Application.Moderation.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Infrastructure.Persistence;
@@ -95,6 +96,37 @@ public class AdminAnalyticsEndpointsTests(IntegrationTestFactory factory) : ICla
         Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/admin/users?status=frozen")).StatusCode);
     }
 
+    // --- GET /admin/users/{id}/usage -----------------------------------------------------
+
+    [Fact]
+    public async Task UserUsage_TodayAndAllTimeAndBudget()
+    {
+        var client = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, client);
+        var userId = await SeedUserAsync($"usage_target_{Guid.NewGuid():N}", $"{Guid.NewGuid():N}@example.com");
+        await SeedUsageRecordAsync(userId, 70, DateTime.UtcNow);
+        await SeedUsageRecordAsync(userId, 50, DateTime.UtcNow);
+        await SeedUsageRecordAsync(userId, 80, DateTime.UtcNow.AddDays(-2)); // not today
+
+        var usage = await client.GetFromJsonAsync<AdminUserUsageResponse>($"/admin/users/{userId}/usage");
+
+        Assert.Equal(2, usage!.TodayCalls);
+        Assert.Equal(120, usage.TodayTokens);
+        Assert.Equal(200, usage.AllTimeTokens);
+        Assert.Equal(50 - 2, usage.Budget.CallsRemaining); // AiQuotaOptions.DailyCallLimit default is 50
+    }
+
+    [Fact]
+    public async Task UserUsage_UnknownId_Returns404()
+    {
+        var client = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, client);
+
+        var response = await client.GetAsync($"/admin/users/{Guid.NewGuid()}/usage");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     // --- helpers --------------------------------------------------------------------------
 
     private async Task<Guid> SeedUserAsync(string username, string email, bool isBanned = false)
@@ -107,6 +139,12 @@ public class AdminAnalyticsEndpointsTests(IntegrationTestFactory factory) : ICla
         return user.Id;
     }
 
+    // Lane deliberately NOT "chat"/"food-scan": Overview_AggregatesCountsAndLanes asserts an
+    // EXACT sum over exactly those two lanes for "today", and this class's IntegrationTestFactory
+    // (one Postgres container per test CLASS, never reset between the class's own tests) means
+    // rows every other [Fact] here seeds are visible to that assertion too. RecipeGeneration is
+    // an AiUsageLanes constant no other test in this class writes to, so seeding "today" usage
+    // here can never inflate that unrelated exact-match check regardless of xunit's method order.
     private async Task SeedUsageAsync(Guid userId, long totalTokens)
     {
         using var scope = factory.Services.CreateScope();
@@ -115,9 +153,24 @@ public class AdminAnalyticsEndpointsTests(IntegrationTestFactory factory) : ICla
         {
             Id = Guid.NewGuid(),
             UserId = userId,
-            Lane = "chat",
+            Lane = AiUsageLanes.RecipeGeneration,
             TotalTokens = (int)totalTokens,
             CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedUsageRecordAsync(Guid userId, int totalTokens, DateTime createdAt)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        db.AiUsageRecords.Add(new AiUsageRecord
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            Lane = AiUsageLanes.RecipeGeneration,
+            TotalTokens = totalTokens,
+            CreatedAt = createdAt,
         });
         await db.SaveChangesAsync();
     }

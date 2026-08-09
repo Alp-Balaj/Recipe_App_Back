@@ -9,4 +9,5 @@ public interface IAdminAnalyticsService
 {
     Task<AdminOverviewResponse> GetOverviewAsync(CancellationToken cancellationToken = default);
     Task<AdminUserListResponse> GetUsersAsync(string? search, AdminUserStatusFilter status, AdminUserSort sort, int page, int pageSize, CancellationToken cancellationToken = default);
+    Task<AdminUserUsageResponse?> GetUserUsageAsync(Guid userId, CancellationToken cancellationToken = default); // null => 404
 }
