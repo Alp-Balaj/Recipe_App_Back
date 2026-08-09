@@ -80,7 +80,7 @@ public class AuthServiceLoginTests
 
     // Empty configuration: no Admin:Emails, so the promotion path stays inert here.
     private static AuthService NewService(ApplicationDbContext db, CountingPasswordHasher hasher) =>
-        new(db, hasher, new FakeJwtTokenService(), new ConfigurationBuilder().Build(), NullLogger<AuthService>.Instance);
+        new(db, hasher, new FakeJwtTokenService(), new ConfigurationBuilder().Build(), new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
 
     private static User KnownUser(CountingPasswordHasher hasher) => new()
     {
@@ -194,7 +194,7 @@ public class AuthServiceLoginTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:Emails:0"] = "KNOWN@example.com" })
             .Build();
-        var service = new AuthService(db, hasher, new FakeJwtTokenService(), configuration, NullLogger<AuthService>.Instance);
+        var service = new AuthService(db, hasher, new FakeJwtTokenService(), configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
 
         var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
 
@@ -213,7 +213,7 @@ public class AuthServiceLoginTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:Emails:0"] = "someone-else@example.com" })
             .Build();
-        var service = new AuthService(db, hasher, new FakeJwtTokenService(), configuration, NullLogger<AuthService>.Instance);
+        var service = new AuthService(db, hasher, new FakeJwtTokenService(), configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
 
         var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
 

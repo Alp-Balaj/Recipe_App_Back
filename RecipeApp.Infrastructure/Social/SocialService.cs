@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using RecipeApp.Application.Common;
+using RecipeApp.Application.Events;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes;
 using RecipeApp.Application.Recipes.Dtos;
@@ -21,15 +22,18 @@ public class SocialService : ISocialService
 {
     private readonly ApplicationDbContext _db;
     private readonly IContentModerationQueue _moderationQueue;
+    private readonly IAppEventLogger _events;
     private readonly ILogger<SocialService> _logger;
 
     public SocialService(
         ApplicationDbContext db,
         IContentModerationQueue moderationQueue,
+        IAppEventLogger events,
         ILogger<SocialService> logger)
     {
         _db = db;
         _moderationQueue = moderationQueue;
+        _events = events;
         _logger = logger;
     }
 
@@ -199,6 +203,7 @@ public class SocialService : ISocialService
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User {UserId} commented on recipe {RecipeId}.", currentUserId, recipeId);
+        await _events.LogAsync(AppEventType.CommentCreated, actorUserId: currentUserId, targetId: comment.Id);
 
         // Stream X: offer the comment for classification, after the commit and outside the
         // unit of work. Never inline — a comment must post at the speed of a database insert,
