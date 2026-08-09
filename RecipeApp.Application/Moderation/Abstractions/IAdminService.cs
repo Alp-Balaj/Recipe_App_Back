@@ -42,6 +42,12 @@ public interface IAdminService
 
     Task<ModerationResult<bool>> UnbanUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default);
 
+    /// <summary>Promote to Admin. Forbidden on self, Conflict when already Admin or banned.</summary>
+    Task<ModerationResult<bool>> PromoteUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>Demote to User. Forbidden on self, Conflict when not currently Admin.</summary>
+    Task<ModerationResult<bool>> DemoteUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default);
+
     Task<AuditLogListResponse> GetAuditLogAsync(
         KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
 }

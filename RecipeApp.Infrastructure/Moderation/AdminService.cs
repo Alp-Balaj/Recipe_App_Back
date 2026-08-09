@@ -363,6 +363,62 @@ public class AdminService : IAdminService
         return ModerationResult<bool>.Success(true);
     }
 
+    public async Task<ModerationResult<bool>> PromoteUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default)
+    {
+        if (userId == adminUserId)
+        {
+            return ModerationResult<bool>.Forbidden();
+        }
+        var user = await _db.Users.SingleOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        if (user is null)
+        {
+            return ModerationResult<bool>.NotFound();
+        }
+        if (user.Role == UserRole.Admin || user.IsBanned)
+        {
+            return ModerationResult<bool>.Conflict();
+        }
+
+        user.Role = UserRole.Admin;
+        // The role rides the JWT: bump + invalidate so the promotion takes effect on next login,
+        // and any stale token stops answering as the OLD role immediately.
+        user.TokenVersion++;
+
+        Append(adminUserId, AuditAction.AdminPromoted, userId, detail: null);
+        await _db.SaveChangesAsync(cancellationToken);
+        _securityState.Invalidate(userId);
+
+        _logger.LogWarning("Admin {AdminId} promoted user {UserId} to Admin.", adminUserId, userId);
+        return ModerationResult<bool>.Success(true);
+    }
+
+    public async Task<ModerationResult<bool>> DemoteUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default)
+    {
+        if (userId == adminUserId)
+        {
+            return ModerationResult<bool>.Forbidden();
+        }
+        var user = await _db.Users.SingleOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        if (user is null)
+        {
+            return ModerationResult<bool>.NotFound();
+        }
+        if (user.Role != UserRole.Admin)
+        {
+            return ModerationResult<bool>.Conflict();
+        }
+
+        user.Role = UserRole.User;
+        user.TokenVersion++;
+
+        Append(adminUserId, AuditAction.AdminDemoted, userId, detail: null);
+        await _db.SaveChangesAsync(cancellationToken);
+        _securityState.Invalidate(userId);
+
+        _logger.LogWarning("Admin {AdminId} demoted admin {UserId} to User.", adminUserId, userId);
+        return ModerationResult<bool>.Success(true);
+    }
+
     public async Task<AuditLogListResponse> GetAuditLogAsync(
         KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
     {

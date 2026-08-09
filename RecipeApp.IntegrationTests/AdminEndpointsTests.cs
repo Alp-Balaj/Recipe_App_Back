@@ -242,6 +242,86 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
+    // --- promote / demote ----------------------------------------------------------------
+
+    [Fact]
+    public async Task Promote_FlipsRole_BumpsTokenVersion_Audits_KillsOldToken()
+    {
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var userClient = factory.CreateClient();
+        var user = await AuthTestHelper.RegisterAndAuthenticateAsync(userClient);
+        Assert.Equal(HttpStatusCode.OK, (await userClient.GetAsync("/auth/me")).StatusCode);
+
+        var promote = await adminClient.PostAsync($"/admin/users/{user.UserId}/promote", null);
+        Assert.Equal(HttpStatusCode.NoContent, promote.StatusCode);
+
+        // Old token died with the version bump (same assertion shape as the ban tests):
+        Assert.Equal(HttpStatusCode.Unauthorized, (await userClient.GetAsync("/auth/me")).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Equal(UserRole.Admin, db.Users.Single(u => u.Id == user.UserId).Role);
+        Assert.Contains(db.AuditLog, a => a.Action == AuditAction.AdminPromoted && a.TargetId == user.UserId);
+    }
+
+    [Fact]
+    public async Task Demote_FlipsRoleBack_BumpsTokenVersion_Audits()
+    {
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var targetClient = factory.CreateClient();
+        var target = await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, targetClient);
+        Assert.Equal(HttpStatusCode.OK, (await targetClient.GetAsync("/auth/me")).StatusCode);
+
+        var demote = await adminClient.PostAsync($"/admin/users/{target.UserId}/demote", null);
+        Assert.Equal(HttpStatusCode.NoContent, demote.StatusCode);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await targetClient.GetAsync("/auth/me")).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Equal(UserRole.User, db.Users.Single(u => u.Id == target.UserId).Role);
+        Assert.Contains(db.AuditLog, a => a.Action == AuditAction.AdminDemoted && a.TargetId == target.UserId);
+    }
+
+    [Fact]
+    public async Task PromoteDemote_Guards()
+    {
+        var adminClient = factory.CreateClient();
+        var admin = await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var userClient = factory.CreateClient();
+        var user = await AuthTestHelper.RegisterAndAuthenticateAsync(userClient);
+
+        // self → 403
+        Assert.Equal(HttpStatusCode.Forbidden, (await adminClient.PostAsync($"/admin/users/{admin.UserId}/demote", null)).StatusCode);
+        // demote a non-admin → 409
+        Assert.Equal(HttpStatusCode.Conflict, (await adminClient.PostAsync($"/admin/users/{user.UserId}/demote", null)).StatusCode);
+        // promote, then promote again → 409 (already Admin)
+        Assert.Equal(HttpStatusCode.NoContent, (await adminClient.PostAsync($"/admin/users/{user.UserId}/promote", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await adminClient.PostAsync($"/admin/users/{user.UserId}/promote", null)).StatusCode);
+        // unknown id → 404
+        Assert.Equal(HttpStatusCode.NotFound, (await adminClient.PostAsync($"/admin/users/{Guid.NewGuid()}/promote", null)).StatusCode);
+    }
+
+    [Fact]
+    public async Task PromoteBannedUser_Returns409()
+    {
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var userClient = factory.CreateClient();
+        var user = await AuthTestHelper.RegisterAndAuthenticateAsync(userClient);
+
+        (await adminClient.PostAsJsonAsync($"/admin/users/{user.UserId}/ban", new AdminActionRequest(null), TestJson.Options))
+            .EnsureSuccessStatusCode();
+
+        Assert.Equal(HttpStatusCode.Conflict, (await adminClient.PostAsync($"/admin/users/{user.UserId}/promote", null)).StatusCode);
+    }
+
     // --- the audit log ------------------------------------------------------------------
 
     [Fact]
