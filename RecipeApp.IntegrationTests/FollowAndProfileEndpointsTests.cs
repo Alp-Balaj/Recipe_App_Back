@@ -384,9 +384,8 @@ public class FollowAndProfileEndpointsTests(IntegrationTestFactory factory) : IC
         Assert.Equal(1, Assert.Single(view!.Items, u => u.Id == author.UserId).RecipeCount);
     }
 
-    // The plan's test lists have twice left `following` uncovered where `followers` was
-    // tested — mirrors Followers_RecipeCount_IsCallerRelative_LikeTheProfileCount, but the
-    // edge under test is target-follows-author, read back through GET /users/{id}/following.
+    // Mirrors Followers_RecipeCount_IsCallerRelative_LikeTheProfileCount, but the edge
+    // under test is target-follows-author, read back through GET /users/{id}/following.
     [Fact]
     public async Task Following_RecipeCount_IsCallerRelative_LikeTheProfileCount()
     {
@@ -472,9 +471,8 @@ public class FollowAndProfileEndpointsTests(IntegrationTestFactory factory) : IC
         Assert.DoesNotContain(second.Items, u => first.Items.Any(f => f.Id == u.Id));
     }
 
-    // The plan's `q` test list only exercises /followers — mirrors the gap already called
-    // out above for RecipeCount. Proves `following` filters on the *followed* user's
-    // username (the other side of the edge from `followers`).
+    // Proves `following` filters on the *followed* user's username — the other side of
+    // the edge from `followers`, which filters on the *follower's* username.
     [Fact]
     public async Task Following_Q_FiltersByFollowedUsersUsername_CaseInsensitively()
     {
