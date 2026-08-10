@@ -402,12 +402,19 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         await LogCookAsync(client, recipe.Id, entry.Id);
 
         // Force the drift the floor exists for: an aggregate whose TimesCooked is already
-        // BELOW the row count this un-cook is about to remove — exactly what "the aggregate
-        // predates the log" (UncookEntryAsync's comment) looks like on a real account. LogAsync
-        // always keeps the two in lockstep, so the API cannot produce this state; going
-        // straight at ApplicationDbContext is the only way to. Without this, "log once, delete
-        // twice" never actually exercises Math.Max — the second delete finds zero rows and
-        // returns before touching the aggregate at all, so the floor is silently untested.
+        // BELOW the row count this un-cook is about to remove. This state IS reachable over
+        // plain HTTP today — cook via entry A, DELETE /recipes/{id}/cooked (ClearCookedAsync
+        // deletes the CookedRecipe row but leaves A's CookLog row behind), cook again via
+        // entry B (recreates the aggregate at TimesCooked = 1), un-cook A, un-cook B — see
+        // UncookEntryAsync's comment. Going straight at ApplicationDbContext here instead of
+        // building that HTTP sequence is a deliberate choice, not a shortcut: Task 3 of this
+        // plan closes that exact path by making ClearCookedAsync delete the caller's CookLog
+        // rows too, and a test wired to it would pass now and fail two tasks from now for a
+        // reason that has nothing to do with what this test pins. Reaching into the db skips
+        // the now-closing path entirely and pins the floor itself. Without forcing this state
+        // one way or another, "log once, delete twice" never actually exercises Math.Max — the
+        // second delete finds zero rows and returns before touching the aggregate at all, so
+        // the floor would be silently untested.
         using (var setupScope = factory.Services.CreateScope())
         {
             var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();

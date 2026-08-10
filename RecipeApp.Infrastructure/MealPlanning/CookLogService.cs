@@ -219,9 +219,22 @@ public class CookLogService : ICookLogService
         _db.CookLogs.RemoveRange(rows);
 
         // Symmetric with LogAsync's bump, in the SAME SaveChanges, and by the number of rows
-        // actually removed — not by one. Floored at 0 because the aggregate predates the log:
-        // a user who cooked something before CookLog existed has a count with no rows behind
-        // it, and un-cooking a later plan cook must not push that count negative.
+        // actually removed — not by one. Floored at 0 because TimesCooked and the CookLog row
+        // count for a recipe are NOT guaranteed to move together, and this is reachable over
+        // plain HTTP, not just via legacy data:
+        //   1. A user who cooked something before CookLog existed has a count with no rows
+        //      behind it.
+        //   2. SocialService.ClearCookedAsync deletes the CookedRecipe row outright but never
+        //      touches CookLog — cook via entry A, DELETE /recipes/{id}/cooked (orphans A's
+        //      row), cook again via entry B (recreates the aggregate at TimesCooked = 1),
+        //      un-cook A (drops to 0), un-cook B: unfloored that is -1, over a real HTTP
+        //      sequence with no direct-db access anywhere.
+        // Do not read this list as closed — it is not a fixed, enumerable set of causes, it is
+        // the consequence of TimesCooked and CookLog living as two separately-writable records
+        // of the same fact. (Path 2 above is closed by Task 3 making ClearCookedAsync delete
+        // the caller's CookLog rows too, but the floor stays: nothing enforces that every
+        // future writer of either table keeps the pair in lockstep, and a floor that would
+        // matter again after the next path opens is not a floor to remove now.)
         var recipeIds = rows.Select(r => r.RecipeId).Distinct().ToList();
         var aggregates = await _db.CookedRecipes
             .Where(cr => cr.UserId == currentUserId && recipeIds.Contains(cr.RecipeId))
