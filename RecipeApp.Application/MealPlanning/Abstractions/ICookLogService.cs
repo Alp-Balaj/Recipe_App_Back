@@ -41,4 +41,18 @@ public interface ICookLogService
     /// </summary>
     Task<MealPlanResult<CookLogResponse>> UpdateNoteAsync(
         Guid id, string? note, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes every cook the caller logged against one plan entry, and decrements the
+    /// per-recipe aggregate by exactly that many (floored at 0).
+    /// </summary>
+    /// <remarks>
+    /// Idempotent: un-cooking an entry that was never cooked is Success, not NotFound —
+    /// NotFound is reserved for an entry that is not on one of the caller's own plans, so
+    /// the two answers stay distinguishable. Deleting ALL matching rows rather than one is
+    /// what makes a double-tapped cook fully reversible: CookLog has no unique key, so a
+    /// single-row delete could leave the entry looking cooked after the user un-cooked it.
+    /// Rating is untouched — it lives on CookedRecipe and is a separate claim.
+    /// </remarks>
+    Task<MealPlanResult<bool>> UncookEntryAsync(Guid mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default);
 }

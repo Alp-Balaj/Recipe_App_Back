@@ -329,6 +329,123 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         Assert.Null(social!.MyRating);
     }
 
+    // --- un-cooking ------------------------------------------------------------------------
+    //
+    // The undo half of POST /cook-log's plan-linked case (roadmap spec 3, task 2): an undo
+    // the user cannot reach is the trust bug this whole roadmap exists to fix.
+
+    [Fact]
+    public async Task Un_cooking_an_entry_removes_the_log_and_the_count()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Lentil soup");
+        var plan = await MealPlanTestHelper.CreateMealPlanAsync(client, MealPlanTestHelper.NextMonday());
+        var entry = await MealPlanTestHelper.AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+
+        await LogCookAsync(client, recipe.Id, entry.Id);
+        (await client.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(4), TestJson.Options))
+            .EnsureSuccessStatusCode();
+
+        var response = await client.DeleteAsync($"/cook-log/entries/{entry.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var log = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.Empty(log!.Items);
+
+        // The rating survives: un-cooking says "I did not make this", not "I never had an
+        // opinion". There is no GET for the cooked aggregate — CookedRecipeResponse comes
+        // back only from the mutating POST/DELETE /recipes/{id}/cooked — so this reads the
+        // aggregate row straight from the db, same as Logging_a_cook_writes_both_rows above.
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var aggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(0, aggregate.TimesCooked);
+        Assert.Equal(4, aggregate.Rating);
+    }
+
+    [Fact]
+    public async Task Un_cooking_a_double_tapped_entry_removes_every_row()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Menemen with sujuk");
+        var plan = await MealPlanTestHelper.CreateMealPlanAsync(client, MealPlanTestHelper.NextMonday());
+        var entry = await MealPlanTestHelper.AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+
+        // CookLog carries no unique key, so double-tapping "I cooked this" on the same entry
+        // is genuinely two rows, not one. UncookEntryAsync must clear BOTH — a single-row
+        // RemoveRange target would leave the entry looking cooked (Task 3's
+        // cookedEntryIds.Contains reads any surviving row) after the user un-cooked it, and
+        // the aggregate only half-decremented alongside it.
+        await LogCookAsync(client, recipe.Id, entry.Id);
+        await LogCookAsync(client, recipe.Id, entry.Id);
+
+        var response = await client.DeleteAsync($"/cook-log/entries/{entry.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var log = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.Empty(log!.Items);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var aggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(0, aggregate.TimesCooked);
+    }
+
+    [Fact]
+    public async Task Un_cooking_is_idempotent_and_never_drives_the_count_negative()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Shakshuka");
+        var plan = await MealPlanTestHelper.CreateMealPlanAsync(client, MealPlanTestHelper.NextMonday());
+        var entry = await MealPlanTestHelper.AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+
+        await LogCookAsync(client, recipe.Id, entry.Id);
+
+        // Force the drift the floor exists for: an aggregate whose TimesCooked is already
+        // BELOW the row count this un-cook is about to remove — exactly what "the aggregate
+        // predates the log" (UncookEntryAsync's comment) looks like on a real account. LogAsync
+        // always keeps the two in lockstep, so the API cannot produce this state; going
+        // straight at ApplicationDbContext is the only way to. Without this, "log once, delete
+        // twice" never actually exercises Math.Max — the second delete finds zero rows and
+        // returns before touching the aggregate at all, so the floor is silently untested.
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var aggregate = await setupDb.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+            aggregate.TimesCooked = 0;
+            await setupDb.SaveChangesAsync();
+        }
+
+        // The real un-cook: one row removed from a TimesCooked that is already 0. Unfloored
+        // this computes -1.
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/entries/{entry.Id}")).StatusCode);
+        // The repeat: no rows left, so this must still be a no-op 204, not a second decrement.
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/entries/{entry.Id}")).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var finalAggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(0, finalAggregate.TimesCooked);
+    }
+
+    [Fact]
+    public async Task Un_cooking_another_users_entry_is_not_found()
+    {
+        var owner = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(owner, "Baklava");
+        var plan = await MealPlanTestHelper.CreateMealPlanAsync(owner, MealPlanTestHelper.NextMonday());
+        var entry = await MealPlanTestHelper.AddEntryAsync(owner, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+        await LogCookAsync(owner, recipe.Id, entry.Id);
+
+        var stranger = await factory.CreateAuthenticatedClientAsync();
+        var response = await stranger.DeleteAsync($"/cook-log/entries/{entry.Id}");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+
+        // And the owner's cook is still there — a 404 must not have been a silent delete.
+        var log = await owner.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.Single(log!.Items);
+    }
+
     // --- helpers -------------------------------------------------------------------------
 
     private static async Task<CookLogResponse> LogCookAsync(HttpClient client, Guid recipeId, Guid? entryId = null)

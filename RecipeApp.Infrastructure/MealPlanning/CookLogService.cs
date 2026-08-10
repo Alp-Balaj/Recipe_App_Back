@@ -195,6 +195,50 @@ public class CookLogService : ICookLogService
             ToResponse(row, recipe?.ImageUrl, recipeAvailable: recipe is not null));
     }
 
+    public async Task<MealPlanResult<bool>> UncookEntryAsync(
+        Guid mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        // The same ownership question LogAsync asks, and for the same reason: an entry id
+        // that is not on one of the caller's own plans is NotFound, never Forbidden.
+        var ownsEntry = await _db.MealPlanEntries
+            .AnyAsync(e => e.Id == mealPlanEntryId && e.MealPlan.UserId == currentUserId, cancellationToken);
+        if (!ownsEntry)
+        {
+            return MealPlanResult<bool>.NotFound();
+        }
+
+        var rows = await _db.CookLogs
+            .Where(cl => cl.UserId == currentUserId && cl.MealPlanEntryId == mealPlanEntryId)
+            .ToListAsync(cancellationToken);
+        if (rows.Count == 0)
+        {
+            // Already the desired end state. Success, not NotFound — see the interface note.
+            return MealPlanResult<bool>.Success(true);
+        }
+
+        _db.CookLogs.RemoveRange(rows);
+
+        // Symmetric with LogAsync's bump, in the SAME SaveChanges, and by the number of rows
+        // actually removed — not by one. Floored at 0 because the aggregate predates the log:
+        // a user who cooked something before CookLog existed has a count with no rows behind
+        // it, and un-cooking a later plan cook must not push that count negative.
+        var recipeIds = rows.Select(r => r.RecipeId).Distinct().ToList();
+        var aggregates = await _db.CookedRecipes
+            .Where(cr => cr.UserId == currentUserId && recipeIds.Contains(cr.RecipeId))
+            .ToListAsync(cancellationToken);
+        foreach (var aggregate in aggregates)
+        {
+            var removed = rows.Count(r => r.RecipeId == aggregate.RecipeId);
+            aggregate.TimesCooked = Math.Max(0, aggregate.TimesCooked - removed);
+        }
+
+        // Rating, RatedAt and the rank award are deliberately untouched: cooking awards no
+        // rank (see SocialService.MarkCookedAsync), so there is nothing to revert.
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return MealPlanResult<bool>.Success(true);
+    }
+
     // The shared read shape, applied LAST — after Where/OrderBy/Take. Projecting first and
     // then filtering the projection is what EF cannot translate here (it fails at runtime, not
     // at compile time, so the shape matters); every read below therefore narrows the entity
