@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using System.Net.Http.Json;
+using RecipeApp.Application.Auth.Dtos;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
@@ -19,6 +20,7 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
     public async Task Suppressing_snapshots_the_contributing_entry_ids()
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
+        var userId = await UserIdAsync(client);
         var weekStart = NextMonday();
 
         // A distinctive name so the (week, key) pair cannot collide with another test's marks.
@@ -35,7 +37,8 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
 
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        var mark = await db.ShoppingListMarks.SingleAsync(m => m.WeekStartDate == weekStart && m.Key == key);
+        var mark = await db.ShoppingListMarks.SingleAsync(
+            m => m.UserId == userId && m.WeekStartDate == weekStart && m.Key == key);
         Assert.NotNull(mark.SuppressedEntryIds);
         Assert.Equal(new[] { entry1, entry2 }.OrderBy(g => g), mark.SuppressedEntryIds!.OrderBy(g => g));
     }
@@ -44,6 +47,7 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
     public async Task Purchase_only_marks_keep_a_null_snapshot()
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
+        var userId = await UserIdAsync(client);
         var weekStart = NextMonday();
         var key = "ticksnapshotcheck";
 
@@ -53,7 +57,8 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
 
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        var mark = await db.ShoppingListMarks.SingleAsync(m => m.WeekStartDate == weekStart && m.Key == key);
+        var mark = await db.ShoppingListMarks.SingleAsync(
+            m => m.UserId == userId && m.WeekStartDate == weekStart && m.Key == key);
         Assert.Null(mark.SuppressedEntryIds);
     }
 
@@ -88,12 +93,17 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
         var group = Assert.Single(week.Groups, g => g.Key == "expirepepper");
         Assert.Equal(2, group.Parts.Count);   // both dishes render — nothing is eaten
+        // The other half of spec §5.2: an EXPIRED hide is not a hide, so the key must also be
+        // gone from the diagnostics. Asserting only that the group renders would leave the
+        // empty state offering "Restore Expirepepper" for something already on the list.
+        Assert.DoesNotContain(week.Diagnostics.HiddenItems, h => h.Key == "expirepepper");
     }
 
     [Fact]
     public async Task Remove_then_readd_expires_the_hide_and_gcs_the_mark()
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
+        var userId = await UserIdAsync(client);
         var weekStart = NextMonday();
         var curry = await CreateRecipeAsync(client, "Curry", [("Gcpepper", 2m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
@@ -107,7 +117,7 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         {
             var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
             Assert.False(await db.ShoppingListMarks.AnyAsync(
-                m => m.WeekStartDate == weekStart && m.Key == "gcpepper"));
+                m => m.UserId == userId && m.WeekStartDate == weekStart && m.Key == "gcpepper"));
         }
 
         await AddEntryAsync(client, planId, "Wednesday", "Dinner", curry);
@@ -142,6 +152,7 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
     public async Task Expired_hide_that_was_also_purchased_returns_ticked()
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
+        var userId = await UserIdAsync(client);
         var weekStart = NextMonday();
         var curry = await CreateRecipeAsync(client, "Curry", [("Tickpepper", 2m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
@@ -162,7 +173,7 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         {
             var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
             Assert.True(await db.ShoppingListMarks.AnyAsync(
-                m => m.WeekStartDate == weekStart && m.Key == "tickpepper" && m.IsPurchased));
+                m => m.UserId == userId && m.WeekStartDate == weekStart && m.Key == "tickpepper" && m.IsPurchased));
         }
 
         await AddEntryAsync(client, planId, "Wednesday", "Dinner", curry);   // ingredient returns
@@ -176,6 +187,7 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
     public async Task Removing_one_of_two_contributors_leaves_the_hide_intact()
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
+        var userId = await UserIdAsync(client);
         var weekStart = NextMonday();
         var curry = await CreateRecipeAsync(client, "Curry", [("Subsetpepper", 2m, UnitOfMeasure.Piece)]);
         var stir = await CreateRecipeAsync(client, "Stir fry", [("Subsetpepper", 1m, UnitOfMeasure.Piece)]);
@@ -194,7 +206,7 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         Assert.True(await db.ShoppingListMarks.AnyAsync(
-            m => m.WeekStartDate == weekStart && m.Key == "subsetpepper"));
+            m => m.UserId == userId && m.WeekStartDate == weekStart && m.Key == "subsetpepper"));
     }
 
     [Fact]
@@ -323,6 +335,7 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
     public async Task Hide_survives_a_soft_deleted_contributing_recipe()
     {
         var client = await _factory.CreateAuthenticatedClientAsync();
+        var userId = await UserIdAsync(client);
         var weekStart = NextMonday();
         var curry = await CreateRecipeAsync(client, "Curry", [("Softdeletepepper", 2m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
@@ -341,7 +354,198 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         using var verifyScope = _factory.Services.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         Assert.True(await verifyDb.ShoppingListMarks.AnyAsync(
-            m => m.WeekStartDate == weekStart && m.Key == "softdeletepepper"));
+            m => m.UserId == userId && m.WeekStartDate == weekStart && m.Key == "softdeletepepper"));
+    }
+
+    // Final review, fix 1 (spec §3.1): a hidden group's TICK must reach the wire. The empty
+    // state's Restore sends an explicit full set of both flags, so without IsPurchased here
+    // the client has nothing to preserve — it hard-coded false, and un-hiding an ingredient
+    // you had already bought silently untick'd it and you bought a second one. Deleting the
+    // flag from the response (or passing `false` at the construction in ProjectWeekAsync)
+    // fails this.
+    [Fact]
+    public async Task Hidden_items_report_the_purchase_tick_they_carried_in()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+        var curry = await CreateRecipeAsync(client, "Curry", [("Restorepepper", 2m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", curry);
+
+        // Bought first, THEN hidden — the page's own `remove` carries the tick along, so the
+        // stored mark is IsPurchased: true, IsSuppressed: true.
+        var put = await client.PutAsJsonAsync("/shopping-list/marks",
+            new SetShoppingListMarkRequest(weekStart, "restorepepper", IsPurchased: true, IsSuppressed: true),
+            TestJson.Options);
+        put.EnsureSuccessStatusCode();
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        Assert.DoesNotContain(week.Groups, g => g.Key == "restorepepper");
+
+        var hidden = Assert.Single(week.Diagnostics.HiddenItems, h => h.Key == "restorepepper");
+        Assert.Equal("Restorepepper", hidden.DisplayName);
+        Assert.True(hidden.IsPurchased);
+    }
+
+    // Final review, fix 4: a group carries one total per summation BUCKET, and mass and volume
+    // stay separate whenever the ingredient has no catalogue density. The carryover used to
+    // report only Totals[0], so an ingredient owed as BOTH "300 g" and "2 cups" carried forward
+    // as "300 g" and the shopper under-bought the rest. An invented name resolves to nothing,
+    // so there is no density and the two buckets are guaranteed not to collapse.
+    [Fact]
+    public async Task Carryover_carries_every_total_a_group_holds_not_just_the_first()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var lastWeek = CurrentMondayUtc().AddDays(-7);
+
+        var baked = await CreateRecipeAsync(client, "Baked", [("Twoscalepepper", 300m, UnitOfMeasure.Gram)]);
+        var soup = await CreateRecipeAsync(client, "Soup", [("Twoscalepepper", 2m, UnitOfMeasure.Cup)]);
+        var planId = await CreatePlanAsync(client, lastWeek);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", baked);
+        await AddEntryAsync(client, planId, "Tuesday", "Dinner", soup);
+
+        var list = await client.GetFromJsonAsync<ShoppingListResponse>(
+            $"/shopping-list?weekStart={CurrentMondayUtc():o}&scope=Week", TestJson.Options);
+
+        Assert.NotNull(list!.Carryover);
+        var item = Assert.Single(list.Carryover!.Items);
+        Assert.Equal("twoscalepepper", item.Key);
+        // Mass sorts before Volume (UnitDimension's declaration order), and 2 cups is 480 ml
+        // by the domain's metric cooking convention — see Units' conversion table.
+        Assert.Equal("300 g + 480 ml", item.RemainingDisplay);
+    }
+
+    // Final review, fix 6 (spec §5.7): "fully-shopped previous week → null". The existing null
+    // test exits early at WeekHasAnythingAsync, so the `items.Count > 0` guard — the only thing
+    // standing between the client and an EMPTY-object banner ("Last week had 0 unbought
+    // items") — had no coverage at all. Here the previous week genuinely exists and is
+    // genuinely projected; only the guard makes the answer null.
+    [Fact]
+    public async Task Carryover_is_null_when_last_week_exists_but_is_fully_purchased()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var lastWeek = CurrentMondayUtc().AddDays(-7);
+
+        var soup = await CreateRecipeAsync(client, "Soup", [("Allboughtpepper", 2m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, lastWeek);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", soup);
+
+        var put = await client.PutAsJsonAsync("/shopping-list/marks",
+            new SetShoppingListMarkRequest(lastWeek, "allboughtpepper", IsPurchased: true, IsSuppressed: false),
+            TestJson.Options);
+        put.EnsureSuccessStatusCode();
+
+        // Sanity: last week really does hold a group, so this is the "exists and was projected"
+        // path, not the cheap existence-check short circuit the other null test takes.
+        var lastWeekList = Assert.Single((await ReadWeekAsync(client, lastWeek)).Weeks);
+        Assert.Single(lastWeekList.Groups, g => g.Key == "allboughtpepper");
+
+        var list = await client.GetFromJsonAsync<ShoppingListResponse>(
+            $"/shopping-list?weekStart={CurrentMondayUtc():o}&scope=Week", TestJson.Options);
+        Assert.Null(list!.Carryover);
+    }
+
+    // Final review, fix 6 (spec §5.7): "purchased/suppressed excluded". The purchased half was
+    // covered; the SUPPRESSED half was not. A hidden group is not in the projection's Groups at
+    // all, which is what keeps it out of the carryover — this pins that, and would fail if a
+    // future change fed the carryover from a pre-suppression list.
+    [Fact]
+    public async Task Carryover_excludes_a_suppressed_group()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var lastWeek = CurrentMondayUtc().AddDays(-7);
+
+        var soup = await CreateRecipeAsync(client, "Soup",
+            [("Hiddencarrypepper", 2m, UnitOfMeasure.Piece), ("Showncarrypepper", 1m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, lastWeek);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", soup);
+        await SuppressAsync(client, lastWeek, "hiddencarrypepper");
+
+        var list = await client.GetFromJsonAsync<ShoppingListResponse>(
+            $"/shopping-list?weekStart={CurrentMondayUtc():o}&scope=Week", TestJson.Options);
+
+        Assert.NotNull(list!.Carryover);
+        var item = Assert.Single(list.Carryover!.Items);
+        Assert.Equal("showncarrypepper", item.Key);
+        Assert.DoesNotContain(list.Carryover.Items, i => i.Key == "hiddencarrypepper");
+    }
+
+    // Final review, fix 7: the hide's WRITER (SetMarkAsync → ContributingEntryIdsAsync) and the
+    // list's READER (ProjectWeekAsync) share one hydrate helper now, so they cannot disagree
+    // about which plan entries contribute a key. This pins that agreement from the outside, in
+    // both directions and in the configuration that is easiest to get wrong: a contributing
+    // entry whose recipe has been SOFT-DELETED.
+    //
+    // The two notions the projection holds are deliberately different sizes, and the test
+    // exercises both. `liveEntryIds` (what the GC intersects against) holds EVERY plan entry,
+    // including one whose recipe is soft-deleted — that widening is what stops a moderator's
+    // delete from silently GC'ing a user's hide (see Hide_survives_a_soft_deleted_contributing_
+    // recipe). ATTRIBUTION is narrower: no part is built for an entry whose recipe is gone, so
+    // such an entry contributes to no group — and the snapshot must agree, or a hide would be
+    // conditioned on a contribution the reader never made.
+    [Fact]
+    public async Task Hide_snapshots_exactly_the_entries_the_projection_attributes_to_the_key()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var userId = await UserIdAsync(client);
+        var weekStart = NextMonday();
+
+        var curry = await CreateRecipeAsync(client, "Curry", [("Agreepepper", 2m, UnitOfMeasure.Piece)]);
+        var stir = await CreateRecipeAsync(client, "Stir fry", [("Agreepepper", 1m, UnitOfMeasure.Piece)]);
+        // A third meal that does NOT contribute the key — the snapshot must exclude it.
+        var salad = await CreateRecipeAsync(client, "Salad", [("Agreeleaf", 1m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        var curryEntry = await AddEntryAsync(client, planId, "Monday", "Dinner", curry);
+        var stirEntry = await AddEntryAsync(client, planId, "Tuesday", "Dinner", stir);
+        await AddEntryAsync(client, planId, "Wednesday", "Lunch", salad);
+
+        // ── all three recipes live ──────────────────────────────────────────────────────
+        // The READER's attribution, read off the wire: two dishes on the one row, the salad
+        // nowhere near it.
+        var beforeGroup = Assert.Single(
+            Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks).Groups,
+            g => g.Key == "agreepepper");
+        Assert.Equal(["Curry", "Stir fry"], beforeGroup.Dishes);
+
+        await SuppressAsync(client, weekStart, "agreepepper");
+        Assert.Equal(
+            new[] { curryEntry, stirEntry }.OrderBy(g => g),
+            (await SnapshotAsync(userId, weekStart, "agreepepper")).OrderBy(g => g));
+
+        // ── one contributor's recipe soft-deleted ───────────────────────────────────────
+        // Un-hide first so the group is observable again, then soft-delete and re-read: the
+        // projection now attributes the key to Curry ALONE, because no part is built for an
+        // entry whose recipe the global query filter hides.
+        await UnsuppressAsync(client, weekStart, "agreepepper");
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            await db.Recipes.IgnoreQueryFilters().Where(r => r.Id == stir)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.IsDeleted, true));
+        }
+
+        var afterGroup = Assert.Single(
+            Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks).Groups,
+            g => g.Key == "agreepepper");
+        Assert.Equal(["Curry"], afterGroup.Dishes);
+
+        // …and the WRITER agrees: hiding it now snapshots exactly that one entry. A writer
+        // that still counted the soft-deleted entry would pin the hide to a contribution the
+        // list never showed, and restoring the recipe would leave the hide holding over a row
+        // the user never hid.
+        await SuppressAsync(client, weekStart, "agreepepper");
+        Assert.Equal([curryEntry], await SnapshotAsync(userId, weekStart, "agreepepper"));
+    }
+
+    /// <summary>The authenticated caller's own user id — the third leg of every mark's unique
+    /// key. A DB assertion filtering only on (WeekStartDate, Key) shares one container database
+    /// with every other test class, so a future name collision would turn a SingleAsync into a
+    /// flake rather than a failure.</summary>
+    private static async Task<Guid> UserIdAsync(HttpClient client)
+    {
+        var me = await client.GetFromJsonAsync<MeResponse>("/auth/me", TestJson.Options);
+        Assert.NotNull(me);
+        return me!.UserId;
     }
 
     private static DateTime CurrentMondayUtc()
@@ -352,6 +556,24 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
 
     // --- helpers ------------------------------------------------------------------------
     // Thin adapters over the shared MealPlanTestHelper, matching ShoppingListProjectionTests.
+
+    /// <summary>The entry-id snapshot a hide stored, read straight out of the table.</summary>
+    private async Task<List<Guid>> SnapshotAsync(Guid userId, DateTime weekStart, string key)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var mark = await db.ShoppingListMarks.SingleAsync(
+            m => m.UserId == userId && m.WeekStartDate == weekStart && m.Key == key);
+        Assert.NotNull(mark.SuppressedEntryIds);
+        return mark.SuppressedEntryIds!;
+    }
+
+    private static async Task UnsuppressAsync(HttpClient client, DateTime weekStart, string key)
+    {
+        var put = await client.PutAsJsonAsync("/shopping-list/marks",
+            new SetShoppingListMarkRequest(weekStart, key, IsPurchased: false, IsSuppressed: false), TestJson.Options);
+        put.EnsureSuccessStatusCode();
+    }
 
     private static async Task SuppressAsync(HttpClient client, DateTime weekStart, string key)
     {

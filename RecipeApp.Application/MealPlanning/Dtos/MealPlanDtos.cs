@@ -190,8 +190,17 @@ public record ShoppingListGroupResponse(
 /// ShoppingListGroupResponse's own — the display name is computed the same way
 /// (IngredientKey.DisplayNameFor over the group's raw names) so a re-surfaced group reads
 /// identically to how it read while hidden.
+///
+/// <c>IsPurchased</c> carries the hidden group's TICK, and it is load-bearing rather than
+/// informational: the empty state's Restore button sends an explicit full set of both flags
+/// (<c>isSuppressed: false</c> "preserving isPurchased", spec §3.1), and without the flag on
+/// the wire the client had nothing to preserve and hard-coded false — so restoring an
+/// ingredient you had already bought silently untick'd it and you bought it twice. A mark is
+/// always an explicit full set of BOTH flags; this is the read half of that contract.
+/// Appended last, per this file's convention, so existing positional constructions keep
+/// compiling.
 /// </summary>
-public record ShoppingListHiddenItemResponse(string Key, string DisplayName);
+public record ShoppingListHiddenItemResponse(string Key, string DisplayName, bool IsPurchased);
 
 /// <summary>
 /// A planned meal whose recipe currently carries zero ingredient lines — it contributes
@@ -226,8 +235,14 @@ public record ShoppingListWeekResponse(
 /// current week so debt is carried forward instead of living forever in a scope=All view.
 /// Key/DisplayName/Origin/ManualItemId mirror ShoppingListGroupResponse's own.
 ///
-/// RemainingDisplay is the group's first total's Display, falling back to the group's own
-/// first PART's Quantity when there is no total. That fallback is what makes a Manual item
+/// RemainingDisplay is ALL of the group's totals' Displays joined by " + " ("300 g + 2 cups"),
+/// falling back to the group's own first PART's Quantity when there is no total. Every total,
+/// not just the first: a group carries one total per summation BUCKET (see
+/// ShoppingListTotalResponse), and mass and volume legitimately fail to collapse without a
+/// density — reporting only the first meant an ingredient owed as "300 g" AND "2 cups" carried
+/// forward as "300 g" alone, and the user under-bought.
+///
+/// That fallback is what makes a Manual item
 /// carry its own free text ("a couple of bags") here — a manual group never has a Total (its
 /// quantity is a note to self, not a measurement), so without the fallback this was always
 /// null for one, and the client's carry-forward action sends it straight through as the new
