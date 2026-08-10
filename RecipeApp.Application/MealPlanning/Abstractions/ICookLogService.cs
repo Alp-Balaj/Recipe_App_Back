@@ -1,0 +1,44 @@
+using RecipeApp.Application.Common;
+using RecipeApp.Application.MealPlanning.Dtos;
+
+namespace RecipeApp.Application.MealPlanning.Abstractions;
+
+// The cook log (plan-page redesign / roadmap spec 2, 2026-08-10) — one row per cook event,
+// behind /plan's "How did it go?" card and /plan/cooks.
+//
+// Returns MealPlanResult<T> like its neighbours: NotFound covers "doesn't exist" and "not the
+// caller's" alike, because cook-log rows have no visibility tier and 404-never-403 applies
+// uniformly (Decisions/meal-planning-v1-semantics.md).
+public interface ICookLogService
+{
+    /// <summary>
+    /// Records a cook: writes a log row AND bumps the caller's CookedRecipe aggregate, in one
+    /// transaction. NotFound when the recipe is not visible to the caller, or when
+    /// <paramref name="mealPlanEntryId"/> is given but is not an entry on one of their plans.
+    /// </summary>
+    /// <remarks>
+    /// The aggregate bump is what keeps /plan and the recipe page telling the same story: a
+    /// meal marked cooked here must show up in "you've cooked this 3 times" there. Both writes
+    /// or neither — a log row without the bump is the drift this design exists to prevent.
+    /// </remarks>
+    Task<MealPlanResult<CookLogResponse>> LogAsync(
+        Guid recipeId, Guid? mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>The caller's cooks, newest first, keyset-paged.</summary>
+    Task<MealPlanResult<CookLogListResponse>> ListAsync(
+        Guid currentUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The newest row plus the caller's lifetime cook count — everything the "How did it go?"
+    /// card renders, in one request. Always Success; an empty log is a null Latest, not a 404.
+    /// </summary>
+    Task<MealPlanResult<CookLogLatestResponse>> GetLatestAsync(
+        Guid currentUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sets or clears the note on one logged cook. Touches NO counter — annotating a cook you
+    /// already did is not cooking again.
+    /// </summary>
+    Task<MealPlanResult<CookLogResponse>> UpdateNoteAsync(
+        Guid id, string? note, Guid currentUserId, CancellationToken cancellationToken = default);
+}

@@ -92,6 +92,8 @@ builder.Services.AddScoped<IngredientCatalogueSeeder>();
 builder.Services.AddScoped<ISocialService, SocialService>();
 builder.Services.AddScoped<IMealPlanService, MealPlanService>();
 builder.Services.AddScoped<IShoppingListService, ShoppingListService>();
+// Plan-page redesign / roadmap spec 2: the per-cook-event log behind /plan and /plan/cooks.
+builder.Services.AddScoped<ICookLogService, CookLogService>();
 // Governor (stream D): reports (user-facing), the separate admin service (decision D5),
 // and the security-state read behind the revocation check. The memory cache is the
 // singleton store that read caches into.
@@ -473,6 +475,7 @@ app.MapChatEndpoints();
 app.MapSocialEndpoints();
 app.MapImageEndpoints();
 app.MapMealPlanEndpoints();
+app.MapCookLogEndpoints();
 app.MapReportEndpoints();
 app.MapAdminEndpoints();
 app.MapAdminAnalyticsEndpoints();
