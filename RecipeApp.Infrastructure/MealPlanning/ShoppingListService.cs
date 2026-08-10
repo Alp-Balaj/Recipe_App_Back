@@ -399,15 +399,20 @@ public class ShoppingListService : IShoppingListService
         // (or no snapshot at all — pre-rework rows). Deleted on read, so the table
         // self-cleans without a background job. Purchased marks are exempt: their hide
         // can never re-apply once dead, but the tick must survive for when the
-        // ingredient returns.
+        // ingredient returns. ExecuteDeleteAsync rather than RemoveRange+SaveChanges: a
+        // second overlapping read can already have deleted the same row (untracked, so
+        // there is no concurrency token to trip on), and that must be a silent no-op,
+        // not a DbUpdateConcurrencyException that 500s the read.
         var deadMarks = marks
             .Where(m => m.WeekStartDate == weekStart && m.IsSuppressed && !m.IsPurchased)
             .Where(m => m.SuppressedEntryIds is null || !m.SuppressedEntryIds.Any(liveEntryIds.Contains))
             .ToList();
         if (deadMarks.Count > 0)
         {
-            _db.ShoppingListMarks.RemoveRange(deadMarks);
-            await _db.SaveChangesAsync(ct);
+            var deadIds = deadMarks.Select(m => m.Id).ToList();
+            await _db.ShoppingListMarks
+                .Where(m => deadIds.Contains(m.Id))
+                .ExecuteDeleteAsync(ct);
             marks.RemoveAll(deadMarks.Contains);   // orphan banner must not see them either
         }
 

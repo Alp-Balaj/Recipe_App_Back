@@ -142,20 +142,57 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         var client = await _factory.CreateAuthenticatedClientAsync();
         var weekStart = NextMonday();
         var curry = await CreateRecipeAsync(client, "Curry", [("Tickpepper", 2m, UnitOfMeasure.Piece)]);
-        var stir = await CreateRecipeAsync(client, "Stir fry", [("Tickpepper", 1m, UnitOfMeasure.Piece)]);
         var planId = await CreatePlanAsync(client, weekStart);
-        await AddEntryAsync(client, planId, "Monday", "Dinner", curry);
+        var entryId = await AddEntryAsync(client, planId, "Monday", "Dinner", curry);
 
         // Bought, then hidden (the mark is an explicit full set of both flags).
         var put = await client.PutAsJsonAsync("/shopping-list/marks",
             new SetShoppingListMarkRequest(weekStart, "tickpepper", IsPurchased: true, IsSuppressed: true), TestJson.Options);
         put.EnsureSuccessStatusCode();
 
-        await AddEntryAsync(client, planId, "Tuesday", "Dinner", stir);   // expires the hide
+        // Remove the only contributing entry: the snapshot now intersects nothing live,
+        // so the hide is dead — but the mark is PURCHASED, and a dead purchased mark must
+        // survive the read's GC instead of being deleted along with the hide.
+        await RemoveEntryAsync(client, planId, entryId);
+        await ReadWeekAsync(client, weekStart);   // this read would GC an unpurchased dead mark
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            Assert.True(await db.ShoppingListMarks.AnyAsync(
+                m => m.WeekStartDate == weekStart && m.Key == "tickpepper" && m.IsPurchased));
+        }
+
+        await AddEntryAsync(client, planId, "Wednesday", "Dinner", curry);   // ingredient returns
 
         var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
         var group = Assert.Single(week.Groups, g => g.Key == "tickpepper");
         Assert.True(group.IsPurchased);   // the purchase survived the hide's death
+    }
+
+    [Fact]
+    public async Task Removing_one_of_two_contributors_leaves_the_hide_intact()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+        var curry = await CreateRecipeAsync(client, "Curry", [("Subsetpepper", 2m, UnitOfMeasure.Piece)]);
+        var stir = await CreateRecipeAsync(client, "Stir fry", [("Subsetpepper", 1m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", curry);
+        var stirEntry = await AddEntryAsync(client, planId, "Tuesday", "Dinner", stir);
+        await SuppressAsync(client, weekStart, "subsetpepper");
+
+        // One of the two snapshotted contributors leaves — the survivor is still a
+        // SUBSET of the snapshot, so the hide must hold rather than expire.
+        await RemoveEntryAsync(client, planId, stirEntry);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        Assert.DoesNotContain(week.Groups, g => g.Key == "subsetpepper");
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.True(await db.ShoppingListMarks.AnyAsync(
+            m => m.WeekStartDate == weekStart && m.Key == "subsetpepper"));
     }
 
     // --- helpers ------------------------------------------------------------------------
