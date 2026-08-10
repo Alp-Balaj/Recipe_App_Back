@@ -526,6 +526,12 @@ public class ApplicationDbContext : DbContext
             .HasMaxLength(200)
             .IsRequired();
 
+        // Trust rework: the hide's snapshot is a document, same idiom as the other
+        // primitive collections. Guids serialize as strings; no element conversion needed.
+        builder.Entity<ShoppingListMark>()
+            .PrimitiveCollection(m => m.SuppressedEntryIds)
+            .HasColumnType("jsonb");
+
         // Backs "this week's manual items" — the default list scope.
         builder.Entity<ShoppingListItem>()
             .HasIndex(sli => new { sli.UserId, sli.WeekStartDate });
