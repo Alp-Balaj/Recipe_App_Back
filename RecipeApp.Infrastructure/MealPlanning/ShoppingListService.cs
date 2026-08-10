@@ -214,6 +214,7 @@ public class ShoppingListService : IShoppingListService
         // IngredientId rides along since slice G3: it decides the group's KEY (an id
         // beats a spelling) and unlocks the density that lets mass and volume merge.
         var parts = new List<ProjectedPart>();
+        var liveEntryIds = new HashSet<Guid>();
 
         if (plan is not null)
         {
@@ -236,11 +237,13 @@ public class ShoppingListService : IShoppingListService
             // roast would have owned every ingredient it shared with Monday's dinner.
             var entries = (await _db.MealPlanEntries
                 .Where(e => e.MealPlanId == plan.Id)
-                .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new { e.DayOfWeek, e.MealType, RecipeId = r.Id })
+                .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new { EntryId = e.Id, e.DayOfWeek, e.MealType, RecipeId = r.Id })
                 .ToListAsync(ct))
                 .OrderBy(e => DayOffset(e.DayOfWeek))
                 .ThenBy(e => e.MealType)
                 .ToList();
+
+            liveEntryIds.UnionWith(entries.Select(e => e.EntryId));
 
             // Two-query hydrate: the jsonb Ingredients collection cannot ride the anonymous
             // join projection above, so the full recipe rows come back separately (once per
@@ -255,6 +258,7 @@ public class ShoppingListService : IShoppingListService
                 foreach (var ingredient in recipe.Ingredients)
                 {
                     parts.Add(new ProjectedPart(
+                        entry.EntryId,
                         // Slice G3: the catalogue id when the line resolved, the name's
                         // key when it did not. "prawns" and "shrimp" become ONE row.
                         KeyOf(ingredient),
@@ -352,7 +356,7 @@ public class ShoppingListService : IShoppingListService
         foreach (var group in parts.GroupBy(p => p.Key, StringComparer.Ordinal))
         {
             markByKey.TryGetValue(group.Key, out var mark);
-            if (mark?.IsSuppressed == true) continue;
+            if (HideApplies(mark, group)) continue;
 
             groups.Add(new ShoppingListGroupResponse(
                 group.Key,
@@ -391,6 +395,22 @@ public class ShoppingListService : IShoppingListService
                 ShoppingAisles.Other));
         }
 
+        // Dead hides: suppressed marks whose snapshot references nothing still planned
+        // (or no snapshot at all — pre-rework rows). Deleted on read, so the table
+        // self-cleans without a background job. Purchased marks are exempt: their hide
+        // can never re-apply once dead, but the tick must survive for when the
+        // ingredient returns.
+        var deadMarks = marks
+            .Where(m => m.WeekStartDate == weekStart && m.IsSuppressed && !m.IsPurchased)
+            .Where(m => m.SuppressedEntryIds is null || !m.SuppressedEntryIds.Any(liveEntryIds.Contains))
+            .ToList();
+        if (deadMarks.Count > 0)
+        {
+            _db.ShoppingListMarks.RemoveRange(deadMarks);
+            await _db.SaveChangesAsync(ct);
+            marks.RemoveAll(deadMarks.Contains);   // orphan banner must not see them either
+        }
+
         // Aisle WALK order, not alphabetical (shop redesign): the list is read while walking
         // a shop, so produce leads and drinks trail. Origin no longer needs its own sort —
         // manual rows are all in "Other", which ranks last by construction.
@@ -407,6 +427,17 @@ public class ShoppingListService : IShoppingListService
     }
 
     /// <summary>
+    /// Trust rework: a hide applies only while the group's CURRENT contributors are a
+    /// subset of the snapshot taken when it was written. A contributor outside the
+    /// snapshot — a meal added or re-added since — renders the group again. A null
+    /// snapshot (pre-rework mark) never holds. Stateless on purpose: if the newer meal
+    /// leaves again, the plan is back inside the snapshot and the hide re-arms.
+    /// </summary>
+    private static bool HideApplies(ShoppingListMark? mark, IEnumerable<ProjectedPart> group) =>
+        mark is { IsSuppressed: true, SuppressedEntryIds: not null }
+        && group.All(p => mark.SuppressedEntryIds.Contains(p.EntryId));
+
+    /// <summary>
     /// One recipe line on its way into a group — the working shape of the projection, before
     /// parts are grouped by key and rendered.
     ///
@@ -415,6 +446,7 @@ public class ShoppingListService : IShoppingListService
     /// can make safely.
     /// </summary>
     private sealed record ProjectedPart(
+        Guid EntryId,
         string Key,
         string RawName,
         decimal Quantity,
