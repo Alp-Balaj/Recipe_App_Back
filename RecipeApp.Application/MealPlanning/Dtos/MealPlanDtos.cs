@@ -31,7 +31,15 @@ public record MealPlanEntryRecipeSummary(
     int TotalTimeMinutes,
     int? CaloriesPerServing);
 
-public record MealPlanEntryResponse(Guid Id, DayOfWeek DayOfWeek, MealType MealType, MealPlanEntryRecipeSummary Recipe);
+// CookedAt is appended last, per this file's convention. Null means "not cooked", which is
+// also what every entry reads as until someone logs a cook against it — there is no third
+// state and nothing is stored on the entry itself: the value is read from CookLog.
+public record MealPlanEntryResponse(
+    Guid Id,
+    DayOfWeek DayOfWeek,
+    MealType MealType,
+    MealPlanEntryRecipeSummary Recipe,
+    DateTime? CookedAt);
 
 public record MealPlanResponse(
     Guid Id,

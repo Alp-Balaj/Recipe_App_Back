@@ -2,10 +2,13 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
+using RecipeApp.Domain.Entities.RecipeInteractions;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
+using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.IntegrationTests;
 
@@ -211,6 +214,69 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var response = await client.GetAsync($"/meal-plans/{Guid.NewGuid()}");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // --- cook status (cooked-per-plan-entry, task 1) ------------------------------------------
+    // CookedAt is read from CookLog, not stored on the entry itself — see MealPlanService's
+    // comment on the correlated subquery. This is the read half; POST /cook-log (already
+    // shipped) is the write, reused here rather than a new endpoint.
+
+    [Fact]
+    public async Task Getting_a_plan_reports_when_each_entry_was_cooked()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2026, 12, 14));
+        var recipe = await CreateRecipeAsync(client);
+        var entry = await AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+
+        var before = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+        Assert.Null(before!.Entries.Single().CookedAt);
+
+        var logged = await client.PostAsJsonAsync(
+            "/cook-log", new LogCookRequest(recipe.Id, entry.Id), TestJson.Options);
+        logged.EnsureSuccessStatusCode();
+
+        var after = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+        Assert.NotNull(after!.Entries.Single().CookedAt);
+    }
+
+    // The subquery scopes to cl.UserId == userId (mutation evidence, task 1 brief step 7):
+    // widening that predicate let ANY user's cook of the entry's id satisfy it. POST
+    // /cook-log already 404s a stranger who tries this through the API (see
+    // CookLogEndpointsTests.Logging_against_someone_elses_plan_entry_is_not_found), so the
+    // only way to construct the row this guards against is to write it directly, the way
+    // the aggregate-side CookLog tests already reach into the DbContext.
+    [Fact]
+    public async Task Getting_a_plan_does_not_leak_another_users_cook_of_the_same_entry_id()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2026, 12, 21));
+        var recipe = await CreateRecipeAsync(client);
+        var entry = await AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+
+        var otherClient = factory.CreateClient();
+        var otherAuth = await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.CookLogs.Add(new CookLog
+            {
+                Id = Guid.NewGuid(),
+                UserId = otherAuth.UserId,
+                RecipeId = recipe.Id,
+                RecipeTitle = recipe.Title,
+                MealPlanEntryId = entry.Id,
+                CookedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var body = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+
+        Assert.Null(body!.Entries.Single().CookedAt);
     }
 
     // --- add entry --------------------------------------------------------------------------
