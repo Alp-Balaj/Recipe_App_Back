@@ -86,13 +86,22 @@ public class MealPlanService : IMealPlanService
                     r.ImageUrl,
                     r.PrepTimeMinutes + r.CookTimeMinutes,
                     r.CaloriesPerServing),
+                // A correlated subquery, NOT a join or a navigation: the caller's own cooks
+                // only, and the newest one when a slot was somehow logged twice. Reaching
+                // this through cl.Recipe would drag CookLog's required Recipe navigation —
+                // and its soft-delete query filter — into the projection.
+                CookedAt = _db.CookLogs
+                    .Where(cl => cl.UserId == userId && cl.MealPlanEntryId == e.Id)
+                    .OrderByDescending(cl => cl.CookedAt)
+                    .Select(cl => (DateTime?)cl.CookedAt)
+                    .FirstOrDefault(),
             })
             .OrderBy(e => e.DayOfWeek)
             .ThenBy(e => e.MealType)
             .ToListAsync(cancellationToken);
 
         var entries = rows
-            .Select(r => new MealPlanEntryResponse(r.Id, r.DayOfWeek, r.MealType, r.Recipe))
+            .Select(r => new MealPlanEntryResponse(r.Id, r.DayOfWeek, r.MealType, r.Recipe, r.CookedAt))
             .ToList();
 
         return MealPlanResult<MealPlanResponse>.Success(new MealPlanResponse(plan.Id, plan.WeekStartDate, plan.CreatedAt, entries));
@@ -232,7 +241,10 @@ public class MealPlanService : IMealPlanService
                 recipe.Title,
                 recipe.ImageUrl,
                 recipe.TotalTimeMinutes,
-                recipe.CaloriesPerServing)));
+                recipe.CaloriesPerServing),
+            // A slot created one line ago has no cook against it. Not a placeholder: null IS
+            // the answer, and reading CookLog here would be a query with one possible result.
+            null));
     }
 
     public async Task<MealPlanResult<bool>> RemoveEntryAsync(Guid mealPlanId, Guid entryId, Guid userId, CancellationToken cancellationToken = default)

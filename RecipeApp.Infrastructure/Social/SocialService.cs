@@ -438,6 +438,28 @@ public class SocialService : ISocialService
             row.LastCookedAt = now;
         }
 
+        // Roadmap spec 2: the log is the complete record of every cook, so the recipe-page
+        // gesture writes one too — with a null entry ref, because there is no plan context
+        // here. Without this row, "clear cooked" and the shopping list's resolution would be
+        // reasoning over a log that is missing half the app's cooks.
+        //
+        // Written inline rather than by calling CookLogService: that method owns its own
+        // SaveChanges and its own aggregate bump, and calling it here would double-count.
+        var title = await _db.Recipes
+            .Where(r => r.Id == recipeId)
+            .Select(r => r.Title)
+            .SingleAsync(cancellationToken);
+
+        _db.CookLogs.Add(new CookLog
+        {
+            Id = Guid.NewGuid(),
+            UserId = currentUserId,
+            RecipeId = recipeId,
+            RecipeTitle = title,
+            MealPlanEntryId = null,
+            CookedAt = now,
+        });
+
         // No rank award: cooking is a private act and awarding it would let anyone farm an
         // author's rank — or their own, by cooking their own recipe — by tapping a button.
         // The award hangs off rating, which at least carries information.
@@ -529,6 +551,20 @@ public class SocialService : ISocialService
 
             await _db.SaveChangesAsync(cancellationToken);
         }
+
+        // Deliberately wide, and stated in the spec as such: "I have never cooked this" must
+        // mean the same thing on the recipe page, the plan and the shopping list. Plan-linked
+        // rows go too, so any shopping group they were resolving stops resolving on the next
+        // read. If this proves too blunt in practice the fix is a narrower "un-log one cook"
+        // gesture, which CookLog already supports — not a quieter delete here.
+        //
+        // Unconditional — outside the `if (row is not null)` above, not inside it — because a
+        // user can hold CookLog rows with no CookedRecipe aggregate (e.g. the aggregate was
+        // already cleared once and the log was left behind before this change existed); a
+        // delete gated on the aggregate existing would strand exactly those rows.
+        await _db.CookLogs
+            .Where(cl => cl.UserId == currentUserId && cl.RecipeId == recipeId)
+            .ExecuteDeleteAsync(cancellationToken);
 
         return SocialResult<CookedRecipeResponse>.Success(new CookedRecipeResponse(recipeId, 0, null, null));
     }

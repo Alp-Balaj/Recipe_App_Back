@@ -52,7 +52,7 @@ public class ShoppingListService : IShoppingListService
             // something to render.
             var current = CurrentWeekStart();
             projected = projected
-                .Where(w => w.WeekStartDate == current || w.Groups.Any(g => !g.IsPurchased))
+                .Where(w => w.WeekStartDate == current || w.Groups.Any(g => !g.IsPurchased && !g.ResolvedByCooking))
                 .OrderByDescending(w => w.WeekStartDate == current)
                 .ThenByDescending(w => w.WeekStartDate)
                 .ToList();
@@ -90,8 +90,10 @@ public class ShoppingListService : IShoppingListService
                 previous = await ProjectWeekAsync(previousWeek, userId, previousMarks, cancellationToken);
             }
 
+            // Resolved groups are excluded alongside ticked ones. Without this, last
+            // week's cooked meals turn up on Monday asking to be carried forward.
             var items = (previous?.Groups ?? [])
-                .Where(g => !g.IsPurchased)
+                .Where(g => !g.IsPurchased && !g.ResolvedByCooking)
                 .Select(g => new ShoppingListCarryoverItemResponse(
                     g.Key, g.DisplayName,
                     // EVERY total, joined — not just the first. A group carries one total per
@@ -399,6 +401,39 @@ public class ShoppingListService : IShoppingListService
         // a hide survive a moderator soft-deleting and restoring one of its contributors.
         var liveEntryIds = entries.Select(e => e.EntryId).ToHashSet();
 
+        // The caller's cooks against THIS week's entries. One query per week projection —
+        // same order as the catalogue and aisle-fallback queries already in this method.
+        //
+        // Selects the Guid and NOTHING ELSE. CookLog.Recipe is a required navigation to an
+        // entity carrying the global !IsDeleted filter, so reaching through it would compile
+        // to an INNER JOIN and a soft-deleted recipe would silently stop its cook counting —
+        // on the hot path, with nothing on screen to explain it.
+        //
+        // This IS a pinned invariant, not a hope: LogAsync accepts any (recipeId,
+        // mealPlanEntryId) pair where the recipe is visible and the entry is the caller's own
+        // — it never checks that recipeId names THAT entry's own recipe (see
+        // CookLogService.LogAsync / LogCookRequestValidator). That gap makes it reachable over
+        // plain HTTP to log a cook against a live entry under a DIFFERENT, later-deleted
+        // recipe — the CookLog row then points at a dead recipe while the entry's own recipe,
+        // and its part, are still alive. A_cook_whose_recipe_was_soft_deleted_still_counts_
+        // toward_resolution builds exactly that and would fail the moment this query starts
+        // reaching through cl.Recipe.
+        //
+        // (A soft-deleted recipe on the entry's OWN side is a different, narrower case:
+        // HydratePlanWeekAsync already drops such an entry before `parts` is built — parts
+        // exist only for entries passing recipes.ContainsKey(...) — so it never becomes a
+        // group's contributor at all, join or no join. That is why
+        // A_cooked_recipe_that_is_soft_deleted_still_reports_its_cook, which only exercises
+        // that narrower case, cannot distinguish the join from the subquery; it is not this
+        // query's regression test — see its own comment.)
+        var cookedEntryIds = (await _db.CookLogs
+            .Where(cl => cl.UserId == userId
+                      && cl.MealPlanEntryId != null
+                      && liveEntryIds.Contains(cl.MealPlanEntryId.Value))
+            .Select(cl => cl.MealPlanEntryId!.Value)
+            .ToListAsync(ct))
+            .ToHashSet();
+
         // Diagnostics: run on the UNFILTERED entries list, before the part-building loop
         // below filters to `recipes.ContainsKey(...)`. Getting this backwards would make
         // UnavailableRecipeCount always zero — the very thing it exists to report.
@@ -528,6 +563,15 @@ public class ShoppingListService : IShoppingListService
                 continue;
             }
 
+            // "Every contributing meal is done." Contributors are the group's OWN PARTS, not
+            // liveEntryIds — parts exist only for entries passing recipes.ContainsKey(...), so
+            // an entry whose recipe was soft-deleted contributes nothing and therefore neither
+            // counts toward resolution nor blocks it. Using the wider set would let one
+            // soft-deleted contributor freeze a group unresolved, permanently and invisibly.
+            // It is the same set Hide_snapshots_exactly_the_entries_the_projection_attributes_to_the_key
+            // already pins for hides.
+            var resolvedByCooking = group.All(p => cookedEntryIds.Contains(p.EntryId));
+
             groups.Add(new ShoppingListGroupResponse(
                 group.Key,
                 IngredientKey.DisplayNameFor(group.Select(p => p.RawName)),
@@ -538,7 +582,8 @@ public class ShoppingListService : IShoppingListService
                 ShoppingListGroupOrigin.Derived,
                 null,
                 SumWithinDimensions(group, DensityFor(group, densities)),
-                AisleFor(group.Key, group, catalogue, fallbackCategories)));
+                AisleFor(group.Key, group, catalogue, fallbackCategories),
+                resolvedByCooking));
         }
 
         // Manual rows stay one group each, keyed for tick storage but never merged into a
@@ -562,7 +607,11 @@ public class ShoppingListService : IShoppingListService
                 // it is a note to self, not a measurement. Nothing to sum.
                 [],
                 // Free text resolves to nothing, so there is no category to shelve it by.
-                ShoppingAisles.Other));
+                ShoppingAisles.Other,
+                // Hardcoded, never computed. A manual group has a synthetic part and no
+                // EntryId; Enumerable.All over an empty sequence returns TRUE, so sharing the
+                // derived loop's expression would resolve every manual row on sight.
+                false));
         }
 
         // Dead hides: suppressed marks whose snapshot references nothing still planned

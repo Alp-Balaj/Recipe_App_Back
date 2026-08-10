@@ -81,6 +81,23 @@ public static class CookLogEndpoints
             };
         })
         .AddEndpointFilter<ValidationFilter<UpdateCookNoteRequest>>();
+
+        // The undo half of POST /cook-log's plan-linked case. Entry-scoped rather than
+        // row-scoped: the client knows which meal it is un-cooking, not which log row, and
+        // making it find the row first would be a read it should not need.
+        //
+        // 204, unlike POST's 201: there is no row left to return, and the client refetches
+        // the plan for the authoritative cookedAt rather than patching a body.
+        group.MapDelete("/entries/{entryId:guid}", async (Guid entryId, ICookLogService cookLog,
+            ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await cookLog.UncookEntryAsync(entryId, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                MealPlanOutcome.Success => Results.NoContent(),
+                _ => Results.NotFound(),
+            };
+        });
     }
 
     // Same policy as every other list in the app: default 20, above-cap clamps to 50,
