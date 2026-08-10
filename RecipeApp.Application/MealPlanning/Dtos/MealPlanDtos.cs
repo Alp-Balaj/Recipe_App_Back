@@ -190,7 +190,15 @@ public record ShoppingListGroupResponse(
     // The shop aisle this line is shelved in (shop redesign) — the redesigned list's
     // HEADING, so it is never null: an unresolved name or a manual row answers "Other".
     // See ShoppingAisles for the map and the walk order Groups are already sorted into.
-    string Aisle);
+    string Aisle,
+    // Roadmap spec 2. TRUE when every planned meal contributing to this group has been
+    // cooked. Derived on every read — nothing is stored, so un-cooking a meal simply makes
+    // this false again and there is no decision to undo.
+    //
+    // Independent of IsPurchased, which keeps its exact meaning: the user's own tick. A group
+    // can be both, and the client composes "done" itself — which is also why PurchasedCount
+    // is NOT widened to include resolutions. Always false for a Manual group.
+    bool ResolvedByCooking);
 
 /// <summary>
 /// Trust rework (task 4): one entry per hidden group, so a caller can see WHAT a hide is
