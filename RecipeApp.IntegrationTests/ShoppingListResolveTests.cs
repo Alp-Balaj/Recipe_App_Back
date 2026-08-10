@@ -133,9 +133,11 @@ public class ShoppingListResolveTests(IntegrationTestFactory factory) : IClassFi
         // its recipe before parts exist), so the group here is the keeper's alone regardless
         // of whether that query joins or not. doomed is deliberately left UNCOOKED: the point
         // is that a soft-deleted contributor neither blocks resolution nor counts toward it,
-        // which is what the assertion below actually pins. The no-join rule itself is a
-        // structural guard held by reading ShoppingListService.cs's own comment on the query —
-        // see that comment for why no test through this projection can observe it.
+        // which is what the assertion below actually pins. The no-join rule itself IS pinned —
+        // see A_cook_whose_recipe_was_soft_deleted_still_counts_toward_resolution below, which
+        // exercises the case this test structurally cannot reach (the entry's OWN recipe is
+        // gone here, dropping it from `parts` before resolution is ever computed; that test
+        // instead soft-deletes the recipe named on the COOK LOG ROW, not the entry).
         var client = await factory.CreateAuthenticatedClientAsync();
         var keeper = await CreateRecipeWithIngredientAsync(client, "onion");
         var doomed = await CreateRecipeWithIngredientAsync(client, "onion");
@@ -148,6 +150,44 @@ public class ShoppingListResolveTests(IntegrationTestFactory factory) : IClassFi
 
         // The deleted recipe's entry contributes no part, so the group is the keeper's alone
         // and resolves. It neither blocks resolution nor counts toward it.
+        Assert.True((await GetWeekAsync(client, WeekStart)).Groups.Single().ResolvedByCooking);
+    }
+
+    [Fact]
+    public async Task A_cook_whose_recipe_was_soft_deleted_still_counts_toward_resolution()
+    {
+        // Pins the no-join rule in ShoppingListService's cookedEntryIds query (see that
+        // query's own comment). This state is reachable over plain HTTP because LogAsync
+        // accepts any (recipeId, mealPlanEntryId) pair where the recipe is visible and the
+        // entry is the caller's own — it never checks that recipeId names THAT entry's own
+        // recipe (CookLogService.LogAsync / LogCookRequestValidator both skip that check). So:
+        // log a cook against keeperEntry under a DIFFERENT recipe (doomed), then soft-delete
+        // doomed. The CookLog row now points at a dead recipe while keeperEntry's OWN recipe
+        // (keeper) — and its part — are still alive.
+        //
+        // Under the current subquery this group still resolves: the query never asks whether
+        // the cook row's RecipeId still exists. Projecting through cl.Recipe (or joining
+        // _db.Recipes) would drop the row and un-resolve a live contributor's group — silently.
+        //
+        // DEPENDENCY: this construction only works because nothing validates recipeId against
+        // mealPlanEntryId's own recipe. If that validation is ever added (closing what is
+        // arguably a real gap — ledgered for the whole-branch review, not fixed here), this
+        // exact HTTP sequence stops being reachable and this test needs to move to a direct-db
+        // CookLog write instead — the invariant still needs a test, just not this entry point.
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var keeper = await CreateRecipeWithIngredientAsync(client, "onion");
+        var doomed = await CreateRecipeWithIngredientAsync(client, "onion");
+        var planId = await CreatePlanAsync(client, WeekStart);
+        var keeperEntry = await AddEntryAsync(client, planId, DayOfWeek.Monday, MealType.Dinner, keeper);
+
+        // Logged against keeperEntry, under doomed's recipe id — accepted, because LogAsync
+        // only checks that doomed is visible and keeperEntry is the caller's own.
+        await LogCookAsync(client, doomed, keeperEntry.Id);
+        (await client.DeleteAsync($"/recipes/{doomed}")).EnsureSuccessStatusCode();
+
+        // keeperEntry's own recipe is still alive, so it contributes a real part — and that
+        // part's group must still resolve: the cook row against it exists regardless of what
+        // its own RecipeId's recipe currently is.
         Assert.True((await GetWeekAsync(client, WeekStart)).Groups.Single().ResolvedByCooking);
     }
 

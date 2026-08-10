@@ -409,22 +409,23 @@ public class ShoppingListService : IShoppingListService
         // to an INNER JOIN and a soft-deleted recipe would silently stop its cook counting —
         // on the hot path, with nothing on screen to explain it.
         //
-        // This is a STRUCTURAL guard, not one a test through this projection can observe, and
-        // that is deliberate rather than a gap: HydratePlanWeekAsync already drops an entry
-        // whose recipe is soft-deleted before `parts` is built (parts exist only for entries
-        // passing recipes.ContainsKey(...)), so such an entry is never a group's contributor
-        // here regardless of whether THIS query joins Recipes or not. The one state that would
-        // make the join observable — a CookLog row whose RecipeId is soft-deleted while its
-        // MealPlanEntryId's recipe is still alive — is not reachable through the app: swapping
-        // a plan entry's recipe deletes the old entry and SetNulls the CookLog's link, it does
-        // not repoint RecipeId at a dead row. A test built to exercise that state would have to
-        // write it directly to the db, which tests fiction rather than a reachable bug.
+        // This IS a pinned invariant, not a hope: LogAsync accepts any (recipeId,
+        // mealPlanEntryId) pair where the recipe is visible and the entry is the caller's own
+        // — it never checks that recipeId names THAT entry's own recipe (see
+        // CookLogService.LogAsync / LogCookRequestValidator). That gap makes it reachable over
+        // plain HTTP to log a cook against a live entry under a DIFFERENT, later-deleted
+        // recipe — the CookLog row then points at a dead recipe while the entry's own recipe,
+        // and its part, are still alive. A_cook_whose_recipe_was_soft_deleted_still_counts_
+        // toward_resolution builds exactly that and would fail the moment this query starts
+        // reaching through cl.Recipe.
         //
-        // So: hold this by READING the code, not by finding a test that would fail without it.
-        // If you "simplify" this into cl.Recipe.Title or similar and every test still passes,
-        // that is not proof it is safe — it is proof no test here CAN catch this class of
-        // regression. Verify by re-reading this comment and HydratePlanWeekAsync's own comment
-        // on the same hazard, not by running the suite.
+        // (A soft-deleted recipe on the entry's OWN side is a different, narrower case:
+        // HydratePlanWeekAsync already drops such an entry before `parts` is built — parts
+        // exist only for entries passing recipes.ContainsKey(...) — so it never becomes a
+        // group's contributor at all, join or no join. That is why
+        // A_cooked_recipe_that_is_soft_deleted_still_reports_its_cook, which only exercises
+        // that narrower case, cannot distinguish the join from the subquery; it is not this
+        // query's regression test — see its own comment.)
         var cookedEntryIds = (await _db.CookLogs
             .Where(cl => cl.UserId == userId
                       && cl.MealPlanEntryId != null
