@@ -184,11 +184,86 @@ public record ShoppingListGroupResponse(
     // See ShoppingAisles for the map and the walk order Groups are already sorted into.
     string Aisle);
 
+/// <summary>
+/// Trust rework (task 4): one entry per hidden group, so a caller can see WHAT a hide is
+/// eating rather than just noticing a total looks short. Key/DisplayName mirror
+/// ShoppingListGroupResponse's own — the display name is computed the same way
+/// (IngredientKey.DisplayNameFor over the group's raw names) so a re-surfaced group reads
+/// identically to how it read while hidden.
+///
+/// <c>IsPurchased</c> carries the hidden group's TICK, and it is load-bearing rather than
+/// informational: the empty state's Restore button sends an explicit full set of both flags
+/// (<c>isSuppressed: false</c> "preserving isPurchased", spec §3.1), and without the flag on
+/// the wire the client had nothing to preserve and hard-coded false — so restoring an
+/// ingredient you had already bought silently untick'd it and you bought it twice. A mark is
+/// always an explicit full set of BOTH flags; this is the read half of that contract.
+/// Appended last, per this file's convention, so existing positional constructions keep
+/// compiling.
+/// </summary>
+public record ShoppingListHiddenItemResponse(string Key, string DisplayName, bool IsPurchased);
+
+/// <summary>
+/// A planned meal whose recipe currently carries zero ingredient lines — it contributes
+/// nothing to any group, which would otherwise look identical to "nothing planned that
+/// meal". DishTitle/Date/Meal mirror ShoppingListPartResponse's own fields for a planned
+/// (non-manual) row.
+/// </summary>
+public record ShoppingListSilentMealResponse(string DishTitle, DateTime Date, MealType Meal);
+
+/// <summary>
+/// Trust rework (task 4): the three reasons an ingredient a caller expects can be missing
+/// from the list without the list being wrong. Always present, even on an empty week —
+/// see ProjectWeekAsync, which runs unconditionally off the shared HydratePlanWeekAsync
+/// (empty for a week with no plan) so every path returns an object here rather than null.
+/// </summary>
+public record ShoppingListWeekDiagnosticsResponse(
+    IReadOnlyList<ShoppingListHiddenItemResponse> HiddenItems,
+    IReadOnlyList<ShoppingListSilentMealResponse> MealsWithoutIngredients,
+    int UnavailableRecipeCount);
+
 public record ShoppingListWeekResponse(
     DateTime WeekStartDate,
     IReadOnlyList<ShoppingListGroupResponse> Groups,
     int PurchasedCount,
-    int TotalCount);
+    int TotalCount,
+    // Appended last, per this file's convention, so existing positional constructions keep
+    // compiling.
+    ShoppingListWeekDiagnosticsResponse Diagnostics);
+
+/// <summary>
+/// Trust rework (task 5): one entry per group last week left unbought, surfaced ONCE on the
+/// current week so debt is carried forward instead of living forever in a scope=All view.
+/// Key/DisplayName/Origin/ManualItemId mirror ShoppingListGroupResponse's own.
+///
+/// RemainingDisplay is ALL of the group's totals' Displays joined by " + " ("300 g + 2 cups"),
+/// falling back to the group's own first PART's Quantity when there is no total. Every total,
+/// not just the first: a group carries one total per summation BUCKET (see
+/// ShoppingListTotalResponse), and mass and volume legitimately fail to collapse without a
+/// density — reporting only the first meant an ingredient owed as "300 g" AND "2 cups" carried
+/// forward as "300 g" alone, and the user under-bought.
+///
+/// That fallback is what makes a Manual item
+/// carry its own free text ("a couple of bags") here — a manual group never has a Total (its
+/// quantity is a note to self, not a measurement), so without the fallback this was always
+/// null for one, and the client's carry-forward action sends it straight through as the new
+/// manual row's Quantity — an empty/null string 400s against
+/// AddManualShoppingListItemRequestValidator's NotEmpty rule. A Derived, imprecise-only group
+/// (a pinch, a dash — see ShoppingListService.SumWithinDimensions) falls back the same way, to
+/// its raw "to taste"-style text. It is still null only if the group's Parts list is itself
+/// empty, which does not happen for a well-formed group of either origin.
+/// </summary>
+public record ShoppingListCarryoverItemResponse(
+    string Key, string DisplayName, string? RemainingDisplay,
+    ShoppingListGroupOrigin Origin, Guid? ManualItemId);
+
+/// <summary>
+/// Trust rework (task 5): last week's unbought groups, named so a caller can see WHAT is
+/// being carried rather than just a count. Null on ShoppingListResponse — not an empty
+/// object — when the previous week owes nothing; a frontend banner keys off null to decide
+/// whether to render at all.
+/// </summary>
+public record ShoppingListCarryoverResponse(
+    DateTime WeekStartDate, IReadOnlyList<ShoppingListCarryoverItemResponse> Items);
 
 /// <summary>
 /// OrphanedPurchasedNames carries display names for ticks whose group no longer exists —
@@ -197,7 +272,10 @@ public record ShoppingListWeekResponse(
 /// </summary>
 public record ShoppingListResponse(
     IReadOnlyList<ShoppingListWeekResponse> Weeks,
-    IReadOnlyList<string> OrphanedPurchasedNames);
+    IReadOnlyList<string> OrphanedPurchasedNames,
+    // Appended last, per this file's convention, so existing positional constructions keep
+    // compiling.
+    ShoppingListCarryoverResponse? Carryover);
 
 /// <summary>Explicit full set of both flags — idempotent by construction, like the old PATCH.</summary>
 public record SetShoppingListMarkRequest(DateTime WeekStartDate, string Key, bool IsPurchased, bool IsSuppressed);

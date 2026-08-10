@@ -27,5 +27,13 @@ public class ShoppingListMark
     public bool IsPurchased { get; set; }
     public bool IsSuppressed { get; set; }
 
+    /// <summary>
+    /// The plan entries feeding this key when the hide was written (trust rework). Null on
+    /// pure purchase ticks and on rows from before the rework. A hide applies only while
+    /// the group's current contributors are a subset of this snapshot — a meal added or
+    /// re-added afterwards is outside it, and the group renders again.
+    /// </summary>
+    public List<Guid>? SuppressedEntryIds { get; set; }
+
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

@@ -6,6 +6,7 @@ using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Domain.Entities;
+using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.MealPlanning;
@@ -57,8 +58,124 @@ public class ShoppingListService : IShoppingListService
                 .ToList();
         }
 
-        return new ShoppingListResponse(projected, OrphanedPurchasedNames(marks, projected));
+        // Carry-forward (trust rework): last week's unbought debt, surfaced ONCE on the
+        // current week instead of living forever in scope=All. Projected transiently and
+        // guarded by an existence check, so users with no history pay one cheap query.
+        //
+        // scope=Week ONLY. The carry-forward banner is a WEEK-SURFACE AFFORDANCE — the client
+        // renders it under `scope === 'Week' && sameWeek(viewedWeek, currentWeek)`, because
+        // under scope=All last week is already on the page as its own block and a banner
+        // naming the same rows beside them would be the debt shown twice. Computing it under
+        // All was therefore pure waste, and worse than it looks: ResolveAllWeeksAsync picks
+        // its weeks by the same two predicates as WeekHasAnythingAsync, so the previous week
+        // is missing from `projected` only when it was PRUNED for being fully purchased —
+        // exactly the case that then paid a full redundant re-projection to conclude the
+        // carryover is null.
+        ShoppingListCarryoverResponse? carryover = null;
+        var currentWeek = CurrentWeekStart();
+        if (scope == ShoppingListScope.Week && weeks.Contains(currentWeek))
+        {
+            // Always a transient projection now, never a reuse of `projected`: under
+            // scope=Week `projected` holds exactly the ONE requested week, and reaching here
+            // means that week IS the current one — so the previous week is by construction
+            // not in the list. (The reuse lookup only ever had a candidate under scope=All,
+            // which no longer gets here.)
+            var previousWeek = currentWeek.AddDays(-7);
+            ShoppingListWeekResponse? previous = null;
+            if (await WeekHasAnythingAsync(previousWeek, userId, cancellationToken))
+            {
+                var previousMarks = await _db.ShoppingListMarks
+                    .Where(m => m.UserId == userId && m.WeekStartDate == previousWeek)
+                    .ToListAsync(cancellationToken);
+                previous = await ProjectWeekAsync(previousWeek, userId, previousMarks, cancellationToken);
+            }
+
+            var items = (previous?.Groups ?? [])
+                .Where(g => !g.IsPurchased)
+                .Select(g => new ShoppingListCarryoverItemResponse(
+                    g.Key, g.DisplayName,
+                    // EVERY total, joined — not just the first. A group carries one total per
+                    // summation BUCKET (see SumWithinDimensions), and mass and volume stay
+                    // separate whenever the ingredient has no density: an ingredient owed as
+                    // "300 g" AND "2 cups" used to carry forward as "300 g" alone, so the
+                    // shopper under-bought the rest. Joining says what is actually owed, in
+                    // the same two-total voice the live row already shows.
+                    //
+                    // The FALLBACK is unchanged and load-bearing. Manual groups NEVER carry a
+                    // Total (see ShoppingListGroupResponse.Totals' own doc) — a manual row's
+                    // quantity is free text, not a measurement — so the totals expression alone
+                    // was always null for one, and the client's manual carry-forward 400'd
+                    // against AddManualShoppingListItemRequestValidator's NotEmpty rule on
+                    // Quantity. Falling back to the group's own first part's Quantity recovers
+                    // exactly that free text ("a couple of bags") for a manual item, and for a
+                    // Derived, imprecise-only group (a pinch, a dash) recovers its raw
+                    // "to taste"-style text instead of losing the quantity outright. Totals is
+                    // empty in precisely the cases the fallback exists for, so the two never
+                    // compete.
+                    g.Totals.Count > 0
+                        ? JoinTotalsForCarryover(g.Totals)
+                        : g.Parts.FirstOrDefault()?.Quantity,
+                    g.Origin, g.ManualItemId))
+                .ToList();
+            if (items.Count > 0) carryover = new ShoppingListCarryoverResponse(previousWeek, items);
+        }
+
+        return new ShoppingListResponse(projected, OrphanedPurchasedNames(marks, projected), carryover);
     }
+
+    // The manual "Carry" action re-POSTs a carryover item's RemainingDisplay verbatim as
+    // AddManualShoppingListItemRequest.Quantity — named here so the coupling to
+    // AddManualShoppingListItemRequestValidator's cap is grep-able from either side.
+    private const int ManualQuantityMaxLength = 50;
+
+    /// <summary>
+    /// Joins a carryover group's totals for RemainingDisplay, clamped to the 50-character cap
+    /// <c>AddManualShoppingListItemRequestValidator</c> enforces on <c>Quantity</c>
+    /// (<c>NotEmpty().MaximumLength(50)</c>). A manual "Carry" action re-POSTs this string
+    /// verbatim as that field, so a value over the cap 400s the add — and via Carry-all, the
+    /// walk catches the 400 and stops, stranding every remaining item behind an error banner.
+    ///
+    /// Most groups fit the full join untouched ("300 g + 480 ml"). An ingredient split across
+    /// both convertible dimensions AND every Count unit (Units.cs: Piece/Clove/Slice/Can/
+    /// Package/Bunch) can reach eight totals and overflow. When it does, this keeps as many
+    /// WHOLE totals as fit alongside a trailing " + …" marker — never a token cut mid-word
+    /// ("... + 2 bun" would misstate what is owed) — so a shopper reads a truthful, if
+    /// partial, figure and knows there is more. The first total alone is always short enough
+    /// to leave room for the marker in practice (see Units.Format — no single Display comes
+    /// close to 50 characters), so the empty-kept branch below is an unreached defensive floor,
+    /// not a path any real ingredient can take. It still must never be empty, because an empty
+    /// Quantity 400s the same NotEmpty rule from the other direction.
+    /// </summary>
+    private static string JoinTotalsForCarryover(IReadOnlyList<ShoppingListTotalResponse> totals)
+    {
+        var joined = string.Join(" + ", totals.Select(t => t.Display));
+        if (joined.Length <= ManualQuantityMaxLength) return joined;
+
+        const string marker = " + …";
+        var kept = new List<string>();
+        var length = 0;
+        foreach (var total in totals)
+        {
+            var addition = (kept.Count == 0 ? 0 : 3) + total.Display.Length; // " + " between entries
+            if (length + addition + marker.Length > ManualQuantityMaxLength) break;
+            kept.Add(total.Display);
+            length += addition;
+        }
+
+        return kept.Count > 0
+            ? string.Join(" + ", kept) + marker
+            : totals[0].Display[..Math.Min(totals[0].Display.Length, ManualQuantityMaxLength)];
+    }
+
+    /// <summary>
+    /// Existence guard for the carry-forward projection above: whether the previous week has
+    /// ANY plan or manual row at all, before paying for a full transient ProjectWeekAsync. Users
+    /// with no history (the common case for a brand-new week) hit this one cheap query instead.
+    /// </summary>
+    private async Task<bool> WeekHasAnythingAsync(DateTime weekStart, Guid userId, CancellationToken ct) =>
+        await _db.MealPlans.AnyAsync(p => p.UserId == userId && p.WeekStartDate == weekStart, ct)
+        || await _db.ShoppingListItems.AnyAsync(
+            i => i.UserId == userId && i.MealPlanId == null && i.WeekStartDate == weekStart, ct);
 
     public async Task<ShoppingListItemResponse> AddManualAsync(
         AddManualShoppingListItemRequest request, Guid userId, CancellationToken cancellationToken = default)
@@ -108,10 +225,16 @@ public class ShoppingListService : IShoppingListService
             m => m.UserId == userId && m.WeekStartDate == request.WeekStartDate && m.Key == request.Key,
             cancellationToken);
 
+        // A hide's snapshot is its expiry condition; a pure tick carries none.
+        var snapshot = request.IsSuppressed
+            ? await ContributingEntryIdsAsync(request.WeekStartDate, userId, request.Key, cancellationToken)
+            : null;
+
         if (existing is not null)
         {
             existing.IsPurchased = request.IsPurchased;
             existing.IsSuppressed = request.IsSuppressed;
+            existing.SuppressedEntryIds = snapshot;
             existing.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(cancellationToken);
             return MealPlanResult<bool>.Success(true);
@@ -125,6 +248,7 @@ public class ShoppingListService : IShoppingListService
             Key = request.Key,
             IsPurchased = request.IsPurchased,
             IsSuppressed = request.IsSuppressed,
+            SuppressedEntryIds = snapshot,
             UpdatedAt = DateTime.UtcNow,
         });
 
@@ -142,6 +266,7 @@ public class ShoppingListService : IShoppingListService
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(m => m.IsPurchased, request.IsPurchased)
                     .SetProperty(m => m.IsSuppressed, request.IsSuppressed)
+                    .SetProperty(m => m.SuppressedEntryIds, snapshot)
                     .SetProperty(m => m.UpdatedAt, DateTime.UtcNow),
                     cancellationToken);
         }
@@ -149,15 +274,116 @@ public class ShoppingListService : IShoppingListService
         return MealPlanResult<bool>.Success(true);
     }
 
-    // --- projection -----------------------------------------------------------------------
+    /// <summary>
+    /// The group KEY one recipe line resolves to — catalogue id when the line resolved,
+    /// the name's key when it did not. The single source for write path and projection:
+    /// SetMarkAsync snapshots by it and ProjectWeekAsync groups by it, so they cannot drift.
+    /// </summary>
+    private static string KeyOf(RecipeIngredient ingredient) =>
+        ingredient.IngredientId is Guid resolved
+            ? ShoppingListKeys.ForIngredient(resolved)
+            : IngredientKey.For(ingredient.Name);
 
-    private async Task<ShoppingListWeekResponse> ProjectWeekAsync(
-        DateTime weekStart, Guid userId, List<ShoppingListMark> marks, CancellationToken ct)
+    /// <summary>
+    /// The ids of the week's plan entries currently contributing `key` — the projection's
+    /// first half re-run for ONE key, at hide time. The snapshot is the hide's whole world:
+    /// contributors outside it (added later) render the group again.
+    ///
+    /// It reads its entries and recipes through the SAME hydrate the projection uses (spec
+    /// §1's "shared private helper"), which is what makes the writer's idea of a contributor
+    /// and the reader's identical by construction rather than by coincidence. They had drifted
+    /// apart once already: the projection's entries query was an INNER JOIN against Recipes,
+    /// so a soft-deleted recipe's entry silently vanished from the reader's live set while
+    /// this method still counted it.
+    /// </summary>
+    private async Task<List<Guid>> ContributingEntryIdsAsync(
+        DateTime weekStart, Guid userId, string key, CancellationToken ct)
+    {
+        var (entries, recipes) = await HydratePlanWeekAsync(weekStart, userId, ct);
+
+        return entries
+            .Where(e => recipes.TryGetValue(e.RecipeId, out var recipe)
+                        && recipe.Ingredients.Any(i => KeyOf(i) == key))
+            .Select(e => e.EntryId)
+            .ToList();
+    }
+
+    /// <summary>
+    /// One plan entry as both halves of this file read it — the entry itself, and enough of
+    /// its position in the week to place it. Ingredients are NOT here: the jsonb collection
+    /// cannot ride the projection, so the recipes come back in the second query.
+    /// </summary>
+    private sealed record PlanEntryRow(Guid EntryId, DayOfWeek Day, MealType Meal, Guid RecipeId);
+
+    /// <summary>
+    /// The week's plan entries in (day, meal) order, and the recipes they reference — the
+    /// hydrate SHARED by the projection (ProjectWeekAsync) and the hide snapshot
+    /// (ContributingEntryIdsAsync), so the two cannot drift about what "a contributing entry"
+    /// means. Empty for a week with no plan, and it costs exactly one query to find that out.
+    ///
+    /// Per ENTRY, not per distinct recipe — two dinners need two dinners' worth.
+    ///
+    /// The (day, meal) sort runs CLIENT-side, deliberately. MealType is persisted via
+    /// .HasConversion&lt;string&gt;(), so a DB-side ORDER BY sorts it ALPHABETICALLY —
+    /// Breakfast, Dessert, Dinner, Lunch, Snack — and a day's Parts would read
+    /// Breakfast → Dinner → Lunch. Sorting the materialised list compares the enum's
+    /// underlying value instead, which is declaration order (the meal order a human expects).
+    /// MealPlanService's own queries have the same latent quirk; it is invisible there because
+    /// those results are keyed by day/meal rather than read as a sequence.
+    ///
+    /// The DAY sort goes through DayOffset rather than the enum, and the shop redesign is what
+    /// made that matter. System.DayOfWeek numbers Sunday 0, so ordering by the enum in a
+    /// MONDAY-start week put Sunday's dishes first — harmless while the order was only a
+    /// display sequence, wrong now that the FIRST part is the row's owning dish ("bought once,
+    /// under the first dish of the week that needs it"). A Sunday roast would have owned every
+    /// ingredient it shared with Monday's dinner.
+    ///
+    /// The entries query is a plain SELECT off MealPlanEntries, deliberately NOT joined to
+    /// _db.Recipes: the join used to double as an existence check, but Recipes carries a global
+    /// HasQueryFilter(r => !r.IsDeleted) — a soft-deleted recipe's entry would fall out of the
+    /// join silently, and ProjectWeekAsync's UnavailableRecipeCount needs exactly that entry to
+    /// still be here to count it. Callers that want only entries with a live recipe filter on
+    /// `recipes.ContainsKey` themselves, which is the honest place for that decision.
+    /// </summary>
+    private async Task<(List<PlanEntryRow> Entries, Dictionary<Guid, Recipe> Recipes)>
+        HydratePlanWeekAsync(DateTime weekStart, Guid userId, CancellationToken ct)
     {
         var plan = await _db.MealPlans
             .Where(p => p.UserId == userId && p.WeekStartDate == weekStart)
             .Select(p => new { p.Id })
             .FirstOrDefaultAsync(ct);
+        if (plan is null) return ([], []);
+
+        var entries = (await _db.MealPlanEntries
+            .Where(e => e.MealPlanId == plan.Id)
+            .Select(e => new { EntryId = e.Id, e.DayOfWeek, e.MealType, e.RecipeId })
+            .ToListAsync(ct))
+            .Select(e => new PlanEntryRow(e.EntryId, e.DayOfWeek, e.MealType, e.RecipeId))
+            .OrderBy(e => DayOffset(e.Day))
+            .ThenBy(e => e.Meal)
+            .ToList();
+
+        // Two-query hydrate: the jsonb Ingredients collection cannot ride the anonymous
+        // projection above, so the full recipe rows come back separately (once per DISTINCT
+        // recipe, then expanded per entry).
+        var recipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
+        var recipes = (await _db.Recipes.Where(r => recipeIds.Contains(r.Id)).ToListAsync(ct))
+            .ToDictionary(r => r.Id);
+
+        return (entries, recipes);
+    }
+
+    // --- projection -----------------------------------------------------------------------
+
+    private async Task<ShoppingListWeekResponse> ProjectWeekAsync(
+        DateTime weekStart, Guid userId, List<ShoppingListMark> marks, CancellationToken ct)
+    {
+        // The SHARED hydrate — the same one SetMarkAsync's ContributingEntryIdsAsync reads
+        // through, which is what stops the writer's and the reader's idea of "an entry
+        // contributing this key" from drifting apart (spec §1). It is empty, at the cost of a
+        // single query, for a week with no plan — so everything below runs unguarded and the
+        // no-plan path still returns a Diagnostics object (empty/zero) rather than null.
+        var (entries, recipes) = await HydratePlanWeekAsync(weekStart, userId, ct);
 
         // Quantity and Unit are carried as VALUES now, not as a pre-rendered string (stream
         // G). The display string is derived at the end; keeping the number means the group
@@ -165,63 +391,46 @@ public class ShoppingListService : IShoppingListService
         // IngredientId rides along since slice G3: it decides the group's KEY (an id
         // beats a spelling) and unlocks the density that lets mass and volume merge.
         var parts = new List<ProjectedPart>();
+        var hiddenItems = new List<ShoppingListHiddenItemResponse>();
 
-        if (plan is not null)
+        // Every entry the plan still holds — INCLUDING one whose recipe was soft-deleted (see
+        // HydratePlanWeekAsync on why the entries query is not joined to Recipes). This is the
+        // set a hide's snapshot is intersected against below, so widening it here is what lets
+        // a hide survive a moderator soft-deleting and restoring one of its contributors.
+        var liveEntryIds = entries.Select(e => e.EntryId).ToHashSet();
+
+        // Diagnostics: run on the UNFILTERED entries list, before the part-building loop
+        // below filters to `recipes.ContainsKey(...)`. Getting this backwards would make
+        // UnavailableRecipeCount always zero — the very thing it exists to report.
+        var silentMeals = entries
+            .Where(e => recipes.TryGetValue(e.RecipeId, out var r) && r.Ingredients.Count == 0)
+            .Select(e => new ShoppingListSilentMealResponse(
+                recipes[e.RecipeId].Title,
+                weekStart.AddDays(DayOffset(e.Day)),
+                e.Meal))
+            .ToList();
+        var unavailableCount = entries.Count(e => !recipes.ContainsKey(e.RecipeId));
+
+        foreach (var entry in entries.Where(e => recipes.ContainsKey(e.RecipeId)))
         {
-            // Per ENTRY, not per distinct recipe — two dinners need two dinners' worth.
-            //
-            // The (day, meal) sort runs CLIENT-side, deliberately. MealType is persisted via
-            // .HasConversion<string>(), so a DB-side ORDER BY sorts it ALPHABETICALLY —
-            // Breakfast, Dessert, Dinner, Lunch, Snack — and a day's Parts would read
-            // Breakfast → Dinner → Lunch. Sorting the materialised list compares the enum's
-            // underlying value instead, which is declaration order (the meal order a human
-            // expects). MealPlanService's own queries have the same latent quirk; it is
-            // invisible there because those results are keyed by day/meal rather than read as a
-            // sequence.
-            //
-            // The DAY sort goes through DayOffset rather than the enum, and the shop redesign
-            // is what made that matter. System.DayOfWeek numbers Sunday 0, so ordering by the
-            // enum in a MONDAY-start week put Sunday's dishes first — harmless while the order
-            // was only a display sequence, wrong now that the FIRST part is the row's owning
-            // dish ("bought once, under the first dish of the week that needs it"). A Sunday
-            // roast would have owned every ingredient it shared with Monday's dinner.
-            var entries = (await _db.MealPlanEntries
-                .Where(e => e.MealPlanId == plan.Id)
-                .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new { e.DayOfWeek, e.MealType, RecipeId = r.Id })
-                .ToListAsync(ct))
-                .OrderBy(e => DayOffset(e.DayOfWeek))
-                .ThenBy(e => e.MealType)
-                .ToList();
-
-            // Two-query hydrate: the jsonb Ingredients collection cannot ride the anonymous
-            // join projection above, so the full recipe rows come back separately (once per
-            // DISTINCT recipe, then expanded per entry).
-            var recipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
-            var recipes = (await _db.Recipes.Where(r => recipeIds.Contains(r.Id)).ToListAsync(ct))
-                .ToDictionary(r => r.Id);
-
-            foreach (var entry in entries.Where(e => recipes.ContainsKey(e.RecipeId)))
+            var recipe = recipes[entry.RecipeId];
+            foreach (var ingredient in recipe.Ingredients)
             {
-                var recipe = recipes[entry.RecipeId];
-                foreach (var ingredient in recipe.Ingredients)
-                {
-                    parts.Add(new ProjectedPart(
-                        // Slice G3: the catalogue id when the line resolved, the name's
-                        // key when it did not. "prawns" and "shrimp" become ONE row.
-                        ingredient.IngredientId is Guid resolved
-                            ? ShoppingListKeys.ForIngredient(resolved)
-                            : IngredientKey.For(ingredient.Name),
-                        ingredient.Name,
-                        ingredient.Quantity,
-                        ingredient.Unit,
-                        ingredient.IngredientId,
-                        recipe.Title,
-                        // The calendar date the entry sits on, not the day name: the client
-                        // renders "Mon" from it, and comparing dates is what orders the
-                        // owning dish first.
-                        weekStart.AddDays(DayOffset(entry.DayOfWeek)),
-                        entry.MealType));
-                }
+                parts.Add(new ProjectedPart(
+                    entry.EntryId,
+                    // Slice G3: the catalogue id when the line resolved, the name's
+                    // key when it did not. "prawns" and "shrimp" become ONE row.
+                    KeyOf(ingredient),
+                    ingredient.Name,
+                    ingredient.Quantity,
+                    ingredient.Unit,
+                    ingredient.IngredientId,
+                    recipe.Title,
+                    // The calendar date the entry sits on, not the day name: the client
+                    // renders "Mon" from it, and comparing dates is what orders the
+                    // owning dish first.
+                    weekStart.AddDays(DayOffset(entry.Day)),
+                    entry.Meal));
             }
         }
 
@@ -305,7 +514,19 @@ public class ShoppingListService : IShoppingListService
         foreach (var group in parts.GroupBy(p => p.Key, StringComparer.Ordinal))
         {
             markByKey.TryGetValue(group.Key, out var mark);
-            if (mark?.IsSuppressed == true) continue;
+            if (HideApplies(mark, group))
+            {
+                // The mark's TICK rides along (spec §3.1): the empty state's Restore sends an
+                // explicit full set of both flags, so it needs the purchase state back or it
+                // has to invent one — and inventing `false` untick'd an ingredient the caller
+                // had already bought. HideApplies only returns true for a non-null mark, so
+                // the `?? false` is unreachable defence, not a real default.
+                hiddenItems.Add(new ShoppingListHiddenItemResponse(
+                    group.Key,
+                    IngredientKey.DisplayNameFor(group.Select(p => p.RawName)),
+                    mark?.IsPurchased ?? false));
+                continue;
+            }
 
             groups.Add(new ShoppingListGroupResponse(
                 group.Key,
@@ -344,6 +565,31 @@ public class ShoppingListService : IShoppingListService
                 ShoppingAisles.Other));
         }
 
+        // Dead hides: suppressed marks whose snapshot references nothing still planned
+        // (or no snapshot at all — pre-rework rows). Deleted on read, so the table
+        // self-cleans without a background job. Purchased marks are exempt: their hide
+        // can never re-apply once dead, but the tick must survive for when the
+        // ingredient returns. ExecuteDeleteAsync rather than RemoveRange+SaveChanges: a
+        // second overlapping read can already have deleted the same row (untracked, so
+        // there is no concurrency token to trip on), and that must be a silent no-op,
+        // not a DbUpdateConcurrencyException that 500s the read. The delete RE-ASSERTS the
+        // two conditions that made a mark dead rather than trusting the ids alone, because
+        // `marks` is a snapshot loaded many awaits earlier: a SetMarkAsync landing mid-request
+        // can have ticked or un-hidden one of these rows since, and that write must survive
+        // rather than be silently deleted by a read that never saw it.
+        var deadMarks = marks
+            .Where(m => m.WeekStartDate == weekStart && m.IsSuppressed && !m.IsPurchased)
+            .Where(m => m.SuppressedEntryIds is null || !m.SuppressedEntryIds.Any(liveEntryIds.Contains))
+            .ToList();
+        if (deadMarks.Count > 0)
+        {
+            var deadIds = deadMarks.Select(m => m.Id).ToList();
+            await _db.ShoppingListMarks
+                .Where(m => deadIds.Contains(m.Id) && m.IsSuppressed && !m.IsPurchased)
+                .ExecuteDeleteAsync(ct);
+            marks.RemoveAll(deadMarks.Contains);   // orphan banner must not see them either
+        }
+
         // Aisle WALK order, not alphabetical (shop redesign): the list is read while walking
         // a shop, so produce leads and drinks trail. Origin no longer needs its own sort —
         // manual rows are all in "Other", which ranks last by construction.
@@ -356,8 +602,20 @@ public class ShoppingListService : IShoppingListService
             weekStart,
             ordered,
             ordered.Count(g => g.IsPurchased),
-            ordered.Count);
+            ordered.Count,
+            new ShoppingListWeekDiagnosticsResponse(hiddenItems, silentMeals, unavailableCount));
     }
+
+    /// <summary>
+    /// Trust rework: a hide applies only while the group's CURRENT contributors are a
+    /// subset of the snapshot taken when it was written. A contributor outside the
+    /// snapshot — a meal added or re-added since — renders the group again. A null
+    /// snapshot (pre-rework mark) never holds. Stateless on purpose: if the newer meal
+    /// leaves again, the plan is back inside the snapshot and the hide re-arms.
+    /// </summary>
+    private static bool HideApplies(ShoppingListMark? mark, IEnumerable<ProjectedPart> group) =>
+        mark is { IsSuppressed: true, SuppressedEntryIds: not null }
+        && group.All(p => mark.SuppressedEntryIds.Contains(p.EntryId));
 
     /// <summary>
     /// One recipe line on its way into a group — the working shape of the projection, before
@@ -368,6 +626,7 @@ public class ShoppingListService : IShoppingListService
     /// can make safely.
     /// </summary>
     private sealed record ProjectedPart(
+        Guid EntryId,
         string Key,
         string RawName,
         decimal Quantity,
