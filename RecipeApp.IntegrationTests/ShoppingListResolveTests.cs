@@ -128,18 +128,22 @@ public class ShoppingListResolveTests(IntegrationTestFactory factory) : IClassFi
     [Fact]
     public async Task A_cooked_recipe_that_is_soft_deleted_still_reports_its_cook()
     {
-        // The EF query-filter proof. CookLog.Recipe is a REQUIRED navigation to a filtered
-        // entity; if the projection ever reaches through it, this entry stops resolving the
-        // moment its recipe is deleted — silently, on the shopping-list hot path.
+        // NOT a proof that the cookedEntryIds query avoids joining Recipes — this projection
+        // never builds a part for doomedEntry in the first place (HydratePlanWeekAsync drops
+        // its recipe before parts exist), so the group here is the keeper's alone regardless
+        // of whether that query joins or not. doomed is deliberately left UNCOOKED: the point
+        // is that a soft-deleted contributor neither blocks resolution nor counts toward it,
+        // which is what the assertion below actually pins. The no-join rule itself is a
+        // structural guard held by reading ShoppingListService.cs's own comment on the query —
+        // see that comment for why no test through this projection can observe it.
         var client = await factory.CreateAuthenticatedClientAsync();
         var keeper = await CreateRecipeWithIngredientAsync(client, "onion");
         var doomed = await CreateRecipeWithIngredientAsync(client, "onion");
         var planId = await CreatePlanAsync(client, WeekStart);
         var keeperEntry = await AddEntryAsync(client, planId, DayOfWeek.Monday, MealType.Dinner, keeper);
-        var doomedEntry = await AddEntryAsync(client, planId, DayOfWeek.Tuesday, MealType.Dinner, doomed);
+        await AddEntryAsync(client, planId, DayOfWeek.Tuesday, MealType.Dinner, doomed);   // deliberately never cooked
 
         await LogCookAsync(client, keeper, keeperEntry.Id);
-        await LogCookAsync(client, doomed, doomedEntry.Id);
         (await client.DeleteAsync($"/recipes/{doomed}")).EnsureSuccessStatusCode();
 
         // The deleted recipe's entry contributes no part, so the group is the keeper's alone
@@ -187,17 +191,24 @@ public class ShoppingListResolveTests(IntegrationTestFactory factory) : IClassFi
         var other = await CreateRecipeWithIngredientAsync(client, "onion");
         var planId = await CreatePlanAsync(client, WeekStart);
         var cooked = await AddEntryAsync(client, planId, DayOfWeek.Monday, MealType.Dinner, recipeId);
-        await AddEntryAsync(client, planId, DayOfWeek.Friday, MealType.Dinner, other);
+        var otherEntry = await AddEntryAsync(client, planId, DayOfWeek.Friday, MealType.Dinner, other);
         await LogCookAsync(client, recipeId, cooked.Id);
         Assert.False((await GetWeekAsync(client, WeekStart)).Groups.Single().ResolvedByCooking);
 
+        // Cook the SURVIVING contributor too, before the delete. Without this the post-delete
+        // assertion below would pass against a ResolvedByCooking stubbed to a constant false —
+        // it needs a remaining contributor that IS cooked for "resolves" to be a real signal
+        // that the group recomputed over what is left, rather than "stayed false".
+        await LogCookAsync(client, other, otherEntry.Id);
+
         (await client.DeleteAsync($"/meal-plans/{planId}/entries/{cooked.Id}")).EnsureSuccessStatusCode();
 
-        // Only the uncooked contributor is left, so the group still does not resolve — and the
-        // cook survives the slot's removal.
-        Assert.False((await GetWeekAsync(client, WeekStart)).Groups.Single().ResolvedByCooking);
+        // Only the OTHER contributor is left, and it is cooked, so the group now resolves —
+        // the recomputation this test is named for. The first cook survives the slot's
+        // removal regardless (SetNull, not cascade).
+        Assert.True((await GetWeekAsync(client, WeekStart)).Groups.Single().ResolvedByCooking);
         var log = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
-        Assert.Null(Assert.Single(log!.Items).MealPlanEntryId);
+        Assert.Null(Assert.Single(log!.Items, i => i.RecipeId == recipeId).MealPlanEntryId);
 
         // There is no GET for the cooked aggregate (CookedRecipeResponse only comes back from
         // the mutating POST/DELETE /recipes/{id}/cooked, per CookLogEndpointsTests), so read it

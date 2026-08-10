@@ -407,8 +407,24 @@ public class ShoppingListService : IShoppingListService
         // Selects the Guid and NOTHING ELSE. CookLog.Recipe is a required navigation to an
         // entity carrying the global !IsDeleted filter, so reaching through it would compile
         // to an INNER JOIN and a soft-deleted recipe would silently stop its cook counting —
-        // on the hot path, with nothing on screen to explain it. Pinned by
-        // A_cooked_recipe_that_is_soft_deleted_still_reports_its_cook.
+        // on the hot path, with nothing on screen to explain it.
+        //
+        // This is a STRUCTURAL guard, not one a test through this projection can observe, and
+        // that is deliberate rather than a gap: HydratePlanWeekAsync already drops an entry
+        // whose recipe is soft-deleted before `parts` is built (parts exist only for entries
+        // passing recipes.ContainsKey(...)), so such an entry is never a group's contributor
+        // here regardless of whether THIS query joins Recipes or not. The one state that would
+        // make the join observable — a CookLog row whose RecipeId is soft-deleted while its
+        // MealPlanEntryId's recipe is still alive — is not reachable through the app: swapping
+        // a plan entry's recipe deletes the old entry and SetNulls the CookLog's link, it does
+        // not repoint RecipeId at a dead row. A test built to exercise that state would have to
+        // write it directly to the db, which tests fiction rather than a reachable bug.
+        //
+        // So: hold this by READING the code, not by finding a test that would fail without it.
+        // If you "simplify" this into cl.Recipe.Title or similar and every test still passes,
+        // that is not proof it is safe — it is proof no test here CAN catch this class of
+        // regression. Verify by re-reading this comment and HydratePlanWeekAsync's own comment
+        // on the same hazard, not by running the suite.
         var cookedEntryIds = (await _db.CookLogs
             .Where(cl => cl.UserId == userId
                       && cl.MealPlanEntryId != null
