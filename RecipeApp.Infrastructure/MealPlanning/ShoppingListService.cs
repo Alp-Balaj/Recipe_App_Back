@@ -113,7 +113,7 @@ public class ShoppingListService : IShoppingListService
                     // empty in precisely the cases the fallback exists for, so the two never
                     // compete.
                     g.Totals.Count > 0
-                        ? string.Join(" + ", g.Totals.Select(t => t.Display))
+                        ? JoinTotalsForCarryover(g.Totals)
                         : g.Parts.FirstOrDefault()?.Quantity,
                     g.Origin, g.ManualItemId))
                 .ToList();
@@ -121,6 +121,50 @@ public class ShoppingListService : IShoppingListService
         }
 
         return new ShoppingListResponse(projected, OrphanedPurchasedNames(marks, projected), carryover);
+    }
+
+    // The manual "Carry" action re-POSTs a carryover item's RemainingDisplay verbatim as
+    // AddManualShoppingListItemRequest.Quantity — named here so the coupling to
+    // AddManualShoppingListItemRequestValidator's cap is grep-able from either side.
+    private const int ManualQuantityMaxLength = 50;
+
+    /// <summary>
+    /// Joins a carryover group's totals for RemainingDisplay, clamped to the 50-character cap
+    /// <c>AddManualShoppingListItemRequestValidator</c> enforces on <c>Quantity</c>
+    /// (<c>NotEmpty().MaximumLength(50)</c>). A manual "Carry" action re-POSTs this string
+    /// verbatim as that field, so a value over the cap 400s the add — and via Carry-all, the
+    /// walk catches the 400 and stops, stranding every remaining item behind an error banner.
+    ///
+    /// Most groups fit the full join untouched ("300 g + 480 ml"). An ingredient split across
+    /// both convertible dimensions AND every Count unit (Units.cs: Piece/Clove/Slice/Can/
+    /// Package/Bunch) can reach eight totals and overflow. When it does, this keeps as many
+    /// WHOLE totals as fit alongside a trailing " + …" marker — never a token cut mid-word
+    /// ("... + 2 bun" would misstate what is owed) — so a shopper reads a truthful, if
+    /// partial, figure and knows there is more. The first total alone is always short enough
+    /// to leave room for the marker in practice (see Units.Format — no single Display comes
+    /// close to 50 characters), so the empty-kept branch below is an unreached defensive floor,
+    /// not a path any real ingredient can take. It still must never be empty, because an empty
+    /// Quantity 400s the same NotEmpty rule from the other direction.
+    /// </summary>
+    private static string JoinTotalsForCarryover(IReadOnlyList<ShoppingListTotalResponse> totals)
+    {
+        var joined = string.Join(" + ", totals.Select(t => t.Display));
+        if (joined.Length <= ManualQuantityMaxLength) return joined;
+
+        const string marker = " + …";
+        var kept = new List<string>();
+        var length = 0;
+        foreach (var total in totals)
+        {
+            var addition = (kept.Count == 0 ? 0 : 3) + total.Display.Length; // " + " between entries
+            if (length + addition + marker.Length > ManualQuantityMaxLength) break;
+            kept.Add(total.Display);
+            length += addition;
+        }
+
+        return kept.Count > 0
+            ? string.Join(" + ", kept) + marker
+            : totals[0].Display[..Math.Min(totals[0].Display.Length, ManualQuantityMaxLength)];
     }
 
     /// <summary>

@@ -415,6 +415,52 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         Assert.Equal("300 g + 480 ml", item.RemainingDisplay);
     }
 
+    // Regression: joining EVERY total (the fix above) can overflow
+    // AddManualShoppingListItemRequestValidator's Quantity cap (NotEmpty, MaximumLength(50)),
+    // because the client's manual "Carry" action re-POSTs RemainingDisplay verbatim as that
+    // field. One ingredient split across both convertible dimensions AND all six Count units
+    // (Units.cs: Piece/Clove/Slice/Can/Package/Bunch) reaches eight totals — the widest a group
+    // can get — which this fixture builds via eight ingredient lines on one recipe, all under
+    // the same name so they land in one group. The un-clamped join is 73 characters (verified
+    // by removing JoinTotalsForCarryover's clamp and rerunning: the assertion below then fails
+    // with "Actual: 73"), so this genuinely exercises the overflow path rather than coincidentally
+    // fitting under the cap.
+    [Fact]
+    public async Task Carryover_clamps_a_joined_total_that_overflows_the_manual_quantity_cap()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var lastWeek = CurrentMondayUtc().AddDays(-7);
+
+        var feast = await CreateRecipeAsync(client, "Feast",
+        [
+            ("Overflowpepper", 400m, UnitOfMeasure.Gram),
+            ("Overflowpepper", 2m, UnitOfMeasure.Cup),
+            ("Overflowpepper", 3m, UnitOfMeasure.Piece),
+            ("Overflowpepper", 2m, UnitOfMeasure.Clove),
+            ("Overflowpepper", 4m, UnitOfMeasure.Slice),
+            ("Overflowpepper", 2m, UnitOfMeasure.Can),
+            ("Overflowpepper", 1m, UnitOfMeasure.Package),
+            ("Overflowpepper", 2m, UnitOfMeasure.Bunch),
+        ]);
+        var planId = await CreatePlanAsync(client, lastWeek);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", feast);
+
+        var list = await client.GetFromJsonAsync<ShoppingListResponse>(
+            $"/shopping-list?weekStart={CurrentMondayUtc():o}&scope=Week", TestJson.Options);
+
+        Assert.NotNull(list!.Carryover);
+        var item = Assert.Single(list.Carryover!.Items, i => i.Key == "overflowpepper");
+        Assert.False(string.IsNullOrEmpty(item.RemainingDisplay));
+        Assert.True(
+            item.RemainingDisplay!.Length <= 50,
+            $"RemainingDisplay must fit AddManualShoppingListItemRequestValidator's 50-char cap, was {item.RemainingDisplay.Length}: \"{item.RemainingDisplay}\"");
+        // Whole totals up to the point the marker no longer fits, then an honest "…" — never a
+        // cut mid-word like "... + 2 bun". Totals are ordered Mass, Volume, then Count by unit
+        // (Piece, Clove, Slice, Can, Package, Bunch — see SumWithinDimensions), so Can/Package/
+        // Bunch are the three dropped here.
+        Assert.Equal("400 g + 480 ml + 3 pcs + 2 cloves + 4 slices + …", item.RemainingDisplay);
+    }
+
     // Final review, fix 6 (spec §5.7): "fully-shopped previous week → null". The existing null
     // test exits early at WeekHasAnythingAsync, so the `items.Count > 0` guard — the only thing
     // standing between the client and an EMPTY-object banner ("Last week had 0 unbought

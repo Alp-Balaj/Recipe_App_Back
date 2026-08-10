@@ -213,8 +213,8 @@ public record ShoppingListSilentMealResponse(string DishTitle, DateTime Date, Me
 /// <summary>
 /// Trust rework (task 4): the three reasons an ingredient a caller expects can be missing
 /// from the list without the list being wrong. Always present, even on an empty week —
-/// see ProjectWeekAsync, which declares empty defaults before its `plan is not null` branch
-/// so every path returns an object here rather than null.
+/// see ProjectWeekAsync, which runs unconditionally off the shared HydratePlanWeekAsync
+/// (empty for a week with no plan) so every path returns an object here rather than null.
 /// </summary>
 public record ShoppingListWeekDiagnosticsResponse(
     IReadOnlyList<ShoppingListHiddenItemResponse> HiddenItems,
