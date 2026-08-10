@@ -402,19 +402,20 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         await LogCookAsync(client, recipe.Id, entry.Id);
 
         // Force the drift the floor exists for: an aggregate whose TimesCooked is already
-        // BELOW the row count this un-cook is about to remove. This state IS reachable over
-        // plain HTTP today — cook via entry A, DELETE /recipes/{id}/cooked (ClearCookedAsync
-        // deletes the CookedRecipe row but leaves A's CookLog row behind), cook again via
-        // entry B (recreates the aggregate at TimesCooked = 1), un-cook A, un-cook B — see
-        // UncookEntryAsync's comment. Going straight at ApplicationDbContext here instead of
-        // building that HTTP sequence is a deliberate choice, not a shortcut: Task 3 of this
-        // plan closes that exact path by making ClearCookedAsync delete the caller's CookLog
-        // rows too, and a test wired to it would pass now and fail two tasks from now for a
-        // reason that has nothing to do with what this test pins. Reaching into the db skips
-        // the now-closing path entirely and pins the floor itself. Without forcing this state
-        // one way or another, "log once, delete twice" never actually exercises Math.Max — the
-        // second delete finds zero rows and returns before touching the aggregate at all, so
-        // the floor would be silently untested.
+        // BELOW the row count this un-cook is about to remove. This used to be reachable over
+        // plain HTTP with no direct-db access anywhere — cook via entry A, DELETE
+        // /recipes/{id}/cooked (ClearCookedAsync deleted the CookedRecipe row but left A's
+        // CookLog row behind), cook again via entry B (recreated the aggregate at
+        // TimesCooked = 1), un-cook A, un-cook B — see UncookEntryAsync's comment. Task 3 of
+        // this plan closed that exact HTTP path by making ClearCookedAsync delete the caller's
+        // CookLog rows too, so building that sequence here would no longer reach this state.
+        // Going straight at ApplicationDbContext instead is still deliberate, not a shortcut:
+        // the underlying drift is not closed — a legacy aggregate from before CookLog existed
+        // carries a count with no rows behind it, and the two tables remain separately
+        // writable in general — so the floor still needs a test, just not this exact story
+        // anymore. Without forcing this state one way or another, "log once, delete twice"
+        // never actually exercises Math.Max — the second delete finds zero rows and returns
+        // before touching the aggregate at all, so the floor would be silently untested.
         using (var setupScope = factory.Services.CreateScope())
         {
             var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -451,6 +452,47 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         // And the owner's cook is still there — a 404 must not have been a silent delete.
         var log = await owner.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
         Assert.Single(log!.Items);
+    }
+
+    // --- one record of every cook (roadmap spec 2, task 3) -------------------------------
+    //
+    // The log's claim to be the COMPLETE record of every cook only holds if every surface
+    // that writes "I cooked this" writes here too, and every surface that erases it erases
+    // here too. These two pin the recipe-page half of that: POST /recipes/{id}/cooked (no
+    // plan context) still lands a row, and DELETE /recipes/{id}/cooked clears plan-linked
+    // rows along with everything else — not just the aggregate.
+
+    [Fact]
+    public async Task Cooking_from_the_recipe_page_also_lands_in_the_log()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Ad-hoc dolma");
+
+        (await client.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
+
+        var log = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        var row = Assert.Single(log!.Items);
+        Assert.Equal(recipe.Id, row.RecipeId);
+        Assert.Null(row.MealPlanEntryId);   // logged off-plan
+    }
+
+    [Fact]
+    public async Task Clearing_cooked_removes_plan_linked_rows_too()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Plan-linked köfte");
+        var plan = await MealPlanTestHelper.CreateMealPlanAsync(client, MealPlanTestHelper.NextMonday());
+        var entry = await MealPlanTestHelper.AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+        await LogCookAsync(client, recipe.Id, entry.Id);
+
+        (await client.DeleteAsync($"/recipes/{recipe.Id}/cooked")).EnsureSuccessStatusCode();
+
+        var log = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.Empty(log!.Items);
+
+        // And the plan agrees — "I have never cooked this" means the same thing on both surfaces.
+        var planResponse = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+        Assert.Null(planResponse!.Entries.Single().CookedAt);
     }
 
     // --- helpers -------------------------------------------------------------------------
