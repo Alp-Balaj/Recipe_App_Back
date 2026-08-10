@@ -23,6 +23,9 @@ public class ApplicationDbContext : DbContext
     // the social envelope), so both are promoted rather than left nav-only.
     public DbSet<CommentLike> CommentLikes => Set<CommentLike>();
     public DbSet<CookedRecipe> CookedRecipes => Set<CookedRecipe>();
+    // Plan-page redesign / roadmap spec 2: one row per cook EVENT, beside the lifetime
+    // aggregate above. Queried directly by the cook log's three reads, so promoted.
+    public DbSet<CookLog> CookLogs => Set<CookLog>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     // ai-quotas (Stream B): per-call AI accounting; the daily budget aggregates these rows.
@@ -81,6 +84,58 @@ public class ApplicationDbContext : DbContext
             .ToTable(t => t.HasCheckConstraint(
                 "CK_CookedRecipes_Rating_Range",
                 "\"Rating\" IS NULL OR (\"Rating\" BETWEEN 1 AND 5)"));
+
+        // ── The cook log (plan-page redesign / roadmap spec 2) ──────────────────────────
+        //
+        // Every read is "my cooks, newest first" — the /plan card takes the first row, the
+        // history page keysets down it. Descending on CookedAt so both are index-only, and
+        // Id breaks ties because two cooks CAN share a timestamp (the keyset cursor pairs
+        // them for exactly that reason).
+        builder.Entity<CookLog>()
+            .HasIndex(cl => new { cl.UserId, cl.CookedAt, cl.Id })
+            .IsDescending(false, true, true);
+
+        // Roadmap spec 3 asks "is every meal contributing to this shopping group cooked",
+        // which is a lookup BY entry. Nothing reads it that way yet; the index is here
+        // because the column is meaningless without it and adding it later means a second
+        // migration on a table that will by then be large.
+        builder.Entity<CookLog>()
+            .HasIndex(cl => cl.MealPlanEntryId);
+
+        builder.Entity<CookLog>()
+            .Property(cl => cl.RecipeTitle)
+            .HasMaxLength(200)
+            .IsRequired();
+
+        builder.Entity<CookLog>()
+            .Property(cl => cl.Note)
+            .HasMaxLength(500);
+
+        // Removing a meal from a plan must not erase the record that you cooked it. EF's
+        // default for an optional relationship is already SetNull, but it is spelled out
+        // because the whole point of the nullable FK is this behaviour — a later reviewer
+        // reading `Guid?` should not have to infer it, and a convention change should not
+        // silently start deleting history.
+        builder.Entity<CookLog>()
+            .HasOne(cl => cl.MealPlanEntry)
+            .WithMany()
+            .HasForeignKey(cl => cl.MealPlanEntryId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        // Restrict, not Cascade: a recipe is SOFT-deleted in this app, so a hard delete is
+        // an operator action, and one that silently took the user's cooking history with it
+        // would be the wrong default. RecipeTitle is what keeps the row readable meanwhile.
+        builder.Entity<CookLog>()
+            .HasOne(cl => cl.Recipe)
+            .WithMany()
+            .HasForeignKey(cl => cl.RecipeId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.Entity<CookLog>()
+            .HasOne(cl => cl.User)
+            .WithMany()
+            .HasForeignKey(cl => cl.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         // Same primitive-collection rule as Recipe.Tags — see the long note beside it for why
         // the data source's converter does not reach this column.
