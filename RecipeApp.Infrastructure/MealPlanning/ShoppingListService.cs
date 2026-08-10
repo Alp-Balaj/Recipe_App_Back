@@ -58,8 +58,44 @@ public class ShoppingListService : IShoppingListService
                 .ToList();
         }
 
-        return new ShoppingListResponse(projected, OrphanedPurchasedNames(marks, projected));
+        // Carry-forward (trust rework): last week's unbought debt, surfaced ONCE on the
+        // current week instead of living forever in scope=All. Reuses an already-projected
+        // previous week when scope=All rendered one; otherwise projects it transiently
+        // (guarded by an existence check, so users with no history pay one cheap query).
+        ShoppingListCarryoverResponse? carryover = null;
+        var currentWeek = CurrentWeekStart();
+        if (weeks.Contains(currentWeek))
+        {
+            var previousWeek = currentWeek.AddDays(-7);
+            var previous = projected.FirstOrDefault(w => w.WeekStartDate == previousWeek);
+            if (previous is null && await WeekHasAnythingAsync(previousWeek, userId, cancellationToken))
+            {
+                var previousMarks = await _db.ShoppingListMarks
+                    .Where(m => m.UserId == userId && m.WeekStartDate == previousWeek)
+                    .ToListAsync(cancellationToken);
+                previous = await ProjectWeekAsync(previousWeek, userId, previousMarks, cancellationToken);
+            }
+
+            var items = (previous?.Groups ?? [])
+                .Where(g => !g.IsPurchased)
+                .Select(g => new ShoppingListCarryoverItemResponse(
+                    g.Key, g.DisplayName, g.Totals.FirstOrDefault()?.Display, g.Origin, g.ManualItemId))
+                .ToList();
+            if (items.Count > 0) carryover = new ShoppingListCarryoverResponse(previousWeek, items);
+        }
+
+        return new ShoppingListResponse(projected, OrphanedPurchasedNames(marks, projected), carryover);
     }
+
+    /// <summary>
+    /// Existence guard for the carry-forward projection above: whether the previous week has
+    /// ANY plan or manual row at all, before paying for a full transient ProjectWeekAsync. Users
+    /// with no history (the common case for a brand-new week) hit this one cheap query instead.
+    /// </summary>
+    private async Task<bool> WeekHasAnythingAsync(DateTime weekStart, Guid userId, CancellationToken ct) =>
+        await _db.MealPlans.AnyAsync(p => p.UserId == userId && p.WeekStartDate == weekStart, ct)
+        || await _db.ShoppingListItems.AnyAsync(
+            i => i.UserId == userId && i.MealPlanId == null && i.WeekStartDate == weekStart, ct);
 
     public async Task<ShoppingListItemResponse> AddManualAsync(
         AddManualShoppingListItemRequest request, Guid userId, CancellationToken cancellationToken = default)

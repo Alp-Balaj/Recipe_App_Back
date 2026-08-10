@@ -222,13 +222,36 @@ public record ShoppingListWeekResponse(
     ShoppingListWeekDiagnosticsResponse Diagnostics);
 
 /// <summary>
+/// Trust rework (task 5): one entry per group last week left unbought, surfaced ONCE on the
+/// current week so debt is carried forward instead of living forever in a scope=All view.
+/// Key/DisplayName/Origin/ManualItemId mirror ShoppingListGroupResponse's own.
+/// RemainingDisplay is the group's first total's Display (an imprecise-only group — a pinch,
+/// a dash — has no total, so this is null; the item still surfaces, just without a quantity).
+/// </summary>
+public record ShoppingListCarryoverItemResponse(
+    string Key, string DisplayName, string? RemainingDisplay,
+    ShoppingListGroupOrigin Origin, Guid? ManualItemId);
+
+/// <summary>
+/// Trust rework (task 5): last week's unbought groups, named so a caller can see WHAT is
+/// being carried rather than just a count. Null on ShoppingListResponse — not an empty
+/// object — when the previous week owes nothing; a frontend banner keys off null to decide
+/// whether to render at all.
+/// </summary>
+public record ShoppingListCarryoverResponse(
+    DateTime WeekStartDate, IReadOnlyList<ShoppingListCarryoverItemResponse> Items);
+
+/// <summary>
 /// OrphanedPurchasedNames carries display names for ticks whose group no longer exists —
 /// the "1 item you'd already bought is no longer in your plan" notice. Surfaced as a
 /// dismissible banner, never as ghost rows.
 /// </summary>
 public record ShoppingListResponse(
     IReadOnlyList<ShoppingListWeekResponse> Weeks,
-    IReadOnlyList<string> OrphanedPurchasedNames);
+    IReadOnlyList<string> OrphanedPurchasedNames,
+    // Appended last, per this file's convention, so existing positional constructions keep
+    // compiling.
+    ShoppingListCarryoverResponse? Carryover);
 
 /// <summary>Explicit full set of both flags — idempotent by construction, like the old PATCH.</summary>
 public record SetShoppingListMarkRequest(DateTime WeekStartDate, string Key, bool IsPurchased, bool IsSuppressed);

@@ -249,6 +249,81 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         Assert.Empty(week.Groups);
     }
 
+    [Fact]
+    public async Task Carryover_names_last_weeks_unbought_items_and_skips_bought_ones()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var lastWeek = CurrentMondayUtc().AddDays(-7);
+
+        var soup = await CreateRecipeAsync(client, "Soup",
+            [("Carrypepper", 2m, UnitOfMeasure.Piece), ("Boughtonion", 1m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, lastWeek);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", soup);
+
+        var put = await client.PutAsJsonAsync("/shopping-list/marks",
+            new SetShoppingListMarkRequest(lastWeek, "boughtonion", IsPurchased: true, IsSuppressed: false), TestJson.Options);
+        put.EnsureSuccessStatusCode();
+
+        // Reading the CURRENT week computes carryover from the previous one.
+        var list = await client.GetFromJsonAsync<ShoppingListResponse>(
+            $"/shopping-list?weekStart={CurrentMondayUtc():o}&scope=Week", TestJson.Options);
+
+        Assert.NotNull(list!.Carryover);
+        Assert.Equal(lastWeek, list.Carryover!.WeekStartDate);
+        var item = Assert.Single(list.Carryover.Items);
+        Assert.Equal("carrypepper", item.Key);
+        Assert.Equal("2 pcs", item.RemainingDisplay);
+        Assert.Equal(ShoppingListGroupOrigin.Derived, item.Origin);
+    }
+
+    [Fact]
+    public async Task Carryover_is_null_when_last_week_has_nothing()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var list = await client.GetFromJsonAsync<ShoppingListResponse>(
+            $"/shopping-list?weekStart={CurrentMondayUtc():o}&scope=Week", TestJson.Options);
+        Assert.Null(list!.Carryover);
+    }
+
+    // Reviewer follow-up on task 4: ProjectWeekAsync's entries query became a plain SELECT off
+    // MealPlanEntries (no longer joined to _db.Recipes), specifically so a soft-deleted recipe's
+    // entry stays in liveEntryIds — see the comment at the query. That widened set means a hide
+    // whose only contributor's recipe gets soft-deleted now SURVIVES garbage collection instead
+    // of being wrongly deleted, matching ContributingEntryIdsAsync's own reading of "live". This
+    // guards that: a moderator soft-deleting (then later restoring) a recipe must not silently
+    // undo a user's hide in the meantime. Restoring the old `recipes.ContainsKey` filter on
+    // liveEntryIds makes this fail (verified manually — see task-5-report.md).
+    [Fact]
+    public async Task Hide_survives_a_soft_deleted_contributing_recipe()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+        var curry = await CreateRecipeAsync(client, "Curry", [("Softdeletepepper", 2m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", curry);
+        await SuppressAsync(client, weekStart, "softdeletepepper");
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            await db.Recipes.IgnoreQueryFilters().Where(r => r.Id == curry)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.IsDeleted, true));
+        }
+
+        await ReadWeekAsync(client, weekStart);   // this read must not GC the hide
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.True(await verifyDb.ShoppingListMarks.AnyAsync(
+            m => m.WeekStartDate == weekStart && m.Key == "softdeletepepper"));
+    }
+
+    private static DateTime CurrentMondayUtc()
+    {
+        var today = DateTime.UtcNow.Date;
+        return DateTime.SpecifyKind(today.AddDays(-(((int)today.DayOfWeek + 6) % 7)), DateTimeKind.Utc);
+    }
+
     // --- helpers ------------------------------------------------------------------------
     // Thin adapters over the shared MealPlanTestHelper, matching ShoppingListProjectionTests.
 
