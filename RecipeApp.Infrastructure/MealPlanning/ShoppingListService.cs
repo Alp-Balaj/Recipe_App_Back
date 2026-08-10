@@ -215,6 +215,12 @@ public class ShoppingListService : IShoppingListService
         // beats a spelling) and unlocks the density that lets mass and volume merge.
         var parts = new List<ProjectedPart>();
         var liveEntryIds = new HashSet<Guid>();
+        var hiddenItems = new List<ShoppingListHiddenItemResponse>();
+
+        // Diagnostics defaults: declared here, before the `plan is not null` branch below, so
+        // the no-plan path still returns a Diagnostics object (empty/zero) rather than null.
+        var silentMeals = new List<ShoppingListSilentMealResponse>();
+        var unavailableCount = 0;
 
         if (plan is not null)
         {
@@ -235,9 +241,14 @@ public class ShoppingListService : IShoppingListService
             // was only a display sequence, wrong now that the FIRST part is the row's owning
             // dish ("bought once, under the first dish of the week that needs it"). A Sunday
             // roast would have owned every ingredient it shared with Monday's dinner.
+            // A plain SELECT off MealPlanEntries, deliberately not joined to _db.Recipes: the
+            // join used to double as an existence check, but Recipes carries a global
+            // HasQueryFilter(r => !r.IsDeleted) — a soft-deleted recipe's entry would fall out
+            // of the join silently, and UnavailableRecipeCount below needs exactly that entry
+            // to still be here to count it.
             var entries = (await _db.MealPlanEntries
                 .Where(e => e.MealPlanId == plan.Id)
-                .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new { EntryId = e.Id, e.DayOfWeek, e.MealType, RecipeId = r.Id })
+                .Select(e => new { EntryId = e.Id, e.DayOfWeek, e.MealType, e.RecipeId })
                 .ToListAsync(ct))
                 .OrderBy(e => DayOffset(e.DayOfWeek))
                 .ThenBy(e => e.MealType)
@@ -251,6 +262,18 @@ public class ShoppingListService : IShoppingListService
             var recipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
             var recipes = (await _db.Recipes.Where(r => recipeIds.Contains(r.Id)).ToListAsync(ct))
                 .ToDictionary(r => r.Id);
+
+            // Diagnostics: run on the UNFILTERED entries list, before the part-building loop
+            // below filters to `recipes.ContainsKey(...)`. Getting this backwards would make
+            // UnavailableRecipeCount always zero — the very thing it exists to report.
+            silentMeals = entries
+                .Where(e => recipes.TryGetValue(e.RecipeId, out var r) && r.Ingredients.Count == 0)
+                .Select(e => new ShoppingListSilentMealResponse(
+                    recipes[e.RecipeId].Title,
+                    weekStart.AddDays(DayOffset(e.DayOfWeek)),
+                    e.MealType))
+                .ToList();
+            unavailableCount = entries.Count(e => !recipes.ContainsKey(e.RecipeId));
 
             foreach (var entry in entries.Where(e => recipes.ContainsKey(e.RecipeId)))
             {
@@ -356,7 +379,12 @@ public class ShoppingListService : IShoppingListService
         foreach (var group in parts.GroupBy(p => p.Key, StringComparer.Ordinal))
         {
             markByKey.TryGetValue(group.Key, out var mark);
-            if (HideApplies(mark, group)) continue;
+            if (HideApplies(mark, group))
+            {
+                hiddenItems.Add(new ShoppingListHiddenItemResponse(
+                    group.Key, IngredientKey.DisplayNameFor(group.Select(p => p.RawName))));
+                continue;
+            }
 
             groups.Add(new ShoppingListGroupResponse(
                 group.Key,
@@ -428,7 +456,8 @@ public class ShoppingListService : IShoppingListService
             weekStart,
             ordered,
             ordered.Count(g => g.IsPurchased),
-            ordered.Count);
+            ordered.Count,
+            new ShoppingListWeekDiagnosticsResponse(hiddenItems, silentMeals, unavailableCount));
     }
 
     /// <summary>

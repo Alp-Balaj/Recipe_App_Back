@@ -184,11 +184,42 @@ public record ShoppingListGroupResponse(
     // See ShoppingAisles for the map and the walk order Groups are already sorted into.
     string Aisle);
 
+/// <summary>
+/// Trust rework (task 4): one entry per hidden group, so a caller can see WHAT a hide is
+/// eating rather than just noticing a total looks short. Key/DisplayName mirror
+/// ShoppingListGroupResponse's own — the display name is computed the same way
+/// (IngredientKey.DisplayNameFor over the group's raw names) so a re-surfaced group reads
+/// identically to how it read while hidden.
+/// </summary>
+public record ShoppingListHiddenItemResponse(string Key, string DisplayName);
+
+/// <summary>
+/// A planned meal whose recipe currently carries zero ingredient lines — it contributes
+/// nothing to any group, which would otherwise look identical to "nothing planned that
+/// meal". DishTitle/Date/Meal mirror ShoppingListPartResponse's own fields for a planned
+/// (non-manual) row.
+/// </summary>
+public record ShoppingListSilentMealResponse(string DishTitle, DateTime Date, MealType Meal);
+
+/// <summary>
+/// Trust rework (task 4): the three reasons an ingredient a caller expects can be missing
+/// from the list without the list being wrong. Always present, even on an empty week —
+/// see ProjectWeekAsync, which declares empty defaults before its `plan is not null` branch
+/// so every path returns an object here rather than null.
+/// </summary>
+public record ShoppingListWeekDiagnosticsResponse(
+    IReadOnlyList<ShoppingListHiddenItemResponse> HiddenItems,
+    IReadOnlyList<ShoppingListSilentMealResponse> MealsWithoutIngredients,
+    int UnavailableRecipeCount);
+
 public record ShoppingListWeekResponse(
     DateTime WeekStartDate,
     IReadOnlyList<ShoppingListGroupResponse> Groups,
     int PurchasedCount,
-    int TotalCount);
+    int TotalCount,
+    // Appended last, per this file's convention, so existing positional constructions keep
+    // compiling.
+    ShoppingListWeekDiagnosticsResponse Diagnostics);
 
 /// <summary>
 /// OrphanedPurchasedNames carries display names for ticks whose group no longer exists —

@@ -2,7 +2,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using System.Net.Http.Json;
 using RecipeApp.Application.MealPlanning.Dtos;
+using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.Enums;
+using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.IntegrationTests;
@@ -195,6 +197,58 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
             m => m.WeekStartDate == weekStart && m.Key == "subsetpepper"));
     }
 
+    [Fact]
+    public async Task Diagnostics_report_hidden_items_silent_meals_and_unavailable_recipes()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+
+        var curry = await CreateRecipeAsync(client, "Curry", [("Diagpepper", 2m, UnitOfMeasure.Piece)]);
+        // Zero-ingredient recipe: CreateRecipeRequestValidator and UpdateRecipeRequestValidator
+        // both `RuleFor(x => x.Ingredients).NotEmpty()`, so neither POST /recipes nor PUT
+        // /recipes/{id} can produce this row. Written directly, Public so AddEntryAsync's
+        // visibility policy admits it regardless of which user owns it.
+        var bare = await CreateBareRecipeAsync("Bare toast");
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", curry);
+        await AddEntryAsync(client, planId, "Tuesday", "Breakfast", bare);
+        await SuppressAsync(client, weekStart, "diagpepper");
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+
+        var hidden = Assert.Single(week.Diagnostics.HiddenItems);
+        Assert.Equal("diagpepper", hidden.Key);
+        Assert.Equal("Diagpepper", hidden.DisplayName);
+
+        var silent = Assert.Single(week.Diagnostics.MealsWithoutIngredients);
+        Assert.Equal("Bare toast", silent.DishTitle);
+        Assert.Equal(MealType.Breakfast, silent.Meal);
+        Assert.Equal(weekStart.AddDays(1), silent.Date);
+
+        Assert.Equal(0, week.Diagnostics.UnavailableRecipeCount);
+    }
+
+    [Fact]
+    public async Task Diagnostics_count_planned_meals_whose_recipe_was_deleted()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+        var doomed = await CreateRecipeAsync(client, "Doomed", [("Doompepper", 1m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", doomed);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            await db.Recipes.IgnoreQueryFilters().Where(r => r.Id == doomed)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.IsDeleted, true));
+        }
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        Assert.Equal(1, week.Diagnostics.UnavailableRecipeCount);
+        Assert.Empty(week.Groups);
+    }
+
     // --- helpers ------------------------------------------------------------------------
     // Thin adapters over the shared MealPlanTestHelper, matching ShoppingListProjectionTests.
 
@@ -228,6 +282,36 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
             client,
             title,
             [.. ingredients.Select(i => new RecipeApp.Domain.ValueObjects.RecipeIngredient { Name = i.Name, Quantity = i.Qty, Unit = i.Unit })]);
+        return recipe.Id;
+    }
+
+    // Writes a zero-ingredient recipe row straight through a DbContext scope, bypassing
+    // CreateRecipeRequestValidator/UpdateRecipeRequestValidator (both reject an empty
+    // Ingredients list). Public visibility so any authenticated user's plan can reference it
+    // regardless of which user id ends up as the owner — see RecipeVisibilityPolicy.VisibleTo.
+    private async Task<Guid> CreateBareRecipeAsync(string title)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var ownerId = await db.Users.Select(u => u.Id).FirstAsync();
+
+        var recipe = new Recipe
+        {
+            Id = Guid.NewGuid(),
+            Title = title,
+            Description = "Directly-seeded recipe with no ingredient lines, for the silent-meal diagnostic test.",
+            PrepTimeMinutes = 1,
+            CookTimeMinutes = 1,
+            Servings = 1,
+            Difficulty = DifficultyLevel.Easy,
+            Visibility = RecipeVisibility.Public,
+            CreatedByUserId = ownerId,
+            Ingredients = [],
+            Steps = [new RecipeStep { StepNumber = 1, Description = "Toast bread." }],
+            Tags = [],
+        };
+        db.Recipes.Add(recipe);
+        await db.SaveChangesAsync();
         return recipe.Id;
     }
 
