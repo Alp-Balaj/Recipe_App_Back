@@ -6,6 +6,7 @@ using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Domain.Entities;
+using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.MealPlanning;
@@ -108,10 +109,16 @@ public class ShoppingListService : IShoppingListService
             m => m.UserId == userId && m.WeekStartDate == request.WeekStartDate && m.Key == request.Key,
             cancellationToken);
 
+        // A hide's snapshot is its expiry condition; a pure tick carries none.
+        var snapshot = request.IsSuppressed
+            ? await ContributingEntryIdsAsync(request.WeekStartDate, userId, request.Key, cancellationToken)
+            : null;
+
         if (existing is not null)
         {
             existing.IsPurchased = request.IsPurchased;
             existing.IsSuppressed = request.IsSuppressed;
+            existing.SuppressedEntryIds = snapshot;
             existing.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(cancellationToken);
             return MealPlanResult<bool>.Success(true);
@@ -125,6 +132,7 @@ public class ShoppingListService : IShoppingListService
             Key = request.Key,
             IsPurchased = request.IsPurchased,
             IsSuppressed = request.IsSuppressed,
+            SuppressedEntryIds = snapshot,
             UpdatedAt = DateTime.UtcNow,
         });
 
@@ -142,11 +150,52 @@ public class ShoppingListService : IShoppingListService
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(m => m.IsPurchased, request.IsPurchased)
                     .SetProperty(m => m.IsSuppressed, request.IsSuppressed)
+                    .SetProperty(m => m.SuppressedEntryIds, snapshot)
                     .SetProperty(m => m.UpdatedAt, DateTime.UtcNow),
                     cancellationToken);
         }
 
         return MealPlanResult<bool>.Success(true);
+    }
+
+    /// <summary>
+    /// The group KEY one recipe line resolves to — catalogue id when the line resolved,
+    /// the name's key when it did not. The single source for write path and projection:
+    /// SetMarkAsync snapshots by it and ProjectWeekAsync groups by it, so they cannot drift.
+    /// </summary>
+    private static string KeyOf(RecipeIngredient ingredient) =>
+        ingredient.IngredientId is Guid resolved
+            ? ShoppingListKeys.ForIngredient(resolved)
+            : IngredientKey.For(ingredient.Name);
+
+    /// <summary>
+    /// The ids of the week's plan entries currently contributing `key` — the projection's
+    /// first half re-run for ONE key, at hide time. The snapshot is the hide's whole world:
+    /// contributors outside it (added later) render the group again.
+    /// </summary>
+    private async Task<List<Guid>> ContributingEntryIdsAsync(
+        DateTime weekStart, Guid userId, string key, CancellationToken ct)
+    {
+        var plan = await _db.MealPlans
+            .Where(p => p.UserId == userId && p.WeekStartDate == weekStart)
+            .Select(p => new { p.Id })
+            .FirstOrDefaultAsync(ct);
+        if (plan is null) return [];
+
+        var entries = await _db.MealPlanEntries
+            .Where(e => e.MealPlanId == plan.Id)
+            .Select(e => new { e.Id, e.RecipeId })
+            .ToListAsync(ct);
+
+        var recipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
+        var recipes = (await _db.Recipes.Where(r => recipeIds.Contains(r.Id)).ToListAsync(ct))
+            .ToDictionary(r => r.Id);
+
+        return entries
+            .Where(e => recipes.TryGetValue(e.RecipeId, out var recipe)
+                        && recipe.Ingredients.Any(i => KeyOf(i) == key))
+            .Select(e => e.Id)
+            .ToList();
     }
 
     // --- projection -----------------------------------------------------------------------
@@ -208,9 +257,7 @@ public class ShoppingListService : IShoppingListService
                     parts.Add(new ProjectedPart(
                         // Slice G3: the catalogue id when the line resolved, the name's
                         // key when it did not. "prawns" and "shrimp" become ONE row.
-                        ingredient.IngredientId is Guid resolved
-                            ? ShoppingListKeys.ForIngredient(resolved)
-                            : IngredientKey.For(ingredient.Name),
+                        KeyOf(ingredient),
                         ingredient.Name,
                         ingredient.Quantity,
                         ingredient.Unit,
