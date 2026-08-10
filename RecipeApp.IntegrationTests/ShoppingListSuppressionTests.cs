@@ -276,6 +276,32 @@ public class ShoppingListSuppressionTests : IClassFixture<IntegrationTestFactory
         Assert.Equal(ShoppingListGroupOrigin.Derived, item.Origin);
     }
 
+    // Fix round 1 (Task 10 review): a manual group never has a Total (its quantity is free
+    // text, not a measurement), so before this fix RemainingDisplay was always null for one —
+    // and the frontend's carry-forward action sends RemainingDisplay straight through as the
+    // new manual row's Quantity, which 400s against AddManualShoppingListItemRequestValidator's
+    // NotEmpty rule. This pins the fallback: a manual item's free text quantity survives into
+    // its carryover entry.
+    [Fact]
+    public async Task Carryover_keeps_a_manual_items_free_text_quantity()
+    {
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var lastWeek = CurrentMondayUtc().AddDays(-7);
+
+        var created = await client.PostAsJsonAsync("/shopping-list",
+            new AddManualShoppingListItemRequest("Batteries", "a couple of packs", lastWeek), TestJson.Options);
+        created.EnsureSuccessStatusCode();
+
+        var list = await client.GetFromJsonAsync<ShoppingListResponse>(
+            $"/shopping-list?weekStart={CurrentMondayUtc():o}&scope=Week", TestJson.Options);
+
+        Assert.NotNull(list!.Carryover);
+        var item = Assert.Single(list.Carryover!.Items, i => i.DisplayName == "Batteries");
+        Assert.Equal(ShoppingListGroupOrigin.Manual, item.Origin);
+        Assert.False(string.IsNullOrEmpty(item.RemainingDisplay));
+        Assert.Equal("a couple of packs", item.RemainingDisplay);
+    }
+
     [Fact]
     public async Task Carryover_is_null_when_last_week_has_nothing()
     {

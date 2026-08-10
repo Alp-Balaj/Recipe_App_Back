@@ -225,8 +225,17 @@ public record ShoppingListWeekResponse(
 /// Trust rework (task 5): one entry per group last week left unbought, surfaced ONCE on the
 /// current week so debt is carried forward instead of living forever in a scope=All view.
 /// Key/DisplayName/Origin/ManualItemId mirror ShoppingListGroupResponse's own.
-/// RemainingDisplay is the group's first total's Display (an imprecise-only group — a pinch,
-/// a dash — has no total, so this is null; the item still surfaces, just without a quantity).
+///
+/// RemainingDisplay is the group's first total's Display, falling back to the group's own
+/// first PART's Quantity when there is no total. That fallback is what makes a Manual item
+/// carry its own free text ("a couple of bags") here — a manual group never has a Total (its
+/// quantity is a note to self, not a measurement), so without the fallback this was always
+/// null for one, and the client's carry-forward action sends it straight through as the new
+/// manual row's Quantity — an empty/null string 400s against
+/// AddManualShoppingListItemRequestValidator's NotEmpty rule. A Derived, imprecise-only group
+/// (a pinch, a dash — see ShoppingListService.SumWithinDimensions) falls back the same way, to
+/// its raw "to taste"-style text. It is still null only if the group's Parts list is itself
+/// empty, which does not happen for a well-formed group of either origin.
 /// </summary>
 public record ShoppingListCarryoverItemResponse(
     string Key, string DisplayName, string? RemainingDisplay,

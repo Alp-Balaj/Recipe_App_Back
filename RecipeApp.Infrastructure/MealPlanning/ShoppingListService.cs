@@ -79,7 +79,18 @@ public class ShoppingListService : IShoppingListService
             var items = (previous?.Groups ?? [])
                 .Where(g => !g.IsPurchased)
                 .Select(g => new ShoppingListCarryoverItemResponse(
-                    g.Key, g.DisplayName, g.Totals.FirstOrDefault()?.Display, g.Origin, g.ManualItemId))
+                    g.Key, g.DisplayName,
+                    // Manual groups NEVER carry a Total (see ShoppingListGroupResponse.Totals'
+                    // own doc) — a manual row's quantity is free text, not a measurement, so
+                    // g.Totals.FirstOrDefault()?.Display alone was always null for one and the
+                    // client's manual carry-forward 400'd against AddManualShoppingListItemRequest-
+                    // Validator's NotEmpty rule on Quantity. Falling back to the group's own first
+                    // part's Quantity recovers exactly that free text ("a couple of bags") for a
+                    // manual item, and for a Derived, imprecise-only group (a pinch, a dash — see
+                    // SumWithinDimensions) recovers its raw "to taste"-style text instead of losing
+                    // the quantity outright.
+                    g.Totals.FirstOrDefault()?.Display ?? g.Parts.FirstOrDefault()?.Quantity,
+                    g.Origin, g.ManualItemId))
                 .ToList();
             if (items.Count > 0) carryover = new ShoppingListCarryoverResponse(previousWeek, items);
         }
