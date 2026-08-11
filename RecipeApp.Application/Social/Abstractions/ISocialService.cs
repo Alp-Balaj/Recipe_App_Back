@@ -57,6 +57,20 @@ public interface ISocialService
     /// </summary>
     Task<CookedDishListResponse> GetCookedDishesAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// The dish page's header (KAN-5, design D9): one row of
+    /// <see cref="GetCookedDishesAsync"/>, addressed by recipe, plus the count of cooks the
+    /// cook log does not hold (design D12).
+    /// </summary>
+    /// <remarks>
+    /// NotFound on exactly the dishes the list omits — one the caller has not cooked, one they
+    /// only rated, and one with neither a readable recipe nor a cook to title it — so a page
+    /// cannot exist behind a row the list refuses to show. NotFound rather than Forbidden for
+    /// another user's dish too: Cooked is private even when the recipe behind it is Public, and
+    /// a 404 does not confirm that someone else cooked it.
+    /// </remarks>
+    Task<SocialResult<CookedDishDetailResponse>> GetCookedDishAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
+
     Task<SocialResult<CommentResponse>> AddCommentAsync(Guid recipeId, string content, Guid currentUserId, CancellationToken cancellationToken = default);
 
     // Guest access (guest-access plan §3.2): read methods take a NULLABLE caller id — null

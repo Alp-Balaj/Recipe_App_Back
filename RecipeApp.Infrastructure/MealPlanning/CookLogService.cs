@@ -111,9 +111,21 @@ public class CookLogService : ICookLogService
     }
 
     public async Task<MealPlanResult<CookLogListResponse>> ListAsync(
-        Guid currentUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
+        Guid currentUserId, KeysetCursor? cursor, int limit, Guid? recipeId = null, CancellationToken cancellationToken = default)
     {
         var query = _db.CookLogs.Where(cl => cl.UserId == currentUserId);
+
+        // KAN-5 / design D9 — the dish page is this list with ONE predicate on it. It narrows
+        // the caller's own log and is stacked UNDER the UserId scope above, never instead of
+        // it: a note is private to its author (CONTEXT.md), so filtering by recipe alone would
+        // turn a per-dish view into everyone's cooks of that recipe.
+        //
+        // It lands on the (UserId, RecipeId, CookedAt DESC, Id DESC) index KAN-4's migration
+        // added for the per-dish note subquery, which is why this needs no migration of its own.
+        if (recipeId is not null)
+        {
+            query = query.Where(cl => cl.RecipeId == recipeId);
+        }
 
         if (cursor is not null)
         {

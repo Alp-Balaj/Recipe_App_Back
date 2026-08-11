@@ -77,6 +77,26 @@ public record CookedDishResponse(
 
 public record CookedDishListResponse(IReadOnlyList<CookedDishResponse> Items, string? NextCursor);
 
+// The dish page's header (KAN-5, design D9/D12) — GET /users/me/cooked-recipes/{recipeId}.
+//
+// Nests the SAME CookedDishResponse the list ships rather than restating its fields, so the
+// row a user tapped and the header they land on cannot disagree about the title, the rating,
+// or which note is the dish's latest. Both come out of one projection.
+//
+// UntrackedCooks is the count of cooks this dish has that the cook log does NOT hold: the
+// aggregate's TimesCooked minus the caller's CookLog rows for the recipe, floored at 0. It is
+// how the page tells the truth about a dish cooked before the log existed (10 August, design
+// D12) — "N cooks before notes existed" is an honest count, and the alternative of
+// backfilling synthetic rows would put fabricated events in a record whose entire value is
+// that it holds only real ones.
+//
+// It is computed HERE rather than left to the client, which cannot do the arithmetic without
+// holding every page of the log at once, and would get a different answer per page if it tried.
+// Floored because TimesCooked and the CookLog rows are two separately-writable records of one
+// fact and nothing enforces that they move together (CookLogService.UncookEntryAsync
+// enumerates the live causes); a negative count is not a state any client can render.
+public record CookedDishDetailResponse(CookedDishResponse Dish, int UntrackedCooks);
+
 public record CommentListResponse(IReadOnlyList<CommentResponse> Items, string? NextCursor);
 
 public record UserSummaryResponse(Guid Id, string Username, string? ProfileImageUrl);

@@ -232,6 +232,22 @@ public static class SocialEndpoints
             return Results.Ok(response);
         });
 
+        // The dish page's header (KAN-5) — one dish of the list above, plus the count of its
+        // cooks that predate the cook log. Its cooks are paged separately, through
+        // GET /cook-log?recipeId=: the page fetches this once and that list per "show older",
+        // so folding them into one response would re-read the header on every page.
+        //
+        // Under the literal "me" prefix, so the {id:guid} matchers below cannot shadow it.
+        group.MapGet("/me/cooked-recipes/{recipeId:guid}", async (Guid recipeId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.GetCookedDishAsync(recipeId, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                SocialOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        });
+
         // Account settings — the caller edits their own profile. Identity comes from the
         // token (no route param), so this literal "me" route sits with the others above the
         // {id:guid} matchers. 409 when the requested username is already taken.

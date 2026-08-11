@@ -38,7 +38,11 @@ public static class CookLogEndpoints
         })
         .AddEndpointFilter<ValidationFilter<LogCookRequest>>();
 
-        group.MapGet("/", async (string? cursor, int? limit, ICookLogService cookLog,
+        // recipeId (KAN-5, design D9) is what /cooked/{recipeId} pages — the same rows in the
+        // same order through the same cursor, narrowed to one dish. Appended last and optional,
+        // so /plan/cooks keeps calling this exactly as it did; omitting it means EVERY dish,
+        // never none.
+        group.MapGet("/", async (string? cursor, int? limit, Guid? recipeId, ICookLogService cookLog,
             ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
@@ -46,7 +50,7 @@ public static class CookLogEndpoints
                 return error!;
             }
 
-            var result = await cookLog.ListAsync(GetUserId(user), decodedCursor, effectiveLimit, cancellationToken);
+            var result = await cookLog.ListAsync(GetUserId(user), decodedCursor, effectiveLimit, recipeId, cancellationToken);
             return result.Outcome switch
             {
                 MealPlanOutcome.Success => Results.Ok(result.Value),

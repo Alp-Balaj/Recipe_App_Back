@@ -24,9 +24,19 @@ public interface ICookLogService
     Task<MealPlanResult<CookLogResponse>> LogAsync(
         Guid recipeId, Guid? mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default);
 
-    /// <summary>The caller's cooks, newest first, keyset-paged.</summary>
+    /// <summary>
+    /// The caller's cooks, newest first, keyset-paged. <paramref name="recipeId"/> narrows the
+    /// list to one dish (KAN-5, design D9) and is null for the whole log.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a PARAMETER on the existing list rather than a second endpoint: the dish
+    /// page reads the same rows in the same order through the same (CookedAt, Id) cursor, and
+    /// the only thing that differs is how many of the caller's cooks are in scope. The filter
+    /// narrows the CALLER's log; it never widens it to the recipe's, so another user's cooks of
+    /// the same recipe — and their private notes — stay out.
+    /// </remarks>
     Task<MealPlanResult<CookLogListResponse>> ListAsync(
-        Guid currentUserId, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default);
+        Guid currentUserId, KeysetCursor? cursor, int limit, Guid? recipeId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The newest row plus the caller's lifetime cook count — everything the "How did it go?"

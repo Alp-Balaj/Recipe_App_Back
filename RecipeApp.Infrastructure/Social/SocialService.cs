@@ -205,14 +205,7 @@ public class SocialService : ISocialService
     //   it, for the same reasons spelled out there.
     public async Task<CookedDishListResponse> GetCookedDishesAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        var readable = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
-
-        // D8, and the reason it is a filter rather than a data fix: RateRecipeAsync has been
-        // creating rows with TimesCooked = 0 since 30 July, so Cooked — a record of what you
-        // have MADE — would otherwise open listing dishes the user only ever rated.
-        var dishes = _db.CookedRecipes
-            .Where(cr => cr.UserId == currentUserId)
-            .Where(cr => cr.TimesCooked > 0);
+        var dishes = CookedDishes(currentUserId);
 
         if (cursor is not null)
         {
@@ -223,64 +216,12 @@ public class SocialService : ISocialService
                 || (cr.LastCookedAt == cursorLastCookedAt && cr.RecipeId.CompareTo(cursorRecipeId) < 0));
         }
 
-        // Project LAST, after Where/OrderBy/Take — CookLogService's first rule, and the one
-        // that fails at runtime rather than at compile time if it is broken.
-        //
-        // Every extra is a correlated subquery, never the cr.Recipe navigation: that
-        // relationship is required, so projecting through it compiles to an INNER JOIN and
-        // silently drops exactly the dishes whose recipe was removed — the ones this list
-        // exists to keep. The latest-note pair follows MealPlanService's per-entry cook-time
-        // subquery (:89-97) rather than a GroupBy, which EF cannot express here.
-        var rows = await dishes
-            .OrderByDescending(cr => cr.LastCookedAt)
-            .ThenByDescending(cr => cr.RecipeId)
-            .Take(limit + 1)
-            .Select(cr => new
-            {
-                cr.RecipeId,
-                cr.TimesCooked,
-                cr.LastCookedAt,
-                cr.Rating,
-                // ONE subquery for all three readable facts, not three. Every
-                // evaluation of `readable` re-runs RecipeVisibilityPolicy, whose
-                // FriendsOnly branch is two EXISTS over UserFollows — so three
-                // copies is 150 policy evaluations on a 50-row page where 50 do.
-                // Recipe.Title is non-nullable, which is what lets availability
-                // be read off the same projection: no row back means no readable
-                // recipe.
-                Readable = readable
-                    .Where(r => r.Id == cr.RecipeId)
-                    .Select(r => new { r.Title, r.ImageUrl })
-                    .FirstOrDefault(),
-                // The fallback title: what the dish was called the last time it was cooked.
-                // CookedRecipe has no snapshot of its own, and CookLog's is the only one in
-                // the schema — see its RecipeTitle remarks for why it is denormalised.
-                SnapshotTitle = _db.CookLogs
-                    .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId)
-                    .OrderByDescending(cl => cl.CookedAt)
-                    .ThenByDescending(cl => cl.Id)
-                    .Select(cl => cl.RecipeTitle)
-                    .FirstOrDefault(),
-                // D4 — the most recent NON-EMPTY note, and its OWN cook's date. `Note != null`
-                // is exactly "carries a note": UpdateNoteAsync is the column's only writer and
-                // normalises blank to null on the way in, so a written-then-cleared note falls
-                // back to the one before it. Two scalar subqueries rather than one projecting
-                // a pair: identical Where and identical total ordering (CookedAt then Id, so
-                // same-timestamp cooks cannot disagree), which is what keeps the halves from
-                // ever describing different rows.
-                LatestNote = _db.CookLogs
-                    .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId && cl.Note != null)
-                    .OrderByDescending(cl => cl.CookedAt)
-                    .ThenByDescending(cl => cl.Id)
-                    .Select(cl => cl.Note)
-                    .FirstOrDefault(),
-                LatestNoteCookedAt = _db.CookLogs
-                    .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId && cl.Note != null)
-                    .OrderByDescending(cl => cl.CookedAt)
-                    .ThenByDescending(cl => cl.Id)
-                    .Select(cl => (DateTime?)cl.CookedAt)
-                    .FirstOrDefault(),
-            })
+        var rows = await ProjectDishes(
+                dishes
+                    .OrderByDescending(cr => cr.LastCookedAt)
+                    .ThenByDescending(cr => cr.RecipeId)
+                    .Take(limit + 1),
+                currentUserId)
             .ToListAsync(cancellationToken);
 
         string? nextCursor = null;
@@ -296,26 +237,149 @@ public class SocialService : ISocialService
         // page start past a dish that was never returned. A page may therefore come back
         // shorter than `limit` with a cursor still set, which is ordinary for a keyset page
         // with a post-filter and is why the client pages on NextCursor rather than on count.
-        var items = rows
-            .Where(r => r.Readable is not null || r.SnapshotTitle is not null)
-            .Select(r => new CookedDishResponse(
-                r.RecipeId,
-                // Readable title first, snapshot second: the recipe may have been renamed
-                // since, and its current name is what the user will see if they open it.
-                r.Readable?.Title ?? r.SnapshotTitle!,
-                r.Readable?.ImageUrl,
-                r.TimesCooked,
-                r.LastCookedAt,
-                r.Rating,
-                r.LatestNote,
-                r.LatestNoteCookedAt,
-                // Availability IS "the readable projection came back", so the flag and the
-                // withheld image cannot drift apart the way two separate reads could.
-                r.Readable is not null))
-            .ToList();
+        var items = rows.Where(IsRenderable).Select(ToResponse).ToList();
 
         return new CookedDishListResponse(items, nextCursor);
     }
+
+    // The dish page's header (KAN-5, design D9/D12) — one row of the list above, addressed by
+    // recipe, plus the one fact only this surface needs.
+    //
+    // Everything about WHICH dishes exist and how they are named is delegated to CookedDishes
+    // and ProjectDishes, so this cannot come to a different answer from the list a user tapped
+    // to get here: a dish the list refuses to show (rated but never cooked — D8; nothing left
+    // to title it) must not have a page reachable behind it, and a hand-written second copy of
+    // those two rules is exactly how the two would drift.
+    public async Task<SocialResult<CookedDishDetailResponse>> GetCookedDishAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var row = await ProjectDishes(CookedDishes(currentUserId).Where(cr => cr.RecipeId == recipeId), currentUserId)
+            .SingleOrDefaultAsync(cancellationToken);
+
+        // NotFound, never Forbidden, and for either reason without distinguishing them: the
+        // caller has no such dish, or has one that cannot be rendered. Cooked is private
+        // (CONTEXT.md) even when the recipe behind it is Public, so a stranger asking about
+        // someone else's dish falls out here through the UserId scope alone.
+        if (row is null || !IsRenderable(row))
+        {
+            return SocialResult<CookedDishDetailResponse>.NotFound();
+        }
+
+        // D12. A separate COUNT rather than another subquery on the projection: the list has no
+        // use for it and pays for every column it selects on every row of every page.
+        var logged = await _db.CookLogs
+            .CountAsync(cl => cl.UserId == currentUserId && cl.RecipeId == recipeId, cancellationToken);
+
+        // Floored — see CookedDishDetailResponse. The two records of "how many times" are
+        // separately writable and nothing keeps them in lockstep.
+        return SocialResult<CookedDishDetailResponse>.Success(
+            new CookedDishDetailResponse(ToResponse(row), Math.Max(0, row.TimesCooked - logged)));
+    }
+
+    /// <summary>
+    /// The caller's dishes, before ordering and before projection — the one place that decides
+    /// which CookedRecipe rows are dishes at all.
+    /// </summary>
+    /// <remarks>
+    /// D8, and the reason it is a filter rather than a data fix: RateRecipeAsync has been
+    /// creating rows with TimesCooked = 0 since 30 July, so Cooked — a record of what you have
+    /// MADE — would otherwise open listing dishes the user only ever rated.
+    /// </remarks>
+    private IQueryable<CookedRecipe> CookedDishes(Guid currentUserId) =>
+        _db.CookedRecipes
+            .Where(cr => cr.UserId == currentUserId)
+            .Where(cr => cr.TimesCooked > 0);
+
+    // The shared read shape, applied LAST — after Where/OrderBy/Take. That is CookLogService's
+    // first rule and the one that fails at runtime rather than at compile time if it is broken,
+    // which is why callers narrow the entity query and hand it here rather than projecting and
+    // then filtering.
+    //
+    // Every extra is a correlated subquery, never the cr.Recipe navigation: that relationship
+    // is required, so projecting through it compiles to an INNER JOIN and silently drops
+    // exactly the dishes whose recipe was removed — the ones this list exists to keep. The
+    // latest-note pair follows MealPlanService's per-entry cook-time subquery (:89-97) rather
+    // than a GroupBy, which EF cannot express here.
+    private IQueryable<DishRow> ProjectDishes(IQueryable<CookedRecipe> dishes, Guid currentUserId)
+    {
+        var readable = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
+
+        return dishes.Select(cr => new DishRow(
+            cr.RecipeId,
+            cr.TimesCooked,
+            cr.LastCookedAt,
+            cr.Rating,
+            // ONE subquery for all three readable facts, not three. Every evaluation of
+            // `readable` re-runs RecipeVisibilityPolicy, whose FriendsOnly branch is two EXISTS
+            // over UserFollows — so three copies is 150 policy evaluations on a 50-row page
+            // where 50 do. Recipe.Title is non-nullable, which is what lets availability be
+            // read off the same projection: no row back means no readable recipe.
+            readable
+                .Where(r => r.Id == cr.RecipeId)
+                .Select(r => new ReadableRecipe(r.Title, r.ImageUrl))
+                .FirstOrDefault(),
+            // The fallback title: what the dish was called the last time it was cooked.
+            // CookedRecipe has no snapshot of its own, and CookLog's is the only one in the
+            // schema — see its RecipeTitle remarks for why it is denormalised.
+            _db.CookLogs
+                .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId)
+                .OrderByDescending(cl => cl.CookedAt)
+                .ThenByDescending(cl => cl.Id)
+                .Select(cl => cl.RecipeTitle)
+                .FirstOrDefault(),
+            // D4 — the most recent NON-EMPTY note, and its OWN cook's date. `Note != null` is
+            // exactly "carries a note": UpdateNoteAsync is the column's only writer and
+            // normalises blank to null on the way in, so a written-then-cleared note falls back
+            // to the one before it. Two scalar subqueries rather than one projecting a pair:
+            // identical Where and identical total ordering (CookedAt then Id, so same-timestamp
+            // cooks cannot disagree), which is what keeps the halves from ever describing
+            // different rows.
+            _db.CookLogs
+                .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId && cl.Note != null)
+                .OrderByDescending(cl => cl.CookedAt)
+                .ThenByDescending(cl => cl.Id)
+                .Select(cl => cl.Note)
+                .FirstOrDefault(),
+            _db.CookLogs
+                .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId && cl.Note != null)
+                .OrderByDescending(cl => cl.CookedAt)
+                .ThenByDescending(cl => cl.Id)
+                .Select(cl => (DateTime?)cl.CookedAt)
+                .FirstOrDefault()));
+    }
+
+    /// <summary>
+    /// Whether anything about this dish can be shown at all. A pre-10-August dish whose recipe
+    /// was later removed has neither a readable title nor a cook to snapshot one, so it is
+    /// omitted rather than shipped as a blank row every client would have to special-case.
+    /// </summary>
+    private static bool IsRenderable(DishRow row) => row.Readable is not null || row.SnapshotTitle is not null;
+
+    private static CookedDishResponse ToResponse(DishRow row) =>
+        new(row.RecipeId,
+            // Readable title first, snapshot second: the recipe may have been renamed since,
+            // and its current name is what the user will see if they open it.
+            row.Readable?.Title ?? row.SnapshotTitle!,
+            row.Readable?.ImageUrl,
+            row.TimesCooked,
+            row.LastCookedAt,
+            row.Rating,
+            row.LatestNote,
+            row.LatestNoteCookedAt,
+            // Availability IS "the readable projection came back", so the flag and the withheld
+            // image cannot drift apart the way two separate reads could.
+            row.Readable is not null);
+
+    private sealed record DishRow(
+        Guid RecipeId,
+        int TimesCooked,
+        DateTime LastCookedAt,
+        int? Rating,
+        ReadableRecipe? Readable,
+        string? SnapshotTitle,
+        string? LatestNote,
+        DateTime? LatestNoteCookedAt);
+
+    private sealed record ReadableRecipe(string Title, string? ImageUrl);
 
     public async Task<SocialResult<CommentResponse>> AddCommentAsync(Guid recipeId, string content, Guid currentUserId, CancellationToken cancellationToken = default)
     {
