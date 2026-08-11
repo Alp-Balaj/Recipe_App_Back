@@ -186,11 +186,19 @@ public class MealPlanListEndpointTests(IntegrationTestFactory factory) : IClassF
         Assert.Equal(0, summary.TotalMinutes);
     }
 
-    // Both counters run over the join against Recipes, which carries the soft-delete filter,
-    // so the summary agrees with GET /meal-plans/{id} — which drops those entries entirely.
-    // Before TotalMinutes landed, EntryCount counted the raw entry rows and over-reported.
+    // The two counters answer DIFFERENT questions and KAN-1 split them apart to say so. Both
+    // used to run over one join against Recipes, so an unavailable recipe took the meal off the
+    // count as well as its minutes off the clock. Now:
+    //
+    //   EntryCount   — how many meals the week HOLDS. Unchanged by availability: the entry is
+    //                  the caller's own record and GET /meal-plans/{id} still renders its slot,
+    //                  so dropping it here would have the list say "1 meal" about a week
+    //                  showing two.
+    //   TotalMinutes — how long the week's cooking TAKES. Availability decides it, because
+    //                  prep and cook time are the author's content; a withdrawn recipe's time
+    //                  showing up in the sum is the leak arriving as arithmetic.
     [Fact]
-    public async Task List_SoftDeletedRecipe_DropsFromBothCounters()
+    public async Task List_SoftDeletedRecipe_KeepsItsEntryCountAndLosesItsMinutes()
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
@@ -208,12 +216,42 @@ public class MealPlanListEndpointTests(IntegrationTestFactory factory) : IClassF
         (await client.DeleteAsync($"/recipes/{doomed}")).EnsureSuccessStatusCode();
 
         var after = await GetSummaryAsync(client, UtcMidnight(2026, 8, 24));
-        Assert.Equal(1, after.EntryCount);
+        Assert.Equal(2, after.EntryCount);
         Assert.Equal(10, after.TotalMinutes);
 
-        // The week view agrees — that is the consistency this join buys.
+        // The week view agrees — the consistency the split is FOR. Two slots, one of them
+        // unavailable, which is exactly what "2 meals · 10 min" describes.
         var week = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan}", TestJson.Options);
-        Assert.Single(week!.Entries);
+        Assert.Equal(2, week!.Entries.Count);
+        Assert.Single(week.Entries, e => e.Recipe is null);
+    }
+
+    // The same, for the cause the summary had no notion of at all. 60 minutes of a stranger's
+    // withdrawn recipe stayed in this sum indefinitely.
+    [Fact]
+    public async Task List_WithdrawnRecipe_KeepsItsEntryCountAndLosesItsMinutes()
+    {
+        var authorClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(authorClient);
+        var withdrawn = await CreateRecipeAsync(authorClient, prepMinutes: 30, cookMinutes: 30); // 60
+
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var kept = await CreateRecipeAsync(client, prepMinutes: 5, cookMinutes: 5);              // 10
+        var plan = await CreatePlanAsync(client, UtcMidnight(2026, 8, 31));
+
+        await AddEntryAsync(client, plan, DayOfWeek.Monday, MealType.Lunch, kept);
+        await AddEntryAsync(client, plan, DayOfWeek.Tuesday, MealType.Lunch, withdrawn);
+
+        var before = await GetSummaryAsync(client, UtcMidnight(2026, 8, 31));
+        Assert.Equal(2, before.EntryCount);
+        Assert.Equal(70, before.TotalMinutes);
+
+        await MealPlanTestHelper.SetVisibilityAsync(authorClient, withdrawn, RecipeVisibility.Private);
+
+        var after = await GetSummaryAsync(client, UtcMidnight(2026, 8, 31));
+        Assert.Equal(2, after.EntryCount);
+        Assert.Equal(10, after.TotalMinutes);
     }
 
     [Fact]

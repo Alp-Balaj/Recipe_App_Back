@@ -8,6 +8,7 @@ using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
+using RecipeApp.Infrastructure.Recipes;
 
 namespace RecipeApp.Infrastructure.MealPlanning;
 
@@ -368,8 +369,25 @@ public class ShoppingListService : IShoppingListService
         // Two-query hydrate: the jsonb Ingredients collection cannot ride the anonymous
         // projection above, so the full recipe rows come back separately (once per DISTINCT
         // recipe, then expanded per entry).
+        //
+        // Composed with RecipeVisibilityPolicy since KAN-1, and this ONE predicate is the whole
+        // of the shopping-list half of that fix. Everything downstream is already written in
+        // terms of "is this recipe in the dictionary": the part-building loop filters on
+        // recipes.ContainsKey, so a withdrawn recipe stops contributing its ingredient
+        // quantities; UnavailableRecipeCount is `entries.Count(e => !recipes.ContainsKey(...))`,
+        // so it starts covering withdrawal as well as soft-delete without being touched; and
+        // ContributingEntryIdsAsync reads through here too, so a hide's snapshot keeps matching
+        // what the projection attributes to a key. That shared-hydrate design is what makes the
+        // fix one line rather than four — see this method's note on the drift it already
+        // prevented once.
+        //
+        // The caller's OWN recipes are admitted by the policy, so a user's plan is never
+        // narrowed by their own visibility settings.
         var recipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
-        var recipes = (await _db.Recipes.Where(r => recipeIds.Contains(r.Id)).ToListAsync(ct))
+        var recipes = (await _db.Recipes
+                .Where(RecipeVisibilityPolicy.VisibleTo(userId))
+                .Where(r => recipeIds.Contains(r.Id))
+                .ToListAsync(ct))
             .ToDictionary(r => r.Id);
 
         return (entries, recipes);

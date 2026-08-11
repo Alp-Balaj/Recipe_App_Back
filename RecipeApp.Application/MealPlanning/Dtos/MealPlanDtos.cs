@@ -46,11 +46,25 @@ public record MealPlanEntryRecipeSummary(
 // of this slot's cooks carry a note" and "how many notes would be lost" — the same number.
 // Zero on an uncooked slot and on a cooked one nobody has annotated; those two cases are
 // deliberately indistinguishable here, since neither has anything to lose.
+// Recipe is NULLABLE, and that null is the "unavailable" state (KAN-1, ADR-0001). The entry
+// itself is the caller's own record — they planned a meal in that slot and the plan still says
+// so — but everything the summary carries is the AUTHOR's content, so it is withheld the moment
+// the caller can no longer read the recipe. Null covers both causes at once, deliberately:
+// soft-deleted and no-longer-shared-with-you are ONE user-visible state, because reporting an
+// author's private visibility decision back to a stranger is itself a leak.
+//
+// Null rather than a summary with the fields blanked, because a blanked summary still carries
+// an Id — and an id is enough to confirm which recipe the slot holds. It also makes the leak
+// un-reintroducible field by field: there is no object left to forget to clear.
+//
+// The entry used to DROP OUT of the read entirely for the soft-delete case, which is why this
+// is a nullable field rather than a filtered list: silently vanishing loses a planned meal from
+// someone's week without telling them.
 public record MealPlanEntryResponse(
     Guid Id,
     DayOfWeek DayOfWeek,
     MealType MealType,
-    MealPlanEntryRecipeSummary Recipe,
+    MealPlanEntryRecipeSummary? Recipe,
     DateTime? CookedAt,
     int CookNoteCount);
 

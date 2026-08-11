@@ -263,6 +263,37 @@ public class MealPlanNutritionTests(IntegrationTestFactory factory) : IClassFixt
         Assert.Equal(1, monday.TotalLines);
     }
 
+    // KAN-1. The ribbon is computed from the author's ingredient LINES, so a withdrawn recipe
+    // that keeps contributing is the same leak as the week view's, arrived at by arithmetic: a
+    // reader who diffs the day total before and after learns the recipe's per-serving energy
+    // to the kcal. It has to drop out for the same reason a deleted one does, and by the same
+    // mechanism, or the two causes become distinguishable.
+    [Fact]
+    public async Task An_entry_whose_recipe_was_withdrawn_drops_out_too()
+    {
+        var authorClient = await factory.CreateAuthenticatedClientAsync();
+        var withdrawn = await FlourRecipeAsync(authorClient, servings: 2, grams: 200m);
+
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var plan = await MealPlanTestHelper.CreateMealPlanAsync(client, MealPlanTestHelper.NextMonday());
+        var kept = await FlourRecipeAsync(client, servings: 2, grams: 200m);
+        await MealPlanTestHelper.AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Breakfast, kept.Id);
+        await MealPlanTestHelper.AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, withdrawn.Id);
+
+        var before = Assert.Single((await GetAsync(client, plan.Id)).Days);
+        Assert.Equal(2, before.EntryCount);
+
+        await MealPlanTestHelper.SetVisibilityAsync(authorClient, withdrawn, RecipeVisibility.Private);
+
+        var after = Assert.Single((await GetAsync(client, plan.Id)).Days);
+
+        Assert.Equal(1, after.EntryCount);
+        Assert.Equal(1, after.TotalLines);
+        // The energy figure moves too — the assertion that would fail if only the counters
+        // were gated and the totals kept summing behind them.
+        Assert.NotEqual(before.Kcal, after.Kcal);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────────
 
     private static async Task<MealPlanNutritionResponse> GetAsync(HttpClient client, Guid planId) =>
