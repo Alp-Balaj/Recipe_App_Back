@@ -481,7 +481,6 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
-CLAUDE.md
 
 # Orca run logs and state — ephemeral evidence, never committed (spec §5.3)
 .orca/
