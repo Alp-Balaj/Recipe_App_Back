@@ -15,7 +15,13 @@ public interface ISocialService
     /// <summary>Idempotent like. NotFound when the recipe isn't visible to the caller.</summary>
     Task<SocialResult<bool>> LikeRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
 
-    /// <summary>Idempotent unlike. NotFound when the recipe isn't visible to the caller.</summary>
+    /// <summary>
+    /// Idempotent unlike. Requires NO visibility (ADR-0001): it destroys the caller's own
+    /// Like row, so it keeps working after the author makes the recipe Private or removes
+    /// it — otherwise the like can never be withdrawn, and the author keeps the
+    /// RecipeReceivedLike award permanently. Always Success, including for a recipe that
+    /// never existed.
+    /// </summary>
     Task<SocialResult<bool>> UnlikeRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
 
     /// <summary>Idempotent save. NotFound when the recipe isn't visible to the caller.</summary>
@@ -45,7 +51,14 @@ public interface ISocialService
     /// <summary>Comment-author-only edit. Forbidden for anyone else who can see it.</summary>
     Task<SocialResult<CommentResponse>> UpdateCommentAsync(Guid commentId, string content, Guid currentUserId, CancellationToken cancellationToken = default);
 
-    /// <summary>Allowed for the comment's author OR the recipe's author (decision I6).</summary>
+    /// <summary>
+    /// Allowed for the comment's author OR the recipe's author (decision I6). The comment
+    /// author's own branch requires NO visibility (ADR-0001, KAN-10): deleting your own
+    /// comment destroys only your own row, so it keeps working after the recipe becomes
+    /// Private or is removed — otherwise your own writing is stranded on your account with
+    /// no way to take it down. The recipe author's moderation branch is unchanged and still
+    /// requires the recipe to be visible to them.
+    /// </summary>
     Task<SocialResult<bool>> DeleteCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default);
 
     // --- open-loops slice 1: comment likes ------------------------------------------------
@@ -57,7 +70,11 @@ public interface ISocialService
     /// </summary>
     Task<SocialResult<bool>> LikeCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default);
 
-    /// <summary>Idempotent unlike; reverses the award only on a real like -> unlike transition.</summary>
+    /// <summary>
+    /// Idempotent unlike; reverses the award only on a real like -> unlike transition.
+    /// Requires NO visibility (ADR-0001, KAN-11), for the same reason as
+    /// <see cref="UnlikeRecipeAsync"/>: it destroys the caller's own CommentLike row.
+    /// </summary>
     Task<SocialResult<bool>> UnlikeCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default);
 
     // --- open-loops slice 1: cooked + rated -----------------------------------------------
