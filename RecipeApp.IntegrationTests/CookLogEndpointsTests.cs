@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.MealPlanning.Dtos;
+using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Application.Social.Dtos;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
@@ -223,6 +224,154 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         Assert.Equal("Pide with minced lamb", row.RecipeTitle);
         Assert.False(row.RecipeAvailable);
         Assert.Null(row.RecipeImageUrl);
+    }
+
+    [Fact]
+    public async Task A_recipe_the_author_stopped_sharing_reads_as_unavailable()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(author, "Supper, later withdrawn");
+        await UpdateRecipeAsync(author, recipe, RecipeVisibility.Public, "/images/supper.jpg");
+
+        var cook = await factory.CreateAuthenticatedClientAsync();
+        var logged = await LogCookAsync(cook, recipe.Id);
+
+        // Before: an ordinary public dish, image and all. Without this half the assertions
+        // below could pass on a read that never served the image in the first place.
+        var before = await ReadCookAsync(cook, logged.Id);
+        Assert.True(before.RecipeAvailable);
+        Assert.Equal("/images/supper.jpg", before.RecipeImageUrl);
+
+        await UpdateRecipeAsync(author, recipe, RecipeVisibility.Private, "/images/supper.jpg");
+
+        // "Available" has to mean "you can open this", not "the row is still there"
+        // (ADR-0001). The recipe was never deleted — it simply stopped being shared — and
+        // the affordances that need its content must go with it, image included.
+        var after = await ReadCookAsync(cook, logged.Id);
+        Assert.False(after.RecipeAvailable);
+        Assert.Null(after.RecipeImageUrl);
+
+        // And the cook itself survives whole: ADR-0001's rule is that removal withdraws the
+        // author's content and never touches the reader's own record.
+        Assert.Equal("Supper, later withdrawn", after.RecipeTitle);
+    }
+
+    [Fact]
+    public async Task Removed_and_no_longer_shared_are_one_indistinguishable_state()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var removed = await CreateRecipeAsync(author, "Dish the author deleted");
+        var withdrawn = await CreateRecipeAsync(author, "Dish the author unshared");
+        await UpdateRecipeAsync(author, removed, RecipeVisibility.Public, "/images/removed.jpg");
+        await UpdateRecipeAsync(author, withdrawn, RecipeVisibility.Public, "/images/withdrawn.jpg");
+
+        var cook = await factory.CreateAuthenticatedClientAsync();
+        var removedCook = await LogCookAsync(cook, removed.Id);
+        var withdrawnCook = await LogCookAsync(cook, withdrawn.Id);
+
+        (await author.DeleteAsync($"/recipes/{removed.Id}")).EnsureSuccessStatusCode();
+        await UpdateRecipeAsync(author, withdrawn, RecipeVisibility.Private, "/images/withdrawn.jpg");
+
+        var list = await cook.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        var removedRow = Assert.Single(list!.Items, i => i.Id == removedCook.Id);
+        var withdrawnRow = Assert.Single(list.Items, i => i.Id == withdrawnCook.Id);
+
+        // RecipeAvailable and RecipeImageUrl ARE the availability surface of this contract —
+        // every other field on the response is per-cook (id, snapshotted title, time, note).
+        // So agreeing on both is the whole of "no way to tell the two apart" (design D14): a
+        // reader cannot learn from the wire whether the author deleted the recipe or merely
+        // stopped sharing it with them, and ADR-0001 is explicit that reporting an author's
+        // private visibility decision back to a stranger is itself a leak.
+        Assert.False(removedRow.RecipeAvailable);
+        Assert.Equal(removedRow.RecipeAvailable, withdrawnRow.RecipeAvailable);
+        Assert.Null(removedRow.RecipeImageUrl);
+        Assert.Equal(removedRow.RecipeImageUrl, withdrawnRow.RecipeImageUrl);
+
+        // Both records survive whole, from their own snapshots — the halves that must NOT
+        // become identical.
+        Assert.Equal("Dish the author deleted", removedRow.RecipeTitle);
+        Assert.Equal("Dish the author unshared", withdrawnRow.RecipeTitle);
+    }
+
+    [Fact]
+    public async Task A_friends_only_recipe_stays_available_to_a_mutual_follower()
+    {
+        var authorClient = factory.CreateClient();
+        var author = await AuthTestHelper.RegisterAndAuthenticateAsync(authorClient);
+        var cookClient = factory.CreateClient();
+        var cook = await AuthTestHelper.RegisterAndAuthenticateAsync(cookClient);
+        await FollowTestHelper.MakeMutualAsync(cookClient, cook.UserId, authorClient, author.UserId);
+
+        var recipe = await CreateRecipeAsync(authorClient, "Friends-only güveç");
+        await UpdateRecipeAsync(authorClient, recipe, RecipeVisibility.FriendsOnly, "/images/guvec.jpg");
+
+        var logged = await LogCookAsync(cookClient, recipe.Id);
+
+        // The guard against "fixing" availability by testing authorship instead of visibility.
+        // A FriendsOnly recipe is not the reader's own, and is not Public — only composing the
+        // real RecipeVisibilityPolicy keeps it open to a MUTUAL follower, which is the one
+        // arrangement D6 grants. Read the whole rule in RecipeVisibilityPolicy.
+        var row = await ReadCookAsync(cookClient, logged.Id);
+        Assert.True(row.RecipeAvailable);
+        Assert.Equal("/images/guvec.jpg", row.RecipeImageUrl);
+
+        // And it closes the moment the mutual follow does — the same read, no longer allowed.
+        await FollowTestHelper.UnfollowAsync(authorClient, cook.UserId);
+
+        var afterUnfollow = await ReadCookAsync(cookClient, logged.Id);
+        Assert.False(afterUnfollow.RecipeAvailable);
+        Assert.Null(afterUnfollow.RecipeImageUrl);
+    }
+
+    [Fact]
+    public async Task The_latest_cook_withholds_an_unavailable_recipe_too()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(author, "Last night's withdrawn dish");
+        await UpdateRecipeAsync(author, recipe, RecipeVisibility.Public, "/images/last-night.jpg");
+
+        var cook = await factory.CreateAuthenticatedClientAsync();
+        await LogCookAsync(cook, recipe.Id);
+        await UpdateRecipeAsync(author, recipe, RecipeVisibility.Private, "/images/last-night.jpg");
+
+        var latest = await cook.GetFromJsonAsync<CookLogLatestResponse>("/cook-log/latest", TestJson.Options);
+
+        // /cook-log/latest is its own call into Project, and it is the one /plan's "How did it
+        // go?" card reads — the card that owns the "Cook it again" button KAN-2 exists to stop
+        // firing at a 404. Pinned separately from the list because the two endpoints pass
+        // Project their own arguments: the list tests alone would let this call site regress
+        // silently, with the whole suite still green.
+        Assert.False(latest!.Latest!.RecipeAvailable);
+        Assert.Null(latest.Latest.RecipeImageUrl);
+        Assert.Equal("Last night's withdrawn dish", latest.Latest.RecipeTitle);
+    }
+
+    [Fact]
+    public async Task A_note_on_an_unavailable_dish_is_still_editable()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(author, "Withdrawn manti");
+        await UpdateRecipeAsync(author, recipe, RecipeVisibility.Public, "/images/manti.jpg");
+
+        var cook = await factory.CreateAuthenticatedClientAsync();
+        var logged = await LogCookAsync(cook, recipe.Id);
+        await UpdateRecipeAsync(author, recipe, RecipeVisibility.Private, "/images/manti.jpg");
+
+        var response = await cook.PatchAsJsonAsync(
+            $"/cook-log/{logged.Id}", new UpdateCookNoteRequest("less water next time"), TestJson.Options);
+
+        // The write is ungated on purpose: the note is the READER's own writing, not the
+        // author's content, so withdrawing the recipe must not lock them out of it
+        // (ADR-0001 — a write that destroys or annotates your own row is never gated).
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadFromJsonAsync<CookLogResponse>(TestJson.Options))!;
+        Assert.Equal("less water next time", body.Note);
+
+        // What the write REPORTS is gated, though, and by the same rule as the list read —
+        // otherwise a client re-rendering from this response would re-enable "Cook it again"
+        // on a dish that 404s.
+        Assert.False(body.RecipeAvailable);
+        Assert.Null(body.RecipeImageUrl);
     }
 
     // --- reading -------------------------------------------------------------------------
@@ -502,6 +651,47 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         var response = await client.PostAsJsonAsync("/cook-log", new LogCookRequest(recipeId, entryId), TestJson.Options);
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<CookLogResponse>(TestJson.Options))!;
+    }
+
+    /// <summary>
+    /// Reads one cook back through the list endpoint — the seam the client actually uses.
+    /// Availability is computed per read, so it has to be observed there and not on the
+    /// POST response that created the row.
+    /// </summary>
+    private static async Task<CookLogResponse> ReadCookAsync(HttpClient client, Guid cookId)
+    {
+        var list = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        return Assert.Single(list!.Items, i => i.Id == cookId);
+    }
+
+    /// <summary>
+    /// Re-publishes a recipe with a different visibility or image, as its author would from
+    /// the edit form. Every other field is carried across unchanged, because PUT /recipes/{id}
+    /// is a whole-resource replace.
+    /// </summary>
+    private static async Task UpdateRecipeAsync(
+        HttpClient author,
+        Application.Recipes.Dtos.RecipeResponse recipe,
+        RecipeVisibility visibility,
+        string? imageUrl)
+    {
+        var request = new UpdateRecipeRequest(
+            recipe.Title,
+            recipe.Description,
+            recipe.PrepTimeMinutes,
+            recipe.CookTimeMinutes,
+            recipe.Servings,
+            recipe.Difficulty,
+            recipe.CuisineType,
+            recipe.CaloriesPerServing,
+            imageUrl,
+            visibility,
+            recipe.Ingredients,
+            recipe.Steps,
+            recipe.Tags);
+
+        (await author.PutAsJsonAsync($"/recipes/{recipe.Id}", request, TestJson.Options))
+            .EnsureSuccessStatusCode();
     }
 
     private static Task<Application.Recipes.Dtos.RecipeResponse> CreateRecipeAsync(

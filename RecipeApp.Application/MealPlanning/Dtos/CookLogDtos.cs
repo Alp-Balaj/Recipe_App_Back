@@ -10,11 +10,26 @@ public record LogCookRequest(Guid RecipeId, Guid? MealPlanEntryId);
 public record UpdateCookNoteRequest(string? Note);
 
 // RecipeTitle is the SNAPSHOT taken at write time, not a join — it is what the row still has
-// once a recipe is soft-deleted. RecipeImageUrl IS a join, so it goes null in that case, which
-// is why the two are not carried as one nested recipe object: they have different lifetimes,
-// and a nested object would have to be nullable as a whole and take the title down with it.
-// RecipeAvailable is false once the recipe is gone: the row still renders (title, date, note)
-// but the client must not offer to open or re-cook a dish that no longer exists.
+// once the recipe becomes unavailable. RecipeImageUrl IS a join, so it goes null in that case,
+// which is why the two are not carried as one nested recipe object: they have different
+// lifetimes, and a nested object would have to be nullable as a whole and take the title down
+// with it.
+//
+// RecipeAvailable answers "can this caller OPEN the recipe", not "does the row exist" — it is
+// false both when the author removed it and when the author stopped sharing it with this
+// caller (KAN-2). The row still renders (title, date, note) but the client must not offer to
+// open or re-cook it.
+//
+// Those two causes are deliberately ONE flag with no second field separating them, and no
+// client should try to reconstruct the difference: telling a reader that an author turned a
+// recipe Private reports that author's private decision to a stranger, which is itself the
+// leak. See docs/adr/0001 and design decision D14.
+//
+// That is a property of THIS contract, not yet of the whole API. GET /meal-plans/{id} joins
+// Recipes with no visibility filter, so a plan-linked cook can still be told apart by holding
+// both responses: the plan drops a removed recipe out of its join but keeps serving a
+// withdrawn one's title and photo. Closing that is KAN-1, and until it lands the guarantee
+// above holds only for clients reading the cook log alone.
 public record CookLogResponse(
     Guid Id,
     Guid RecipeId,
