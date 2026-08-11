@@ -67,13 +67,14 @@ public class SocialService : ISocialService
         return SocialResult<bool>.Success(true);
     }
 
+    // ADR-0001 (KAN-11): unliking DESTROYS the caller's own Like row, so — unlike
+    // LikeRecipeAsync above — it needs no visibility. Gating it meant an author making the
+    // recipe Private or removing it stranded the like permanently: the caller could never
+    // retract it, and the author kept the RecipeReceivedLike (+5) for a like nobody could
+    // withdraw. The author id is still needed, but only to reverse that award.
     public async Task<SocialResult<bool>> UnlikeRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
-        if (authorId is null)
-        {
-            return SocialResult<bool>.NotFound();
-        }
+        var authorId = await RecipeAuthorRegardlessOfAvailabilityAsync(recipeId, cancellationToken);
 
         // Interaction rows are hard rows (unlike recipes there is nothing to soft-delete);
         // ExecuteDelete is naturally idempotent — deleting a like that isn't there is a no-op.
@@ -83,11 +84,13 @@ public class SocialService : ISocialService
 
         // Gamification (symmetric reversal): a real like->unlike transition subtracts the
         // RecipeReceivedLike award from the author. A repeated/no-op unlike deleted nothing,
-        // so it never touches the rank.
-        if (deleted > 0)
+        // so it never touches the rank. A null author is defensive rather than reachable
+        // (see RecipeAuthorRegardlessOfAvailabilityAsync) — skipping the reversal is the
+        // safe half, same as ClearCookedAsync.
+        if (deleted > 0 && authorId is Guid author)
         {
-            await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeReceivedLike, cancellationToken);
-            await WithdrawUnreadNotificationAsync(authorId.Value, currentUserId, NotificationType.RecipeLiked, cancellationToken, recipeId: recipeId);
+            await RevertAuthorAsync(author, currentUserId, RankEvent.RecipeReceivedLike, cancellationToken);
+            await WithdrawUnreadNotificationAsync(author, currentUserId, NotificationType.RecipeLiked, cancellationToken, recipeId: recipeId);
             await _db.SaveChangesAsync(cancellationToken);
         }
 
@@ -330,29 +333,51 @@ public class SocialService : ISocialService
             return SocialResult<bool>.NotFound();
         }
 
-        // Same readable set as UpdateCommentAsync — one policy, both comment paths.
-        var recipe = await _db.Recipes
-            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
-            .SingleOrDefaultAsync(r => r.Id == comment.RecipeId, cancellationToken);
-        if (recipe is null)
+        Guid? recipeAuthorId;
+        if (comment.UserId == currentUserId)
         {
-            return SocialResult<bool>.NotFound();
+            // ADR-0001 (KAN-10): deleting the caller's OWN comment destroys only their own
+            // row, so — unlike the moderation branch below — it needs no visibility. Gating
+            // it meant an author making the recipe Private or removing it stranded every
+            // commenter's own writing on their account with no way to take it down: "the
+            // note they wrote is their own writing, not the author's". The recipe's author
+            // is still needed, but only to reverse the comment's award below.
+            recipeAuthorId = await RecipeAuthorRegardlessOfAvailabilityAsync(comment.RecipeId, cancellationToken);
         }
-
-        // Decision I6: the comment's author OR the recipe's author may delete (Instagram's
-        // moderation model). Anyone else who can see it gets Forbidden.
-        if (comment.UserId != currentUserId && recipe.CreatedByUserId != currentUserId)
+        else
         {
-            _logger.LogWarning("User {UserId} forbidden from deleting comment {CommentId}.", currentUserId, commentId);
-            return SocialResult<bool>.Forbidden();
+            // Same readable set as UpdateCommentAsync — one policy, both comment paths. This
+            // is the genuinely visibility-gated branch: decision I6 lets the recipe's author
+            // delete anyone's comment on their own recipe, and that moderation power reaches
+            // no further than what they can see.
+            var recipe = await _db.Recipes
+                .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+                .SingleOrDefaultAsync(r => r.Id == comment.RecipeId, cancellationToken);
+            if (recipe is null)
+            {
+                return SocialResult<bool>.NotFound();
+            }
+
+            if (recipe.CreatedByUserId != currentUserId)
+            {
+                _logger.LogWarning("User {UserId} forbidden from deleting comment {CommentId}.", currentUserId, commentId);
+                return SocialResult<bool>.Forbidden();
+            }
+
+            recipeAuthorId = recipe.CreatedByUserId;
         }
 
         _db.Comments.Remove(comment);
         // Gamification (symmetric reversal): removing a comment reverses the +3 the author
         // earned for it. Passing the comment's author as the "acting user" makes the self-
         // guard fire exactly when the award was skipped (author commenting on their own
-        // recipe), so a self-comment's deletion never docks the author.
-        await RevertAuthorAsync(recipe.CreatedByUserId, comment.UserId, RankEvent.RecipeReceivedComment, cancellationToken);
+        // recipe), so a self-comment's deletion never docks the author. A null author is
+        // defensive rather than reachable (see RecipeAuthorRegardlessOfAvailabilityAsync);
+        // skipping the reversal there is the safe half, same as ClearCookedAsync.
+        if (recipeAuthorId is Guid author)
+        {
+            await RevertAuthorAsync(author, comment.UserId, RankEvent.RecipeReceivedComment, cancellationToken);
+        }
         // No explicit notification withdrawal here: Notification.CommentId cascades, so
         // deleting the comment removes every notification about it — the "commented on
         // your recipe" line AND any "liked your comment" ones. That is deliberately
@@ -389,22 +414,24 @@ public class SocialService : ISocialService
         return SocialResult<bool>.Success(true);
     }
 
+    // ADR-0001 (KAN-11), the comment-like counterpart of UnlikeRecipeAsync above: unliking a
+    // comment destroys only the caller's own CommentLike row, so it needs no visibility
+    // either. VisibleCommentAuthorAsync gates the COMMENT's author through the RECIPE's
+    // visibility, so unlike above there is no single existing helper to reuse — this reads
+    // the comment's author with no gate of its own, exactly as VisibleCommentAuthorAsync
+    // would with the visibility clause removed.
     public async Task<SocialResult<bool>> UnlikeCommentAsync(Guid commentId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        var authorId = await VisibleCommentAuthorAsync(commentId, currentUserId, cancellationToken);
-        if (authorId is null)
-        {
-            return SocialResult<bool>.NotFound();
-        }
+        var authorId = await CommentAuthorRegardlessOfAvailabilityAsync(commentId, cancellationToken);
 
         var deleted = await _db.CommentLikes
             .Where(cl => cl.UserId == currentUserId && cl.CommentId == commentId)
             .ExecuteDeleteAsync(cancellationToken);
 
-        if (deleted > 0)
+        if (deleted > 0 && authorId is Guid author)
         {
-            await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.CommentReceivedLike, cancellationToken);
-            await WithdrawUnreadNotificationAsync(authorId.Value, currentUserId, NotificationType.CommentLiked, cancellationToken, commentId: commentId);
+            await RevertAuthorAsync(author, currentUserId, RankEvent.CommentReceivedLike, cancellationToken);
+            await WithdrawUnreadNotificationAsync(author, currentUserId, NotificationType.CommentLiked, cancellationToken, commentId: commentId);
             await _db.SaveChangesAsync(cancellationToken);
         }
 
@@ -1408,6 +1435,17 @@ public class SocialService : ISocialService
             .Select(c => (Guid?)c.UserId)
             .SingleOrDefaultAsync(cancellationToken);
     }
+
+    // The counterpart for ADR-0001's DESTRUCTIVE write on a comment (UnlikeCommentAsync):
+    // the comment's author whether or not its recipe is visible to the caller, or has been
+    // soft-deleted. Comments carry no query filter of their own (unlike Recipe), so — unlike
+    // RecipeAuthorRegardlessOfAvailabilityAsync — there is no IgnoreQueryFilters to add: a
+    // comment under a soft-deleted recipe is still a live row here.
+    private Task<Guid?> CommentAuthorRegardlessOfAvailabilityAsync(Guid commentId, CancellationToken cancellationToken) =>
+        _db.Comments
+            .Where(c => c.Id == commentId)
+            .Select(c => (Guid?)c.UserId)
+            .SingleOrDefaultAsync(cancellationToken);
 
     private static CookedRecipeResponse ToCookedResponse(Guid recipeId, CookedRecipe row) =>
         new(recipeId, row.TimesCooked, row.Rating, row.TimesCooked > 0 ? row.LastCookedAt : null);
