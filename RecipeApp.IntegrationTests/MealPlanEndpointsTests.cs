@@ -241,6 +241,41 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         Assert.NotNull(after!.Entries.Single().CookedAt);
     }
 
+    // KAN-8: un-ticking a cooked slot deletes every cook against it, notes included, so the
+    // day page has to know whether there is writing to lose BEFORE it fires the delete. A
+    // count, not a flag — the confirmation names how many notes would go.
+    [Fact]
+    public async Task Getting_a_plan_counts_how_many_of_a_slots_cooks_carry_a_note()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2026, 12, 28));
+        var recipe = await CreateRecipeAsync(client);
+        var entry = await AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+
+        var beforeCooking = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+        Assert.Equal(0, beforeCooking!.Entries.Single().CookNoteCount);
+
+        // Two cooks against the one slot — the shape un-cooking deletes wholesale.
+        var first = await LogCookAsync(client, recipe.Id, entry.Id);
+        await LogCookAsync(client, recipe.Id, entry.Id);
+
+        // Cooked, but nothing written yet: there is nothing to lose, so the count stays 0 and
+        // the toggle must stay a one-tap gesture.
+        var cookedWithoutNotes = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+        Assert.NotNull(cookedWithoutNotes!.Entries.Single().CookedAt);
+        Assert.Equal(0, cookedWithoutNotes.Entries.Single().CookNoteCount);
+
+        var annotated = await client.PatchAsJsonAsync(
+            $"/cook-log/{first.Id}", new UpdateCookNoteRequest("Needed more harissa"), TestJson.Options);
+        annotated.EnsureSuccessStatusCode();
+
+        // One of the two cooks carries a note. Counted, not flagged: 1 is what the
+        // confirmation names, and it must not become 2 just because two cooks exist.
+        var afterNote = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+        Assert.Equal(1, afterNote!.Entries.Single().CookNoteCount);
+    }
+
     // The subquery scopes to cl.UserId == userId (mutation evidence, task 1 brief step 7):
     // widening that predicate let ANY user's cook of the entry's id satisfy it. POST
     // /cook-log already 404s a stranger who tries this through the API (see
@@ -277,6 +312,44 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var body = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
 
         Assert.Null(body!.Entries.Single().CookedAt);
+    }
+
+    // The same caller scoping on the KAN-8 count, pinned the same way and for a sharper
+    // reason: a stranger's note is not writing this user could lose, so counting it would put
+    // a confirmation dialog in front of a toggle that has nothing at stake — and the dialog
+    // would name a note the user never wrote and cannot read. Constructed directly in the
+    // DbContext because the API gives a stranger no way to log against this entry at all.
+    [Fact]
+    public async Task Getting_a_plan_does_not_count_another_users_note_on_the_same_entry_id()
+    {
+        var client = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        var plan = await CreateMealPlanAsync(client, UtcMidnight(2027, 1, 4));
+        var recipe = await CreateRecipeAsync(client);
+        var entry = await AddEntryAsync(client, plan.Id, DayOfWeek.Monday, MealType.Dinner, recipe.Id);
+
+        var otherClient = factory.CreateClient();
+        var otherAuth = await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.CookLogs.Add(new CookLog
+            {
+                Id = Guid.NewGuid(),
+                UserId = otherAuth.UserId,
+                RecipeId = recipe.Id,
+                RecipeTitle = recipe.Title,
+                MealPlanEntryId = entry.Id,
+                CookedAt = DateTime.UtcNow,
+                Note = "Someone else's note",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var body = await client.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+
+        Assert.Equal(0, body!.Entries.Single().CookNoteCount);
     }
 
     // --- add entry --------------------------------------------------------------------------
@@ -637,6 +710,16 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
             TestJson.Options);
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<MealPlanEntryResponse>(TestJson.Options))!;
+    }
+
+    // POST /cook-log rather than POST /recipes/{id}/cooked: only this one carries the plan
+    // entry id, which is what the read under test counts against.
+    private static async Task<CookLogResponse> LogCookAsync(HttpClient client, Guid recipeId, Guid mealPlanEntryId)
+    {
+        var response = await client.PostAsJsonAsync(
+            "/cook-log", new LogCookRequest(recipeId, mealPlanEntryId), TestJson.Options);
+        response.EnsureSuccessStatusCode();
+        return (await response.Content.ReadFromJsonAsync<CookLogResponse>(TestJson.Options))!;
     }
 
     private static async Task<RecipeResponse> CreateRecipeAsync(HttpClient client, RecipeVisibility visibility = RecipeVisibility.Public)

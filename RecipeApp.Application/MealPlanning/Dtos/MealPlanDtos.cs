@@ -34,12 +34,25 @@ public record MealPlanEntryRecipeSummary(
 // CookedAt is appended last, per this file's convention. Null means "not cooked", which is
 // also what every entry reads as until someone logs a cook against it — there is no third
 // state and nothing is stored on the entry itself: the value is read from CookLog.
+//
+// CookNoteCount (KAN-8) is appended after it, same convention. It exists because un-cooking a
+// slot deletes EVERY cook against it — notes included — and the client cannot ask for
+// confirmation it has no grounds for: a dialog on every un-tick would wreck a one-tap
+// reversible gesture, and no dialog at all silently destroys writing. So the read says how
+// much writing is at stake and the client decides.
+//
+// A COUNT rather than a flag, because the confirmation names what would go ("the note you
+// wrote", "2 notes"). Notes are per cook (CONTEXT.md), one apiece, so this is both "how many
+// of this slot's cooks carry a note" and "how many notes would be lost" — the same number.
+// Zero on an uncooked slot and on a cooked one nobody has annotated; those two cases are
+// deliberately indistinguishable here, since neither has anything to lose.
 public record MealPlanEntryResponse(
     Guid Id,
     DayOfWeek DayOfWeek,
     MealType MealType,
     MealPlanEntryRecipeSummary Recipe,
-    DateTime? CookedAt);
+    DateTime? CookedAt,
+    int CookNoteCount);
 
 public record MealPlanResponse(
     Guid Id,

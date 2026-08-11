@@ -95,13 +95,23 @@ public class MealPlanService : IMealPlanService
                     .OrderByDescending(cl => cl.CookedAt)
                     .Select(cl => (DateTime?)cl.CookedAt)
                     .FirstOrDefault(),
+                // KAN-8. Same correlated-subquery shape and the same caller scoping as
+                // CookedAt above, for the same reasons — this is a second question about the
+                // same set of rows, not a second source of truth.
+                //
+                // "Carries a note" is exactly Note != null: UpdateNoteAsync is the only writer
+                // of the column and it normalises empty and whitespace to null on the way in,
+                // so a written-then-blanked note reads as no note. If a second writer ever
+                // appears, that invariant is what this predicate depends on.
+                CookNoteCount = _db.CookLogs
+                    .Count(cl => cl.UserId == userId && cl.MealPlanEntryId == e.Id && cl.Note != null),
             })
             .OrderBy(e => e.DayOfWeek)
             .ThenBy(e => e.MealType)
             .ToListAsync(cancellationToken);
 
         var entries = rows
-            .Select(r => new MealPlanEntryResponse(r.Id, r.DayOfWeek, r.MealType, r.Recipe, r.CookedAt))
+            .Select(r => new MealPlanEntryResponse(r.Id, r.DayOfWeek, r.MealType, r.Recipe, r.CookedAt, r.CookNoteCount))
             .ToList();
 
         return MealPlanResult<MealPlanResponse>.Success(new MealPlanResponse(plan.Id, plan.WeekStartDate, plan.CreatedAt, entries));
@@ -244,7 +254,9 @@ public class MealPlanService : IMealPlanService
                 recipe.CaloriesPerServing),
             // A slot created one line ago has no cook against it. Not a placeholder: null IS
             // the answer, and reading CookLog here would be a query with one possible result.
-            null));
+            null,
+            // And no cook means no note to lose (KAN-8) — same reasoning, same query avoided.
+            0));
     }
 
     public async Task<MealPlanResult<bool>> RemoveEntryAsync(Guid mealPlanId, Guid entryId, Guid userId, CancellationToken cancellationToken = default)
