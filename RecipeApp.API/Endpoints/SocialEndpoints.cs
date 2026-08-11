@@ -221,14 +221,18 @@ public static class SocialEndpoints
         // the read routes further down there is nothing an anonymous caller could be shown, so
         // it deliberately does NOT say AllowAnonymous and the fallback policy answers 401. The
         // SPA turns that into the login modal rather than a failed-to-load state.
-        group.MapGet("/me/cooked-recipes", async (string? cursor, int? limit, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        //
+        // `q` (KAN-9) is the search box, and it needs no validation of its own: the service
+        // trims it, treats blank as no filter, and escapes it into a LIKE pattern, so every
+        // string is a legal search. Same shape and same name as the follow lists' filter above.
+        group.MapGet("/me/cooked-recipes", async (string? cursor, int? limit, string? q, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
             {
                 return error!;
             }
 
-            var response = await social.GetCookedDishesAsync(decodedCursor, effectiveLimit, GetUserId(user), cancellationToken);
+            var response = await social.GetCookedDishesAsync(q, decodedCursor, effectiveLimit, GetUserId(user), cancellationToken);
             return Results.Ok(response);
         });
 

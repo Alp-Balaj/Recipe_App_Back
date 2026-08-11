@@ -348,6 +348,188 @@ public class CookedDishEndpointsTests(IntegrationTestFactory factory) : IClassFi
         Assert.Equal(seen.Count, seen.Distinct().Count());
     }
 
+    // --- search (KAN-9) ----------------------------------------------------------------------
+    //
+    // Search is what makes a collection longer than a screen usable, and is the reason Cooked
+    // needs no alphabetical sort. It is SERVER-SIDE on purpose: filtering only the pages a
+    // client has already loaded would silently miss dishes behind the cursor, which is exactly
+    // the quiet incompleteness this whole surface is designed to avoid — a user who cannot find
+    // a dish they cooked concludes the record lost it.
+    //
+    // It matches the DISPLAYED title, which is the readable recipe's current name when there is
+    // one and the cook's snapshot otherwise. The two tests carrying that decision are
+    // Search_finds_an_unavailable_dish_by_its_snapshot_title and
+    // Search_matches_the_name_on_screen_not_the_one_it_was_cooked_under.
+
+    [Fact]
+    public async Task Search_filters_the_list_by_name_ignoring_case()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var stew = await CreateRecipeAsync(client, "Beef stew");
+        var pide = await CreateRecipeAsync(client, "Pide with minced lamb");
+        await LogCookAsync(client, stew.Id);
+        await LogCookAsync(client, pide.Id);
+
+        var list = await GetCookedAsync(client, "?q=STEW");
+
+        // Case-insensitive and substring, like every other search box in the app (the follow
+        // lists and the ingredient picker): a cook typing "stew" is browsing their own
+        // collection from memory, not spelling a title exactly.
+        var found = Assert.Single(list.Items);
+        Assert.Equal(stew.Id, found.RecipeId);
+        Assert.DoesNotContain(list.Items, d => d.RecipeId == pide.Id);
+    }
+
+    [Fact]
+    public async Task Search_reaches_a_dish_that_is_pages_deep_in_the_unfiltered_list()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var wanted = await CreateRecipeAsync(client, "Mercimek çorbası");
+        await LogCookAsync(client, wanted.Id);
+
+        // Cooked AFTER it, so in LastCookedAt DESC every one of these sits ahead of the dish
+        // being searched for and it is nowhere near the first page.
+        for (var i = 0; i < 4; i++)
+        {
+            var filler = await CreateRecipeAsync(client, $"Something else {i}");
+            await LogCookAsync(client, filler.Id);
+        }
+
+        var firstPage = await GetCookedAsync(client, "?q=mercimek&limit=2");
+
+        // THE point of doing this server-side. A client filtering what it had already loaded
+        // would show nothing here until the reader clicked "show older dishes" twice — and
+        // would have no way to tell them that is what was needed.
+        Assert.Equal(wanted.Id, Assert.Single(firstPage.Items).RecipeId);
+        Assert.Null(firstPage.NextCursor);
+    }
+
+    [Fact]
+    public async Task Search_results_page_like_the_unfiltered_list()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var matching = new List<RecipeResponse>();
+        for (var i = 0; i < 3; i++)
+        {
+            var recipe = await CreateRecipeAsync(client, $"Ragu number {i}");
+            await LogCookAsync(client, recipe.Id);
+            matching.Add(recipe);
+
+            var other = await CreateRecipeAsync(client, $"Not a match {i}");
+            await LogCookAsync(client, other.Id);
+        }
+
+        var firstPage = await GetCookedAsync(client, "?q=ragu&limit=2");
+        Assert.Equal(2, firstPage.Items.Count);
+        Assert.Equal(matching[2].Id, firstPage.Items[0].RecipeId);
+        Assert.Equal(matching[1].Id, firstPage.Items[1].RecipeId);
+        Assert.NotNull(firstPage.NextCursor);
+
+        // The cursor is the same keyset cursor the unfiltered list issues, so the second page
+        // has to carry the search too — filter and cursor compose, and a filter applied only to
+        // the first request would hand back the unfiltered tail of the collection here.
+        var secondPage = await GetCookedAsync(
+            client, $"?q=ragu&limit=2&cursor={Uri.EscapeDataString(firstPage.NextCursor!)}");
+        Assert.Equal(matching[0].Id, Assert.Single(secondPage.Items).RecipeId);
+        Assert.Null(secondPage.NextCursor);
+
+        var seen = firstPage.Items.Concat(secondPage.Items).Select(d => d.RecipeId).ToList();
+        Assert.Equal(seen.Count, seen.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task Search_finds_an_unavailable_dish_by_its_snapshot_title()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(author, "Supper, later withdrawn");
+
+        var cook = await factory.CreateAuthenticatedClientAsync();
+        await LogCookAsync(cook, recipe.Id);
+        await UpdateRecipeAsync(author, recipe, RecipeVisibility.Private, null);
+
+        var list = await GetCookedAsync(cook, "?q=withdrawn");
+
+        // ADR-0001 again, one layer further in: the row survives the author withdrawing the
+        // recipe, so the search that reaches it has to fall back to the same snapshot title the
+        // row renders. Matching only the readable recipe would make exactly the dishes a user
+        // can no longer open unfindable — the ones whose record is all they have left.
+        var found = Assert.Single(list.Items);
+        Assert.Equal(recipe.Id, found.RecipeId);
+        Assert.False(found.RecipeAvailable);
+        Assert.Equal("Supper, later withdrawn", found.Title);
+    }
+
+    [Fact]
+    public async Task Search_matches_the_name_on_screen_not_the_one_it_was_cooked_under()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(author, "Weeknight pasta");
+
+        var cook = await factory.CreateAuthenticatedClientAsync();
+        await LogCookAsync(cook, recipe.Id);
+
+        // The cook snapshotted "Weeknight pasta"; the author has since renamed it. The row now
+        // reads "Sunday roast", because the readable title wins over the snapshot.
+        await RenameRecipeAsync(author, recipe, "Sunday roast");
+
+        Assert.Equal("Sunday roast", Assert.Single((await GetCookedAsync(cook)).Items).Title);
+
+        var byCurrentName = await GetCookedAsync(cook, "?q=sunday");
+        Assert.Equal(recipe.Id, Assert.Single(byCurrentName.Items).RecipeId);
+
+        // Search follows the DISPLAYED title — one COALESCE over the same two sources the row
+        // itself renders from, in the same precedence. Matching either title independently
+        // would return this dish for "weeknight" and then show the reader a row saying "Sunday
+        // roast", with the word they typed nowhere on screen: a result that reads as a bug in
+        // the search rather than as history.
+        Assert.Empty((await GetCookedAsync(cook, "?q=weeknight")).Items);
+    }
+
+    [Fact]
+    public async Task A_blank_search_is_the_whole_collection()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Still here");
+        await LogCookAsync(client, recipe.Id);
+
+        // Clearing the box restores the full list — and a box holding only spaces IS cleared.
+        // Trimming to nothing must mean "no filter", not "match the empty string in a title
+        // that has been padded", which is what an untrimmed pattern would quietly become.
+        Assert.Single((await GetCookedAsync(client, "?q=")).Items);
+        Assert.Single((await GetCookedAsync(client, "?q=%20%20")).Items);
+    }
+
+    [Fact]
+    public async Task Search_treats_a_wildcard_as_a_literal_character()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var withPercent = await CreateRecipeAsync(client, "100% wholemeal loaf");
+        var plain = await CreateRecipeAsync(client, "Plain white loaf");
+        await LogCookAsync(client, withPercent.Id);
+        await LogCookAsync(client, plain.Id);
+
+        // Unescaped, "%" is LIKE's match-anything and this returns the whole collection —
+        // a search box that answers a typed character with everything. The same escaping the
+        // follow lists and the ingredient picker do, for the same reason.
+        var list = await GetCookedAsync(client, "?q=%25");
+
+        Assert.Equal(withPercent.Id, Assert.Single(list.Items).RecipeId);
+    }
+
+    [Fact]
+    public async Task Search_does_not_reach_another_users_dishes()
+    {
+        var owner = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(owner, "Someone else's dinner");
+        await LogCookAsync(owner, recipe.Id);
+
+        var stranger = await factory.CreateAuthenticatedClientAsync();
+
+        // Cooked is private (CONTEXT.md). A filter is a narrowing of the caller's own list and
+        // must never widen it — searching a Public recipe's exact title still finds nothing.
+        Assert.Empty((await GetCookedAsync(stranger, "?q=dinner")).Items);
+    }
+
     [Fact]
     public async Task Paging_rejects_a_malformed_cursor_and_a_non_positive_limit()
     {
@@ -413,8 +595,26 @@ public class CookedDishEndpointsTests(IntegrationTestFactory factory) : IClassFi
         RecipeVisibility visibility,
         string? imageUrl)
     {
+        await ReplaceRecipeAsync(author, recipe, recipe.Title, visibility, imageUrl);
+    }
+
+    /// <summary>
+    /// Renames a recipe, as its author would. The cooks already logged against it keep the
+    /// title they snapshotted — which is the whole point wherever this is used (KAN-9): the
+    /// dish's two possible names come apart, and only one of them is on screen.
+    /// </summary>
+    private static Task RenameRecipeAsync(HttpClient author, RecipeResponse recipe, string title) =>
+        ReplaceRecipeAsync(author, recipe, title, recipe.Visibility, recipe.ImageUrl);
+
+    private static async Task ReplaceRecipeAsync(
+        HttpClient author,
+        RecipeResponse recipe,
+        string title,
+        RecipeVisibility visibility,
+        string? imageUrl)
+    {
         var request = new UpdateRecipeRequest(
-            recipe.Title,
+            title,
             recipe.Description,
             recipe.PrepTimeMinutes,
             recipe.CookTimeMinutes,

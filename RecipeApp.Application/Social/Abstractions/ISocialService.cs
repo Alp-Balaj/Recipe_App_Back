@@ -54,8 +54,16 @@ public interface ISocialService
     /// reader's record). Only a dish with neither a readable recipe nor a snapshot falls out,
     /// because nothing about it can be rendered.
     /// </para>
+    /// <para>
+    /// <paramref name="q"/> (KAN-9) filters by the title the row DISPLAYS — the readable
+    /// recipe's current name where there is one, the cook's snapshot otherwise — case-insensitive
+    /// substring, blank meaning no filter. It narrows before the cursor is applied, so search and
+    /// keyset paging compose: results page exactly like the unfiltered list. Server-side because
+    /// the alternative, filtering the pages a client happens to hold, silently misses every dish
+    /// behind the cursor.
+    /// </para>
     /// </summary>
-    Task<CookedDishListResponse> GetCookedDishesAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default);
+    Task<CookedDishListResponse> GetCookedDishesAsync(string? q, KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The dish page's header (KAN-5, design D9): one row of
