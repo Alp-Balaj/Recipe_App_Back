@@ -30,10 +30,15 @@ public class CookLogService : ICookLogService
         // Same visibility expression as adding a dish to a plan, for the same reason: you can
         // log a cook of exactly the recipes you can open. Soft-deleted falls out via the
         // global query filter.
+        //
+        // ImageUrl comes back from THIS query, the gated one, rather than a second read after
+        // the write. Two reads could straddle the author flipping the recipe to Private, and
+        // the response would then carry an image the caller may no longer see — the same leak
+        // Project and UpdateNoteAsync were changed to close.
         var recipe = await _db.Recipes
             .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
             .Where(r => r.Id == recipeId)
-            .Select(r => new { r.Id, r.Title })
+            .Select(r => new { r.Id, r.Title, r.ImageUrl })
             .SingleOrDefaultAsync(cancellationToken);
         if (recipe is null)
         {
@@ -99,13 +104,10 @@ public class CookLogService : ICookLogService
 
         await _db.SaveChangesAsync(cancellationToken);
 
-        // Freshly written, so the recipe is by definition still there.
-        var imageUrl = await _db.Recipes
-            .Where(r => r.Id == recipe.Id)
-            .Select(r => r.ImageUrl)
-            .SingleOrDefaultAsync(cancellationToken);
-
-        return MealPlanResult<CookLogResponse>.Success(ToResponse(row, imageUrl, recipeAvailable: true));
+        // Available by construction: the gate above already proved this caller can open this
+        // recipe, and the image travelled with it.
+        return MealPlanResult<CookLogResponse>.Success(
+            ToResponse(row, recipe.ImageUrl, recipeAvailable: true));
     }
 
     public async Task<MealPlanResult<CookLogListResponse>> ListAsync(
@@ -131,9 +133,10 @@ public class CookLogService : ICookLogService
 
         // One extra row is the "is there a next page" probe — never returned.
         var page = await Project(query
-                .OrderByDescending(cl => cl.CookedAt)
-                .ThenByDescending(cl => cl.Id)
-                .Take(limit + 1))
+                    .OrderByDescending(cl => cl.CookedAt)
+                    .ThenByDescending(cl => cl.Id)
+                    .Take(limit + 1),
+                currentUserId)
             .ToListAsync(cancellationToken);
 
         var hasMore = page.Count > limit;
@@ -152,9 +155,10 @@ public class CookLogService : ICookLogService
         Guid currentUserId, CancellationToken cancellationToken = default)
     {
         var latest = await Project(_db.CookLogs
-                .Where(cl => cl.UserId == currentUserId)
-                .OrderByDescending(cl => cl.CookedAt)
-                .ThenByDescending(cl => cl.Id))
+                    .Where(cl => cl.UserId == currentUserId)
+                    .OrderByDescending(cl => cl.CookedAt)
+                    .ThenByDescending(cl => cl.Id),
+                currentUserId)
             .FirstOrDefaultAsync(cancellationToken);
 
         var total = await _db.CookLogs.CountAsync(cl => cl.UserId == currentUserId, cancellationToken);
@@ -186,7 +190,14 @@ public class CookLogService : ICookLogService
         // Editing_a_note_leaves_the_cooked_count_alone.
         await _db.SaveChangesAsync(cancellationToken);
 
+        // Note the asymmetry, and that it is deliberate. The WRITE above is ungated: annotating
+        // your own cook is your own record, so it stays possible after the author withdraws the
+        // recipe (ADR-0001 — destructive-or-own-row writes are ungated, creating writes are
+        // not). What the write REPORTS back is gated, by the same visibility Project applies,
+        // so a client that re-renders from this response cannot come away believing the dish
+        // became openable again.
         var recipe = await _db.Recipes
+            .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
             .Where(r => r.Id == row.RecipeId)
             .Select(r => new { r.ImageUrl })
             .SingleOrDefaultAsync(cancellationToken);
@@ -259,21 +270,41 @@ public class CookLogService : ICookLogService
     // at compile time, so the shape matters); every read below therefore narrows the entity
     // query and only then selects.
     //
-    // Both extras reach for the recipe through its global soft-delete filter, which is the
-    // point: a row whose recipe is gone comes back with a null image and RecipeAvailable
-    // false rather than dropping out of the list. The plan and shopping surfaces correctly
-    // drop soft-deleted dishes — you cannot cook one — but a record of what you ALREADY did
-    // must not delete itself, which is why RecipeTitle is snapshotted on the row.
+    // Both extras read the recipe through `readable` — the caller's OWN visibility, not the
+    // bare row. That is the whole of KAN-2 and of ADR-0001's first consequence: "available"
+    // means "you can open this", never "the row exists and is not soft-deleted". A recipe its
+    // author flipped to Private is as unopenable as a removed one, so it must read the same
+    // way — same RecipeAvailable false, same withheld image, and (crucially) the same on the
+    // wire, because reporting an author's private visibility decision back to a stranger is
+    // itself a leak. The two cases are ONE user-visible state (design D14). Before this, a
+    // private recipe stayed available, kept serving its photo to people who could no longer
+    // open it, and left "Cook it again" enabled to 404 on press.
+    //
+    // Composed as one visibility-filtered IQueryable rather than repeating the predicate,
+    // per RecipeVisibilityPolicy's own instruction: a divergent hand-written copy is how a
+    // private recipe leaks. Soft deletion still falls out underneath it, via the DbSet's
+    // global query filter — the two rules stack, they do not replace each other.
+    //
+    // What must NOT follow visibility is the row itself. A cook whose recipe went private is
+    // still a fact about the user, so it keeps rendering from CookLog.RecipeTitle, keeps its
+    // note, and stays annotatable — ADR-0001 withdraws the author's content, never the
+    // reader's record. The plan and shopping surfaces correctly drop dishes you cannot cook;
+    // a record of what you ALREADY did must not delete itself.
+    //
     // Correlated SUBQUERIES, not the cl.Recipe navigation. The navigation is a required
-    // relationship, so projecting through it compiles to an INNER join, and a soft-deleted
+    // relationship, so projecting through it compiles to an INNER join, and an unreadable
     // recipe then drops the whole cook out of the caller's own history — silently, and only
     // for the rows that most need to survive. A_soft_deleted_recipe_leaves_the_cook_readable
     // caught exactly that; do not "simplify" this back to cl.Recipe.ImageUrl.
-    private IQueryable<ReadRow> Project(IQueryable<CookLog> rows) =>
-        rows.Select(cl => new ReadRow(
+    private IQueryable<ReadRow> Project(IQueryable<CookLog> rows, Guid currentUserId)
+    {
+        var readable = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
+
+        return rows.Select(cl => new ReadRow(
             cl,
-            _db.Recipes.Where(r => r.Id == cl.RecipeId).Select(r => r.ImageUrl).FirstOrDefault(),
-            _db.Recipes.Any(r => r.Id == cl.RecipeId)));
+            readable.Where(r => r.Id == cl.RecipeId).Select(r => r.ImageUrl).FirstOrDefault(),
+            readable.Any(r => r.Id == cl.RecipeId)));
+    }
 
     private sealed record ReadRow(CookLog Row, string? ImageUrl, bool RecipeAvailable);
 
