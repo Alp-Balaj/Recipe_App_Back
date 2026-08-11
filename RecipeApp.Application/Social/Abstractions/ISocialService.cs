@@ -87,6 +87,18 @@ public interface ISocialService
     Task<SocialResult<CookedRecipeResponse>> ClearCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Retracts the caller's rating and NOTHING else (KAN-12): the cooks, their notes and
+    /// the lifetime count all survive, because rating and cooking are separate claims —
+    /// "I am no longer sure what I thought of this" is not "I have never cooked this", which
+    /// is what <see cref="ClearCookedAsync"/> means and why that one is deliberately wide.
+    /// Reverses the RecipeCookedAndRated award exactly as ClearCookedAsync does, and only on
+    /// a real rated -> unrated transition, so retracting twice cannot dock an author twice.
+    /// Idempotent, and requires no visibility for the same ADR-0001 reason as the two
+    /// destructive writes above.
+    /// </summary>
+    Task<SocialResult<CookedRecipeResponse>> ClearRatingAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// The feed's social envelope for one recipe (F1 / I3-single-recipe revisit): author,
     /// live counts, caller-relative flags. Visibility matches GET /recipes/{id} — a recipe
     /// the caller can't see (or that is soft-deleted) is NotFound, never Forbidden (rule 2).

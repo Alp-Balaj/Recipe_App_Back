@@ -568,6 +568,13 @@ public class SocialService : ISocialService
         // read. If this proves too blunt in practice the fix is a narrower "un-log one cook"
         // gesture, which CookLog already supports — not a quieter delete here.
         //
+        // KAN-12 was that proof, and it was answered the way this comment asks rather than by
+        // softening the delete. The width is still right for THIS gesture; what was wrong was
+        // which gesture reached it — retracting a star called this method and took every cook
+        // and note with it. Retracting now goes to ClearRatingAsync below. Nothing here got
+        // narrower, so a surface that calls this still has to ask first (KAN-8): it deletes
+        // writing, and the caller is the only one who knows there was any.
+        //
         // Unconditional — outside the `if (row is not null)` above, not inside it — because a
         // user can hold CookLog rows with no CookedRecipe aggregate (e.g. the aggregate was
         // already cleared once and the log was left behind before this change existed); a
@@ -576,7 +583,102 @@ public class SocialService : ISocialService
             .Where(cl => cl.UserId == currentUserId && cl.RecipeId == recipeId)
             .ExecuteDeleteAsync(cancellationToken);
 
-        return SocialResult<CookedRecipeResponse>.Success(new CookedRecipeResponse(recipeId, 0, null, null));
+        return SocialResult<CookedRecipeResponse>.Success(new CookedRecipeResponse(recipeId, 0, null, null, false));
+    }
+
+    // KAN-12: the narrow counterpart to ClearCookedAsync above. Retracting a rating is a
+    // claim about the RATING — the two facts are separate, which UncookEntryAsync already
+    // says from the other side ("Rating is untouched ... a separate claim"), and this is that
+    // sentence read backwards. CookLog is therefore never touched here: not the plan-linked
+    // rows, not the notes hanging off them, and not any shopping group they resolve.
+    //
+    // No visibility check, for ADR-0001's reason and not by omission: this destroys a row of
+    // the caller's own, so an author withdrawing the recipe must not strand a rating its
+    // owner can no longer take back. The author lookup therefore has to see past both filters
+    // — same as ClearCookedAsync, same helper.
+    public async Task<SocialResult<CookedRecipeResponse>> ClearRatingAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        // Read untracked, and write with set-based statements below. Two retracts of the same
+        // star can genuinely be in flight together — a double tap, on a control cook mode's
+        // finish panel does not disable while pending — and a tracked read would let both
+        // decide "it was rated" from the same stale row.
+        var row = await _db.CookedRecipes
+            .AsNoTracking()
+            .SingleOrDefaultAsync(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId, cancellationToken);
+
+        if (row is null)
+        {
+            // Nothing to retract, including for a recipe id that never existed: the same
+            // zeroed 200 DELETE /cooked answers, so an unavailable recipe still reads
+            // identically to one that was never there (design D14).
+            return SocialResult<CookedRecipeResponse>.Success(new CookedRecipeResponse(recipeId, 0, null, null, false));
+        }
+
+        // The rated -> unrated transition, decided by the DATABASE rather than by what this
+        // request happened to read: the `Rating != null` predicate means exactly one of two
+        // racing retracts updates a row, so exactly one reverses the award. UnfollowUserAsync's
+        // shape, and the mirror of RateRecipeAsync's wasUnrated gate — that one stops the +15
+        // being farmed on the way in, this one stops the author being docked twice on the way
+        // out for an award that was only ever made once.
+        //
+        // Argued, NOT test-pinned, and deliberately left that way: firing six retracts through
+        // Task.WhenAll at the integration host never interleaves them (they serialise before
+        // reaching this method), so a test written for this passes just as happily against the
+        // in-memory version it is supposed to catch. A test that cannot fail for its own reason
+        // is worse than none. The sequential double-retract IS covered, one test up.
+        var cleared = await _db.CookedRecipes
+            .Where(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId && cr.Rating != null)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(cr => cr.Rating, (int?)null)
+                    .SetProperty(cr => cr.RatedAt, (DateTime?)null),
+                cancellationToken);
+
+        if (cleared > 0)
+        {
+            var authorId = await RecipeAuthorRegardlessOfAvailabilityAsync(recipeId, cancellationToken);
+            if (authorId is Guid author)
+            {
+                await RevertAuthorAsync(author, currentUserId, RankEvent.RecipeCookedAndRated, cancellationToken);
+                // The rank change is the ONLY thing staged here; the row above was written by
+                // the statement, not by the change tracker.
+                await _db.SaveChangesAsync(cancellationToken);
+            }
+        }
+
+        // A row holding neither a cook nor a rating asserts nothing, and CookedByMe is
+        // row EXISTENCE (r.CookedBy.Any(...)), not TimesCooked > 0 — so leaving one behind
+        // would keep telling the envelope and the activity feed that someone who only ever
+        // rated the dish had cooked it. Rating without cooking is allowed and creates exactly
+        // that row (RateRecipeAsync), which is why this case is real rather than defensive.
+        //
+        // The CookLogs check is what makes "no cook" honest. TimesCooked and the log are two
+        // separately-writable records of one fact and are NOT guaranteed to agree —
+        // UncookEntryAsync's floor comment enumerates the ways they drift — so a 0 with rows
+        // behind it must keep its row, or a cook still listed on /plan/cooks would read as
+        // never having happened everywhere else.
+        if (row.TimesCooked == 0
+            && !await _db.CookLogs.AnyAsync(cl => cl.UserId == currentUserId && cl.RecipeId == recipeId, cancellationToken))
+        {
+            // ExecuteDelete rather than a tracked Remove: the loser of the same race deletes
+            // zero rows and carries on, where Remove would throw DbUpdateConcurrencyException
+            // and 500 an endpoint that promises idempotence. Both predicates are re-checked in
+            // the statement, so a cook or a rating written since the read keeps its row.
+            await _db.CookedRecipes
+                .Where(cr => cr.UserId == currentUserId
+                    && cr.RecipeId == recipeId
+                    && cr.TimesCooked == 0
+                    && cr.Rating == null)
+                .ExecuteDeleteAsync(cancellationToken);
+
+            return SocialResult<CookedRecipeResponse>.Success(new CookedRecipeResponse(recipeId, 0, null, null, false));
+        }
+
+        // What is LEFT: the cooks survived, the rating did not. Built here rather than through
+        // ToCookedResponse because `row` was read before the update and still carries the old
+        // rating — the only thing about it that is now stale.
+        return SocialResult<CookedRecipeResponse>.Success(
+            new CookedRecipeResponse(recipeId, row.TimesCooked, null, row.TimesCooked > 0 ? row.LastCookedAt : null, true));
     }
 
     // F1 resolution (I3 revisited for the single-recipe case, 2026-07-19): the same
@@ -1409,8 +1511,10 @@ public class SocialService : ISocialService
             .SingleOrDefaultAsync(cancellationToken);
     }
 
+    // CookedByMe is unconditionally true here: this overload is only reached holding the
+    // caller's row, and the flag is row existence (see CookedRecipeResponse).
     private static CookedRecipeResponse ToCookedResponse(Guid recipeId, CookedRecipe row) =>
-        new(recipeId, row.TimesCooked, row.Rating, row.TimesCooked > 0 ? row.LastCookedAt : null);
+        new(recipeId, row.TimesCooked, row.Rating, row.TimesCooked > 0 ? row.LastCookedAt : null, true);
 
     private static CommentResponse ToCommentResponse(Comment comment, string authorUsername, int likeCount, bool likedByMe) =>
         new(comment.Id, comment.Content, comment.CreatedAt, comment.UpdatedAt, comment.UserId, authorUsername, comment.RecipeId, likeCount, likedByMe);

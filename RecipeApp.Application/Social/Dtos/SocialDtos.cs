@@ -30,11 +30,22 @@ public record RatingRequest(int Rating);
 // State of the caller's own cooked/rated row, returned by POST /recipes/{id}/cooked so the
 // SPA can render the new count without a refetch. TimesCooked is 0 and Rating null once the
 // row has been deleted.
+//
+// CookedByMe is appended last, per this file's convention (KAN-12). It is ROW EXISTENCE —
+// the same derivation as RecipeSocialResponse.CookedByMe and FeedItemResponse.CookedByMe
+// (`r.CookedBy.Any(...)`), so a client patching those caches from this reply cannot disagree
+// with the next read of them. It is deliberately NOT `TimesCooked > 0`: the two come apart in
+// both directions. Rating a dish you never cooked creates the row at TimesCooked = 0, and
+// ClearRatingAsync keeps a row whose count has drifted to 0 while cook-log rows survive
+// behind it. Inferring the flag from the count reports "you have not cooked this" in exactly
+// those cases, and the detail page's envelope merge prefers a client patch over the server's
+// own answer, so the wrong value does not heal on the next read.
 public record CookedRecipeResponse(
     Guid RecipeId,
     int TimesCooked,
     int? Rating,
-    DateTime? LastCookedAt);
+    DateTime? LastCookedAt,
+    bool CookedByMe);
 
 public record CommentListResponse(IReadOnlyList<CommentResponse> Items, string? NextCursor);
 

@@ -71,8 +71,10 @@ public static class SocialEndpoints
             };
         });
 
-        // Idempotent full-row removal — the undo for a mis-tapped "I cooked this", and the
-        // way to retract a rating. 200 with a zeroed row whether or not one existed.
+        // Idempotent full-row removal — "I have never cooked this". 200 with a zeroed row
+        // whether or not one existed. It takes the caller's cook log for this recipe with it,
+        // notes included, so a client offering this gesture has to confirm first (KAN-8).
+        // Retracting a rating is NOT this: it is DELETE /rating below (KAN-12).
         group.MapDelete("/cooked", async (Guid recipeId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var result = await social.ClearCookedAsync(recipeId, GetUserId(user), cancellationToken);
@@ -94,6 +96,20 @@ public static class SocialEndpoints
             };
         })
         .AddEndpointFilter<ValidationFilter<RatingRequest>>();
+
+        // DELETE beside that PUT, not another shape of it: retracting is the same resource
+        // being removed, and it takes no body to validate. 200 with the row that is LEFT —
+        // the cooks survive this (KAN-12), so unlike DELETE /cooked the answer is not
+        // necessarily zeroed and the star control needs to see what remains.
+        group.MapDelete("/rating", async (Guid recipeId, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await social.ClearRatingAsync(recipeId, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                SocialOutcome.Success => Results.Ok(result.Value),
+                _ => Results.NotFound(),
+            };
+        });
 
         group.MapPost("/comments", async (Guid recipeId, CommentRequest request, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
