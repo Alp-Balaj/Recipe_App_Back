@@ -73,6 +73,63 @@ public class SocialInteractionEndpointsTests(IntegrationTestFactory factory) : I
         Assert.False(await db.Likes.AnyAsync(l => l.UserId == auth.UserId && l.RecipeId == recipe.Id));
     }
 
+    // ADR-0001 (KAN-11): unliking destroys the caller's own Like row and so needs no
+    // visibility. Liking still does — see LikeRecipe_NonVisibleRecipeOfAnotherUser_Returns404
+    // above and LikeRecipe_SoftDeletedRecipe_Returns404 below.
+
+    [Fact]
+    public async Task UnlikeRecipe_RecipeSinceMadePrivate_StillRemovesTheLike_AndReversesRank()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+        var before = await RankOfAsync(ownerClient, owner.UserId);
+
+        var likerClient = factory.CreateClient();
+        var liker = await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        (await likerClient.PostAsync($"/recipes/{recipe.Id}/likes", null)).EnsureSuccessStatusCode();
+
+        await MakePrivateAsync(ownerClient, recipe.Id);
+        Assert.Equal(HttpStatusCode.NotFound, (await likerClient.GetAsync($"/recipes/{recipe.Id}")).StatusCode);
+
+        var response = await likerClient.DeleteAsync($"/recipes/{recipe.Id}/likes");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await db.Likes.AnyAsync(l => l.UserId == liker.UserId && l.RecipeId == recipe.Id));
+        // The award leaves with the like, exactly as it does while the recipe is visible —
+        // the reversal must not quietly go missing just because the lookup got harder.
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+    }
+
+    [Fact]
+    public async Task UnlikeRecipe_RecipeSinceDeleted_StillRemovesTheLike_AndReversesRank()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+        var before = await RankOfAsync(ownerClient, owner.UserId);
+
+        var likerClient = factory.CreateClient();
+        var liker = await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        (await likerClient.PostAsync($"/recipes/{recipe.Id}/likes", null)).EnsureSuccessStatusCode();
+
+        (await ownerClient.DeleteAsync($"/recipes/{recipe.Id}")).EnsureSuccessStatusCode();
+
+        var response = await likerClient.DeleteAsync($"/recipes/{recipe.Id}/likes");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await db.Likes.AnyAsync(l => l.UserId == liker.UserId && l.RecipeId == recipe.Id));
+        // Soft-deleted: the author lookup behind the reversal has to see past the global
+        // query filter as well as the visibility rule.
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+    }
+
     // Interacting is gated on READING (VisibleRecipeAuthorAsync), so the like/save/comment
     // lane inherits the same relationship matrix as GET /recipes/{id}. Private is closed at
     // every arrangement; FriendsOnly is closed at every arrangement but mutual.
@@ -559,6 +616,89 @@ public class SocialInteractionEndpointsTests(IntegrationTestFactory factory) : I
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // ADR-0001 (KAN-10): deleting your OWN comment destroys only your own row and so needs
+    // no visibility — otherwise an author making the recipe Private or removing it strands
+    // every commenter's own writing on their account with no way to take it down. The
+    // recipe author's moderation power (DeleteComment_ByRecipeAuthor_Returns204 above) is
+    // unaffected: it still requires the recipe to be visible to them, which is always true
+    // for their own recipe.
+
+    [Fact]
+    public async Task DeleteComment_RecipeSinceMadePrivate_OwnCommentStillRemovable_AndReversesRank()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+        var before = await RankOfAsync(ownerClient, owner.UserId);
+
+        var commenterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Mine, even after this goes private.");
+
+        await MakePrivateAsync(ownerClient, recipe.Id);
+        Assert.Equal(HttpStatusCode.NotFound, (await commenterClient.GetAsync($"/recipes/{recipe.Id}")).StatusCode);
+
+        var response = await commenterClient.DeleteAsync($"/comments/{comment.Id}");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await db.Comments.AnyAsync(c => c.Id == comment.Id));
+        // The +3 the owner earned for the comment leaves with it, same as while visible.
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+    }
+
+    [Fact]
+    public async Task DeleteComment_RecipeSinceDeleted_OwnCommentStillRemovable_AndReversesRank()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+        var before = await RankOfAsync(ownerClient, owner.UserId);
+
+        var commenterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Mine, even after the recipe is gone.");
+
+        (await ownerClient.DeleteAsync($"/recipes/{recipe.Id}")).EnsureSuccessStatusCode();
+
+        var response = await commenterClient.DeleteAsync($"/comments/{comment.Id}");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await db.Comments.AnyAsync(c => c.Id == comment.Id));
+        // Soft-deleted: the author lookup behind the reversal has to see past the global
+        // query filter as well as the visibility rule.
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+    }
+
+    [Fact]
+    public async Task DeleteComment_ByUnrelatedUser_OnRecipeSinceMadePrivate_Returns404()
+    {
+        // The unrelated stranger can no longer see the recipe, so this reads exactly like a
+        // nonexistent comment (rule 2) — never the 403 a visible recipe answers with
+        // (DeleteComment_ByUnrelatedUser_Returns403 above).
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Not yours, and now hidden too.");
+
+        await MakePrivateAsync(ownerClient, recipe.Id);
+
+        var thirdClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(thirdClient);
+
+        var response = await thirdClient.DeleteAsync($"/comments/{comment.Id}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     // --- comment likes (open-loops slice 1) -----------------------------------------------
 
     [Fact]
@@ -646,6 +786,59 @@ public class SocialInteractionEndpointsTests(IntegrationTestFactory factory) : I
 
         var likerClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        var response = await likerClient.DeleteAsync($"/comments/{comment.Id}/likes");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(before, await RankOfAsync(commenterClient, commenter.UserId));
+    }
+
+    // ADR-0001 (KAN-11), the comment-like counterpart: unliking a comment destroys only the
+    // caller's own CommentLike row and so needs no visibility either. Liking still does —
+    // see LikeComment_OnNonVisibleRecipe_Returns404 below.
+
+    [Fact]
+    public async Task UnlikeComment_RecipeSinceMadePrivate_StillRemovesTheLike_AndReversesRank()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        var commenter = await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Still here after the recipe isn't.");
+        var before = await RankOfAsync(commenterClient, commenter.UserId);
+
+        var likerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        (await likerClient.PostAsync($"/comments/{comment.Id}/likes", null)).EnsureSuccessStatusCode();
+
+        await MakePrivateAsync(ownerClient, recipe.Id);
+        Assert.Equal(HttpStatusCode.NotFound, (await likerClient.GetAsync($"/recipes/{recipe.Id}")).StatusCode);
+
+        var response = await likerClient.DeleteAsync($"/comments/{comment.Id}/likes");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(before, await RankOfAsync(commenterClient, commenter.UserId));
+    }
+
+    [Fact]
+    public async Task UnlikeComment_RecipeSinceDeleted_StillRemovesTheLike_AndReversesRank()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        var commenter = await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var comment = await AddCommentAsync(commenterClient, recipe.Id, "Outliving its recipe.");
+        var before = await RankOfAsync(commenterClient, commenter.UserId);
+
+        var likerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(likerClient);
+        (await likerClient.PostAsync($"/comments/{comment.Id}/likes", null)).EnsureSuccessStatusCode();
+
+        (await ownerClient.DeleteAsync($"/recipes/{recipe.Id}")).EnsureSuccessStatusCode();
+
         var response = await likerClient.DeleteAsync($"/comments/{comment.Id}/likes");
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
