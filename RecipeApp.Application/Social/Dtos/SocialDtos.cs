@@ -36,6 +36,36 @@ public record CookedRecipeResponse(
     int? Rating,
     DateTime? LastCookedAt);
 
+// Cooked — one row of the caller's dish list (KAN-4, design D1). Deliberately NOT
+// RecipeListResponse, which GET /users/me/saved-recipes reuses: that shape is a recipe, and
+// saved-recipes drops its SavedAt on the floor precisely because a recipe has nowhere to put
+// it. This row IS the accumulated per-user facts — how often, how recently, how good, and
+// what was said last time — and the recipe is only where its title and photo come from.
+//
+// Title is therefore never null: it is the recipe's when readable, and otherwise the most
+// recent CookLog.RecipeTitle snapshot. A dish with neither is unrenderable and is omitted
+// from the list rather than shipped with a blank name (see SocialService).
+//
+// LatestNote/LatestNoteCookedAt travel as a PAIR, both null or both set. The date is the
+// annotated cook's own, NOT LastCookedAt: a note belongs to one cook (D4), and a note left
+// three cooks ago must not read as a description of last night's.
+//
+// RecipeAvailable means "you can open this", never "the row exists" — same contract, and the
+// same single indistinguishable state for removed and no-longer-shared, as CookLogResponse
+// (ADR-0001, design D14). ImageUrl follows it and is withheld with it.
+public record CookedDishResponse(
+    Guid RecipeId,
+    string Title,
+    string? ImageUrl,
+    int TimesCooked,
+    DateTime LastCookedAt,
+    int? Rating,
+    string? LatestNote,
+    DateTime? LatestNoteCookedAt,
+    bool RecipeAvailable);
+
+public record CookedDishListResponse(IReadOnlyList<CookedDishResponse> Items, string? NextCursor);
+
 public record CommentListResponse(IReadOnlyList<CommentResponse> Items, string? NextCursor);
 
 public record UserSummaryResponse(Guid Id, string Username, string? ProfileImageUrl);

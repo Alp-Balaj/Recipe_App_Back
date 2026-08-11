@@ -200,6 +200,22 @@ public static class SocialEndpoints
             return Results.Ok(response);
         });
 
+        // Cooked (KAN-4) — the caller's dishes, newest-cooked first. Another literal "me"
+        // route, sitting with the rest above the {id:guid} matchers, and authenticated: unlike
+        // the read routes further down there is nothing an anonymous caller could be shown, so
+        // it deliberately does NOT say AllowAnonymous and the fallback policy answers 401. The
+        // SPA turns that into the login modal rather than a failed-to-load state.
+        group.MapGet("/me/cooked-recipes", async (string? cursor, int? limit, ISocialService social, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            if (!TryResolvePaging(cursor, limit, out var decodedCursor, out var effectiveLimit, out var error))
+            {
+                return error!;
+            }
+
+            var response = await social.GetCookedDishesAsync(decodedCursor, effectiveLimit, GetUserId(user), cancellationToken);
+            return Results.Ok(response);
+        });
+
         // Account settings — the caller edits their own profile. Identity comes from the
         // token (no route param), so this literal "me" route sits with the others above the
         // {id:guid} matchers. 409 when the requested username is already taken.

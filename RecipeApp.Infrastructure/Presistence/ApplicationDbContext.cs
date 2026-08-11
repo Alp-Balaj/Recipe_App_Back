@@ -77,6 +77,16 @@ public class ApplicationDbContext : DbContext
         builder.Entity<CookedRecipe>()
             .HasIndex(cr => cr.RecipeId);
 
+        // Cooked (KAN-4): GET /users/me/cooked-recipes reads "my dishes, most recently cooked
+        // first" and keysets down it. The composite PK is (UserId, RecipeId), which orders by
+        // the wrong column entirely, so without this the list sorts a user's whole collection
+        // on every page. Descending on LastCookedAt to match the query, and RecipeId breaks
+        // ties because two dishes CAN share a timestamp — the keyset cursor pairs them for
+        // exactly that reason.
+        builder.Entity<CookedRecipe>()
+            .HasIndex(cr => new { cr.UserId, cr.LastCookedAt, cr.RecipeId })
+            .IsDescending(false, true, true);
+
         // The 1-5 range is validated at the endpoint (RatingRequestValidator), but the
         // constraint lives here too: the validator only guards the one write path that
         // exists today, and a rating outside the range would silently corrupt the average.
@@ -101,6 +111,20 @@ public class ApplicationDbContext : DbContext
         // migration on a table that will by then be large.
         builder.Entity<CookLog>()
             .HasIndex(cl => cl.MealPlanEntryId);
+
+        // Cooked (KAN-4): the per-dish lookups — "the newest cook of THIS dish", asked once
+        // per row of the list for the snapshot title and again for the latest non-empty note.
+        // The index above leads (UserId, CookedAt), so it cannot answer a question that
+        // narrows by RecipeId first; a list of thirty dishes would otherwise be sixty scans of
+        // the caller's whole log. CookedAt/Id descending so each subquery is a single index
+        // seek, in the same order the subqueries and the cursor use.
+        //
+        // KAN-5's `?recipeId=` filter on GET /cook-log reads exactly this shape too, which is
+        // why the index lands here rather than with that ticket: it is one migration for two
+        // callers, on a table that only grows.
+        builder.Entity<CookLog>()
+            .HasIndex(cl => new { cl.UserId, cl.RecipeId, cl.CookedAt, cl.Id })
+            .IsDescending(false, false, true, true);
 
         builder.Entity<CookLog>()
             .Property(cl => cl.RecipeTitle)
