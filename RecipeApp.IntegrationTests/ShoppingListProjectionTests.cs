@@ -1033,6 +1033,78 @@ public class ShoppingListProjectionTests : IClassFixture<IntegrationTestFactory>
         Assert.Null(part.Meal);
     }
 
+    // --- unavailable recipes (KAN-1) ----------------------------------------------------
+
+    // The headline of the ticket. The projection hydrated its recipes filtered by soft-delete
+    // only, so an author flipping a recipe to Private left every one of its ingredients — with
+    // QUANTITIES — sitting in a stranger's shopping list indefinitely, and the list said the
+    // week was fully accounted for.
+    [Fact]
+    public async Task A_withdrawn_recipes_ingredients_leave_the_list_and_are_counted_as_unavailable()
+    {
+        var authorClient = await _factory.CreateAuthenticatedClientAsync();
+        var withdrawn = await CreateRecipeAsync(authorClient, "Author's tagine",
+            [("Ras el hanout", 2m, UnitOfMeasure.Teaspoon), ("Preserved lemon", 1m, UnitOfMeasure.Piece)]);
+
+        var client = await _factory.CreateAuthenticatedClientAsync();
+        var weekStart = NextMonday();
+        var mine = await CreateRecipeAsync(client, "My soup", [("Carrot", 3m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Monday", "Dinner", mine);
+        await AddEntryAsync(client, planId, "Tuesday", "Dinner", withdrawn);
+
+        var before = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        Assert.Equal(3, before.Groups.Count);
+        Assert.Equal(0, before.Diagnostics.UnavailableRecipeCount);
+
+        await MealPlanTestHelper.SetVisibilityAsync(authorClient, withdrawn, RecipeVisibility.Private);
+
+        var after = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+
+        // Neither ingredient survives, by name — asserting the count alone would pass if one
+        // of the two leaked and an unrelated group happened to vanish.
+        Assert.DoesNotContain(after.Groups, g => g.DisplayName.Contains("Ras el hanout", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(after.Groups, g => g.DisplayName.Contains("Preserved lemon", StringComparison.OrdinalIgnoreCase));
+        // And the caller's own dish is untouched: the policy admits your own recipes, so this
+        // is the assertion that fails if the fix over-corrects into "hide everything planned".
+        Assert.Single(after.Groups, g => g.DisplayName.Contains("Carrot", StringComparison.OrdinalIgnoreCase));
+
+        // The count exists so the shopper is TOLD, rather than silently handed a shorter list.
+        // It read 0 for a withdrawal before this ticket — it only ever counted soft-deletes.
+        Assert.Equal(1, after.Diagnostics.UnavailableRecipeCount);
+    }
+
+    // Same guard KAN-2 needed: `Public || CreatedByUserId == caller` passes the test above.
+    // A FriendsOnly recipe's ingredients must stay on a MUTUAL follower's list and leave it
+    // the moment the mutual follow does.
+    [Fact]
+    public async Task A_friends_only_recipes_ingredients_stay_for_a_mutual_follower()
+    {
+        var authorClient = _factory.CreateClient();
+        var author = await AuthTestHelper.RegisterAndAuthenticateAsync(authorClient);
+        var client = _factory.CreateClient();
+        var shopper = await AuthTestHelper.RegisterAndAuthenticateAsync(client);
+        await FollowTestHelper.MakeMutualAsync(client, shopper.UserId, authorClient, author.UserId);
+
+        var shared = await CreateRecipeAsync(authorClient, "Friends-only güveç", [("Aubergine", 2m, UnitOfMeasure.Piece)]);
+        var weekStart = NextMonday();
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddEntryAsync(client, planId, "Wednesday", "Dinner", shared);
+
+        await MealPlanTestHelper.SetVisibilityAsync(authorClient, shared, RecipeVisibility.FriendsOnly);
+
+        var week = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        Assert.Single(week.Groups, g => g.DisplayName.Contains("Aubergine", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(0, week.Diagnostics.UnavailableRecipeCount);
+
+        // The author stops following back: not Public, not the shopper's own, no longer mutual.
+        await FollowTestHelper.UnfollowAsync(authorClient, shopper.UserId);
+
+        var afterUnfollow = Assert.Single((await ReadWeekAsync(client, weekStart)).Weeks);
+        Assert.DoesNotContain(afterUnfollow.Groups, g => g.DisplayName.Contains("Aubergine", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, afterUnfollow.Diagnostics.UnavailableRecipeCount);
+    }
+
     // --- helpers ------------------------------------------------------------------------
     // Thin adapters over the shared MealPlanTestHelper (extracted from MealPlanEndpointsTests /
     // GenerateShoppingListEndpointsTests) so this file adds no third copy of the arrange posts.

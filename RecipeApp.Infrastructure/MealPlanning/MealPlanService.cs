@@ -64,28 +64,26 @@ public class MealPlanService : IMealPlanService
             return MealPlanResult<MealPlanResponse>.NotFound();
         }
 
-        // Joined against _db.Recipes (which carries the global !IsDeleted filter) rather than
-        // an Include/navigation — mirrors the chat-suggestion hydration convention: an entry
-        // whose recipe fails the filter simply drops out of the join instead of erroring.
-        // The DB-side projection stays an anonymous type (translatable + orderable); the
-        // record construction happens client-side after materialization — EF Core can't
-        // translate an ORDER BY over a constructed record's property.
+        // NOT joined to _db.Recipes any more (KAN-1). The join was doubling as an availability
+        // check, and it was wrong in both directions: it dropped a soft-deleted recipe's entry
+        // out of the week silently, and it carried a WITHDRAWN recipe's title, photo, time and
+        // calories in full, because _db.Recipes composes the global !IsDeleted filter but not
+        // the visibility policy. The entries now come back whole and the recipe summary is
+        // hydrated separately, through the policy, in the query below.
+        //
+        // The ORDER BY stays DB-side exactly as it was, so this keeps the ordering the clients
+        // already see. (It has the latent MealType quirk ShoppingListService.HydratePlanWeekAsync
+        // documents — string conversion makes a DB-side sort alphabetical — but that is not this
+        // ticket's to change, and callers key these by day/meal rather than reading them as a
+        // sequence.)
         var rows = await _db.MealPlanEntries
             .Where(e => e.MealPlanId == mealPlanId)
-            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new
+            .Select(e => new
             {
                 e.Id,
                 e.DayOfWeek,
                 e.MealType,
-                // TotalTimeMinutes is an unmapped computed property, so it is written out
-                // as Prep + Cook here to stay translatable — same reason the summary's
-                // TotalMinutes aggregate spells it out.
-                Recipe = new MealPlanEntryRecipeSummary(
-                    r.Id,
-                    r.Title,
-                    r.ImageUrl,
-                    r.PrepTimeMinutes + r.CookTimeMinutes,
-                    r.CaloriesPerServing),
+                e.RecipeId,
                 // A correlated subquery, NOT a join or a navigation: the caller's own cooks
                 // only, and the newest one when a slot was somehow logged twice. Reaching
                 // this through cl.Recipe would drag CookLog's required Recipe navigation —
@@ -110,8 +108,40 @@ public class MealPlanService : IMealPlanService
             .ThenBy(e => e.MealType)
             .ToListAsync(cancellationToken);
 
+        // The summaries for the entries whose recipe this caller may READ — the canonical
+        // predicate GET /recipes/{id} composes, so a slot renders exactly when opening the
+        // dish would work. Anything it does not admit (withdrawn, or soft-deleted via the
+        // global filter) is simply absent from the dictionary and the entry reads as
+        // unavailable; the two causes are indistinguishable on the wire by construction,
+        // because neither produces a row here.
+        //
+        // TotalTimeMinutes is an unmapped computed property, so it is written out as
+        // Prep + Cook to stay translatable — the same reason the list page's TotalMinutes
+        // aggregate spells it out.
+        var recipeIds = rows.Select(r => r.RecipeId).Distinct().ToList();
+        var summaries = recipeIds.Count == 0
+            ? []
+            : await _db.Recipes
+                .Where(RecipeVisibilityPolicy.VisibleTo(userId))
+                .Where(r => recipeIds.Contains(r.Id))
+                .Select(r => new MealPlanEntryRecipeSummary(
+                    r.Id,
+                    r.Title,
+                    r.ImageUrl,
+                    r.PrepTimeMinutes + r.CookTimeMinutes,
+                    r.CaloriesPerServing))
+                .ToDictionaryAsync(s => s.Id, cancellationToken);
+
+        // rows is already in (day, meal) order from the query — do not re-sort here, or the
+        // client-side comparison would silently differ from the DB's.
         var entries = rows
-            .Select(r => new MealPlanEntryResponse(r.Id, r.DayOfWeek, r.MealType, r.Recipe, r.CookedAt, r.CookNoteCount))
+            .Select(r => new MealPlanEntryResponse(
+                r.Id,
+                r.DayOfWeek,
+                r.MealType,
+                summaries.GetValueOrDefault(r.RecipeId),
+                r.CookedAt,
+                r.CookNoteCount))
             .ToList();
 
         return MealPlanResult<MealPlanResponse>.Success(new MealPlanResponse(plan.Id, plan.WeekStartDate, plan.CreatedAt, entries));
@@ -154,36 +184,51 @@ public class MealPlanService : IMealPlanService
             nextCursor = new KeysetCursor(last.WeekStartDate, last.Id).Encode();
         }
 
-        // One aggregate query for the whole page rather than a correlated subquery per row —
-        // and it runs AFTER the trim, so the dropped limit+1 probe row is never counted.
-        // Joining _db.Recipes (global !IsDeleted filter) is what makes EntryCount agree with
-        // GET /meal-plans/{id}: an entry whose recipe was soft-deleted is invisible there, so
-        // counting it here would show a meal the week view can't render. TotalTimeMinutes is
-        // an unmapped computed property, so the sum is written out as Prep + Cook to stay
-        // translatable.
+        // Two aggregates rather than one, and the split is the point (KAN-1). These used to be
+        // a single grouping over a Join against _db.Recipes, which made an entry's recipe do
+        // double duty: it decided both how many meals the week HAS and how long they take.
+        // Since GET /meal-plans/{id} now renders an entry whose recipe the caller cannot read
+        // as an unavailable slot rather than dropping it, the count has to follow it there —
+        // otherwise the list says "2 meals" about a week showing three.
+        //
+        // Both run AFTER the trim, so the dropped limit+1 probe row is never counted.
         var planIds = rows.Select(r => r.Id).ToList();
-        var stats = (await _db.MealPlanEntries
-            .Where(e => planIds.Contains(e.MealPlanId))
-            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new
-            {
-                e.MealPlanId,
-                Minutes = r.PrepTimeMinutes + r.CookTimeMinutes,
-            })
-            .GroupBy(x => x.MealPlanId)
-            .Select(g => new
-            {
-                MealPlanId = g.Key,
-                EntryCount = g.Count(),
-                TotalMinutes = g.Sum(x => x.Minutes),
-            })
-            .ToListAsync(cancellationToken))
-            .ToDictionary(s => s.MealPlanId);
 
-        // A plan with no surviving entries has no group at all, hence the zero default.
+        // Every entry the plan holds, available or not — the same set the week view renders.
+        var counts = (await _db.MealPlanEntries
+            .Where(e => planIds.Contains(e.MealPlanId))
+            .GroupBy(e => e.MealPlanId)
+            .Select(g => new { MealPlanId = g.Key, EntryCount = g.Count() })
+            .ToListAsync(cancellationToken))
+            .ToDictionary(s => s.MealPlanId, s => s.EntryCount);
+
+        // Cook time, on the other hand, is the AUTHOR's content and can only be summed over
+        // recipes the caller may read — an unavailable slot contributes nothing rather than a
+        // number derived from a recipe they are no longer shown. Composing the policy here is
+        // what stops the withdrawn recipe's cook time leaking as an arithmetic difference.
+        // TotalTimeMinutes is an unmapped computed property, so the sum is written out as
+        // Prep + Cook to stay translatable.
+        var minutes = (await _db.MealPlanEntries
+            .Where(e => planIds.Contains(e.MealPlanId))
+            .Join(
+                _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(userId)),
+                e => e.RecipeId,
+                r => r.Id,
+                (e, r) => new { e.MealPlanId, Minutes = r.PrepTimeMinutes + r.CookTimeMinutes })
+            .GroupBy(x => x.MealPlanId)
+            .Select(g => new { MealPlanId = g.Key, TotalMinutes = g.Sum(x => x.Minutes) })
+            .ToListAsync(cancellationToken))
+            .ToDictionary(s => s.MealPlanId, s => s.TotalMinutes);
+
+        // A plan with no entries at all has no group in either dictionary, hence the zero
+        // defaults; a plan whose every entry is unavailable has a count and no minutes.
         var items = rows
-            .Select(r => stats.TryGetValue(r.Id, out var s)
-                ? new MealPlanSummaryResponse(r.Id, r.WeekStartDate, r.CreatedAt, s.EntryCount, s.TotalMinutes)
-                : new MealPlanSummaryResponse(r.Id, r.WeekStartDate, r.CreatedAt, 0, 0))
+            .Select(r => new MealPlanSummaryResponse(
+                r.Id,
+                r.WeekStartDate,
+                r.CreatedAt,
+                counts.GetValueOrDefault(r.Id),
+                minutes.GetValueOrDefault(r.Id)))
             .ToList();
 
         return new MealPlanListResponse(items, nextCursor);
@@ -294,12 +339,18 @@ public class MealPlanService : IMealPlanService
 
         // An outlier is a property of a DISH, not of how often it is cooked, so this collects
         // one row per DISTINCT recipe — unlike the shopping-list projection, which
-        // deliberately expands per entry. Join against _db.Recipes (carries the global
-        // !IsDeleted filter) so a soft-deleted recipe's entry silently drops, same idiom as
-        // GetMealPlanByIdAsync.
+        // deliberately expands per entry.
+        //
+        // KAN-1: joined against the VISIBLE recipes, not bare _db.Recipes. This endpoint reads
+        // ingredient names and returns a recipe's Title in GroceryOutlierResponse, so a
+        // withdrawn recipe leaked here too — the ticket lists the week, list and nutrition
+        // reads but not this one, which is exactly why every call site gets pinned separately
+        // rather than trusting a list.
+        var visibleRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(userId));
+
         var recipeIds = await _db.MealPlanEntries
             .Where(e => e.MealPlanId == mealPlanId)
-            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => r.Id)
+            .Join(visibleRecipes, e => e.RecipeId, r => r.Id, (e, r) => r.Id)
             .Distinct()
             .ToListAsync(cancellationToken);
 
@@ -309,7 +360,12 @@ public class MealPlanService : IMealPlanService
         // primary key, so this naturally returns one row per recipe even without the Distinct
         // above; that call just keeps the IN clause small rather than doing any deduping work
         // that matters for correctness here.
-        var recipes = await _db.Recipes
+        //
+        // Filtered by the policy AGAIN even though recipeIds came from a query that already
+        // applied it. The ids are only as trustworthy as the query that produced them, and the
+        // two queries are edited independently — KAN-2 shipped green with a leak precisely
+        // because one of a pair of sibling reads was gated and the other was not.
+        var recipes = await visibleRecipes
             .Where(r => recipeIds.Contains(r.Id))
             .ToListAsync(cancellationToken);
 
@@ -362,12 +418,19 @@ public class MealPlanService : IMealPlanService
 
         // Per ENTRY, not per distinct recipe — the opposite of the grocery insight above,
         // and deliberately: an outlier is a property of a dish, but eating the same dish
-        // twice on Sunday really is twice the calories. Joining _db.Recipes (global
-        // !IsDeleted filter) drops entries whose recipe was soft-deleted, so the ribbon
-        // can never total a meal GET /meal-plans/{id} refuses to render.
+        // twice on Sunday really is twice the calories.
+        //
+        // KAN-1: joined against the VISIBLE recipes. Nutrition is computed from the author's
+        // ingredient lines, so an unavailable dish must contribute nothing — a day's kcal that
+        // silently includes a recipe the caller is no longer shown is the same leak as the
+        // week view's, arrived at by arithmetic. The ribbon therefore totals exactly the meals
+        // GET /meal-plans/{id} renders WITH a recipe, and an unavailable slot is absent from
+        // MealsCounted rather than counted with nothing behind it.
+        var visibleRecipes = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(userId));
+
         var entries = await _db.MealPlanEntries
             .Where(e => e.MealPlanId == mealPlanId)
-            .Join(_db.Recipes, e => e.RecipeId, r => r.Id, (e, r) => new { e.DayOfWeek, RecipeId = r.Id })
+            .Join(visibleRecipes, e => e.RecipeId, r => r.Id, (e, r) => new { e.DayOfWeek, RecipeId = r.Id })
             .ToListAsync(cancellationToken);
 
         if (entries.Count == 0)
@@ -379,8 +442,11 @@ public class MealPlanService : IMealPlanService
         // Two-query hydrate, then ONE catalogue read for the whole week — the reason this
         // endpoint exists at all. The alternative shape, a /recipes/{id}/insights call per
         // entry, is up to 21 requests and 21 catalogue loads for one week.
+        // Filtered by the policy again, for the same reason as the grocery insight's second
+        // query: the ids are only as trustworthy as the query that produced them, and the two
+        // are edited independently.
         var recipeIds = entries.Select(e => e.RecipeId).Distinct().ToList();
-        var recipes = await _db.Recipes
+        var recipes = await visibleRecipes
             .Where(r => recipeIds.Contains(r.Id))
             .ToListAsync(cancellationToken);
 

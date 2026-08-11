@@ -97,6 +97,7 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var entry = Assert.Single(body.Entries);
         Assert.Equal(DayOfWeek.Monday, entry.DayOfWeek);
         Assert.Equal(MealType.Breakfast, entry.MealType);
+        Assert.NotNull(entry.Recipe);
         Assert.Equal(recipe.Id, entry.Recipe.Id);
         Assert.Equal(recipe.Title, entry.Recipe.Title);
     }
@@ -120,6 +121,7 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
 
         var entry = Assert.Single(body!.Entries);
         // Prep 10 + Cook 20, the same sum MealPlanSummaryResponse.TotalMinutes uses per entry.
+        Assert.NotNull(entry.Recipe);
         Assert.Equal(30, entry.Recipe.TotalTimeMinutes);
         Assert.Equal(210, entry.Recipe.CaloriesPerServing);
     }
@@ -134,6 +136,7 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
 
         var entry = await AddEntryAsync(client, plan.Id, DayOfWeek.Friday, MealType.Lunch, recipe.Id);
 
+        Assert.NotNull(entry.Recipe);
         Assert.Equal(30, entry.Recipe.TotalTimeMinutes);
         Assert.Equal(210, entry.Recipe.CaloriesPerServing);
     }
@@ -159,6 +162,7 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var body = await response.Content.ReadFromJsonAsync<MealPlanResponse>(TestJson.Options);
 
         var entry = Assert.Single(body!.Entries);
+        Assert.NotNull(entry.Recipe);
         Assert.Null(entry.Recipe.CaloriesPerServing);
         // Time is never null, so it survives a recipe that has no calorie figure.
         Assert.Equal(30, entry.Recipe.TotalTimeMinutes);
@@ -179,12 +183,17 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
-    // Carry-over from cp2 verification: entries whose Recipe is soft-deleted are silently
-    // omitted from the week view (chat-suggestion convention), not just filtered at the
-    // point of add. Soft-delete via the real DELETE /recipes/{id} endpoint, not direct DB
-    // manipulation, so this exercises the actual global query-filter path.
+    // --- unavailable entries (KAN-1) ----------------------------------------------------------
+    // An entry whose recipe the caller can no longer read KEEPS ITS SLOT and loses its recipe
+    // summary. It used to be dropped from the join outright for the soft-delete case and served
+    // in full for the visibility case — the first loses a planned meal from someone's week
+    // without telling them, the second is the leak this ticket is named after.
+    //
+    // Soft-delete goes through the real DELETE /recipes/{id} and withdrawal through the real
+    // PUT, not direct DB manipulation, so both exercise the paths a user actually takes.
+
     [Fact]
-    public async Task GetMealPlan_EntryWithSoftDeletedRecipe_IsOmittedButOthersRemain()
+    public async Task GetMealPlan_EntryWithSoftDeletedRecipe_KeepsItsSlotWithoutARecipe()
     {
         var client = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(client);
@@ -201,8 +210,107 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<MealPlanResponse>(TestJson.Options);
         Assert.NotNull(body);
+        Assert.Equal(2, body!.Entries.Count);
+
+        var kept = Assert.Single(body.Entries, e => e.DayOfWeek == DayOfWeek.Monday);
+        Assert.Equal(keptRecipe.Id, kept.Recipe?.Id);
+
+        // The slot is still Tuesday lunch — the user planned a meal there and the plan still
+        // says so. Only the author's content is withheld (ADR-0001).
+        var orphaned = Assert.Single(body.Entries, e => e.DayOfWeek == DayOfWeek.Tuesday);
+        Assert.Equal(MealType.Lunch, orphaned.MealType);
+        Assert.Null(orphaned.Recipe);
+    }
+
+    [Fact]
+    public async Task GetMealPlan_EntryWhoseRecipeWasWithdrawn_WithholdsTitlePhotoTimeAndCalories()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(author);
+
+        var planner = await factory.CreateAuthenticatedClientAsync();
+        var plan = await CreateMealPlanAsync(planner, UtcMidnight(2026, 10, 5));
+        await AddEntryAsync(planner, plan.Id, DayOfWeek.Wednesday, MealType.Dinner, recipe.Id);
+
+        // The whole of the reproduce steps: a plain visibility change on the author's side,
+        // no delete, no notification, nothing the planner did or saw.
+        await MealPlanTestHelper.SetVisibilityAsync(author, recipe, RecipeVisibility.Private);
+
+        var body = await planner.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+
         var entry = Assert.Single(body!.Entries);
-        Assert.Equal(keptRecipe.Id, entry.Recipe.Id);
+        // Null is the ONE assertion that covers all four leaked fields at once — the summary is
+        // where title, imageUrl, totalTimeMinutes and caloriesPerServing all live, so nothing
+        // can come back from it by having one field zeroed and another forgotten.
+        Assert.Null(entry.Recipe);
+    }
+
+    // The lazy fix — `Public || CreatedByUserId == caller` — passes every test above. Only a
+    // FriendsOnly recipe read by a MUTUAL follower distinguishes it from composing the real
+    // RecipeVisibilityPolicy, which is why KAN-2 called this the test that earns its keep.
+    // A [Theory] over all four arrangements covers the two directional readings D6 rejected
+    // as well: a one-way follow in either direction must still withhold the recipe.
+    [Theory]
+    [InlineData(FollowRelationship.Stranger, false)]
+    [InlineData(FollowRelationship.ViewerFollowsAuthor, false)]
+    [InlineData(FollowRelationship.AuthorFollowsViewer, false)]
+    [InlineData(FollowRelationship.Mutual, true)]
+    public async Task GetMealPlan_FriendsOnlyEntry_IsCarriedOnlyForAMutualFollower(
+        FollowRelationship relationship, bool expectVisible)
+    {
+        var authorClient = factory.CreateClient();
+        var author = await AuthTestHelper.RegisterAndAuthenticateAsync(authorClient);
+        var plannerClient = factory.CreateClient();
+        var planner = await AuthTestHelper.RegisterAndAuthenticateAsync(plannerClient);
+
+        var recipe = await CreateRecipeAsync(authorClient);
+        var plan = await CreateMealPlanAsync(plannerClient, UtcMidnight(2026, 10, 12));
+        await AddEntryAsync(plannerClient, plan.Id, DayOfWeek.Thursday, MealType.Dinner, recipe.Id);
+
+        // Arranged AFTER the add so the add itself is never the thing under test — the entry
+        // exists because the recipe was Public at the time, exactly as in the reproduce steps.
+        await MealPlanTestHelper.SetVisibilityAsync(authorClient, recipe, RecipeVisibility.FriendsOnly);
+        await FollowTestHelper.ArrangeAsync(relationship, plannerClient, planner.UserId, authorClient, author.UserId);
+
+        var body = await plannerClient.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+
+        var entry = Assert.Single(body!.Entries);
+        if (expectVisible)
+        {
+            Assert.Equal(recipe.Id, entry.Recipe?.Id);
+        }
+        else
+        {
+            Assert.Null(entry.Recipe);
+        }
+    }
+
+    // ADR-0001: "unavailable" is ONE user-visible state. A client holding both responses must
+    // not be able to work out which recipe the author deleted and which they merely stopped
+    // sharing — reporting a private visibility decision back to a stranger is itself a leak.
+    // This is the assertion KAN-2's own comment said GET /meal-plans/{id} could not yet pass.
+    [Fact]
+    public async Task GetMealPlan_RemovedAndWithdrawn_AreOneIndistinguishableState()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var removed = await CreateRecipeAsync(author);
+        var withdrawn = await CreateRecipeAsync(author);
+
+        var planner = await factory.CreateAuthenticatedClientAsync();
+        var plan = await CreateMealPlanAsync(planner, UtcMidnight(2026, 10, 19));
+        await AddEntryAsync(planner, plan.Id, DayOfWeek.Monday, MealType.Dinner, removed.Id);
+        await AddEntryAsync(planner, plan.Id, DayOfWeek.Tuesday, MealType.Dinner, withdrawn.Id);
+
+        (await author.DeleteAsync($"/recipes/{removed.Id}")).EnsureSuccessStatusCode();
+        await MealPlanTestHelper.SetVisibilityAsync(author, withdrawn, RecipeVisibility.Private);
+
+        var body = await planner.GetFromJsonAsync<MealPlanResponse>($"/meal-plans/{plan.Id}", TestJson.Options);
+
+        var removedEntry = Assert.Single(body!.Entries, e => e.DayOfWeek == DayOfWeek.Monday);
+        var withdrawnEntry = Assert.Single(body.Entries, e => e.DayOfWeek == DayOfWeek.Tuesday);
+
+        Assert.Null(removedEntry.Recipe);
+        Assert.Equal(removedEntry.Recipe, withdrawnEntry.Recipe);
     }
 
     [Fact]
@@ -372,6 +480,7 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         Assert.NotNull(body);
         Assert.Equal(DayOfWeek.Tuesday, body!.DayOfWeek);
         Assert.Equal(MealType.Lunch, body.MealType);
+        Assert.NotNull(body.Recipe);
         Assert.Equal(recipe.Id, body.Recipe.Id);
     }
 
@@ -668,6 +777,41 @@ public class MealPlanEndpointsTests(IntegrationTestFactory factory) : IClassFixt
         var response = await otherClient.GetAsync($"/meal-plans/{planId}/grocery-insight");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // KAN-1 found this one; the ticket does not list it. GET /meal-plans/{id}/grocery-insight
+    // reads a planned recipe's ingredient NAMES and returns its Title in the outlier, so a
+    // withdrawn recipe leaked both — and the shared/distinct counts leaked its ingredient
+    // count on top. Pinning it is the reason the fix walks every read on the entity rather
+    // than the three the ticket happened to name.
+    [Fact]
+    public async Task Grocery_insight_excludes_a_withdrawn_recipe()
+    {
+        var authorClient = await factory.CreateAuthenticatedClientAsync();
+        var tagine = await CreateInsightRecipeAsync(
+            authorClient, "Tagine", [("Ras el hanout", 2m, UnitOfMeasure.Teaspoon), ("Apricot", 6m, UnitOfMeasure.Piece)]);
+
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var weekStart = MealPlanTestHelper.NextMonday();
+        var soup = await CreateInsightRecipeAsync(client, "Soup", [("Carrot", 3m, UnitOfMeasure.Piece)]);
+        var planId = await CreatePlanAsync(client, weekStart);
+        await AddInsightEntryAsync(client, planId, "Monday", "Dinner", soup);
+        await AddInsightEntryAsync(client, planId, "Tuesday", "Dinner", tagine);
+
+        var before = await client.GetFromJsonAsync<GroceryInsightResponse>(
+            $"/meal-plans/{planId}/grocery-insight", TestJson.Options);
+        Assert.Equal(3, before!.DistinctIngredientCount);
+        Assert.Equal("Tagine", before.Outlier!.Title);
+
+        await MealPlanTestHelper.SetVisibilityAsync(authorClient, tagine, RecipeVisibility.Private);
+
+        var after = await client.GetFromJsonAsync<GroceryInsightResponse>(
+            $"/meal-plans/{planId}/grocery-insight", TestJson.Options);
+
+        // The title is the sharpest of the three leaks: it names the dish the caller is no
+        // longer allowed to open.
+        Assert.NotEqual("Tagine", after!.Outlier?.Title);
+        Assert.Equal(1, after.DistinctIngredientCount);
     }
 
     // --- grocery-insight helpers ----------------------------------------------------------
