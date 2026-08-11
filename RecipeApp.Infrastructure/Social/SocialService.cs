@@ -191,6 +191,132 @@ public class SocialService : ISocialService
         return new RecipeListResponse(rows.Select(r => RecipeMapper.ToResponse(r.Recipe)).ToList(), nextCursor);
     }
 
+    // Cooked — the dish list (KAN-4, design docs/superpowers/specs/2026-08-11-cooked-design.md).
+    //
+    // Shaped after GetSavedRecipesAsync above — same keyset idiom, same limit+1 probe, the same
+    // one visibility policy reached as a projected id set. It differs in the one place the two
+    // collections genuinely differ, and the difference is the design:
+    //
+    //   Saved recipes DROP when they stop being visible, because a bookmark of something you
+    //   can no longer open is worthless. A COOK is a fact about the user, so an unavailable
+    //   dish stays in the list and renders from the title its cook snapshotted (ADR-0001).
+    //   Visibility therefore feeds the PROJECTION here — title, image, RecipeAvailable — and
+    //   is never a Where. `readable` is composed exactly as CookLogService.Project composes
+    //   it, for the same reasons spelled out there.
+    public async Task<CookedDishListResponse> GetCookedDishesAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        var readable = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
+
+        // D8, and the reason it is a filter rather than a data fix: RateRecipeAsync has been
+        // creating rows with TimesCooked = 0 since 30 July, so Cooked — a record of what you
+        // have MADE — would otherwise open listing dishes the user only ever rated.
+        var dishes = _db.CookedRecipes
+            .Where(cr => cr.UserId == currentUserId)
+            .Where(cr => cr.TimesCooked > 0);
+
+        if (cursor is not null)
+        {
+            var cursorLastCookedAt = cursor.Timestamp;
+            var cursorRecipeId = cursor.Id;
+            dishes = dishes.Where(cr =>
+                cr.LastCookedAt < cursorLastCookedAt
+                || (cr.LastCookedAt == cursorLastCookedAt && cr.RecipeId.CompareTo(cursorRecipeId) < 0));
+        }
+
+        // Project LAST, after Where/OrderBy/Take — CookLogService's first rule, and the one
+        // that fails at runtime rather than at compile time if it is broken.
+        //
+        // Every extra is a correlated subquery, never the cr.Recipe navigation: that
+        // relationship is required, so projecting through it compiles to an INNER JOIN and
+        // silently drops exactly the dishes whose recipe was removed — the ones this list
+        // exists to keep. The latest-note pair follows MealPlanService's per-entry cook-time
+        // subquery (:89-97) rather than a GroupBy, which EF cannot express here.
+        var rows = await dishes
+            .OrderByDescending(cr => cr.LastCookedAt)
+            .ThenByDescending(cr => cr.RecipeId)
+            .Take(limit + 1)
+            .Select(cr => new
+            {
+                cr.RecipeId,
+                cr.TimesCooked,
+                cr.LastCookedAt,
+                cr.Rating,
+                // ONE subquery for all three readable facts, not three. Every
+                // evaluation of `readable` re-runs RecipeVisibilityPolicy, whose
+                // FriendsOnly branch is two EXISTS over UserFollows — so three
+                // copies is 150 policy evaluations on a 50-row page where 50 do.
+                // Recipe.Title is non-nullable, which is what lets availability
+                // be read off the same projection: no row back means no readable
+                // recipe.
+                Readable = readable
+                    .Where(r => r.Id == cr.RecipeId)
+                    .Select(r => new { r.Title, r.ImageUrl })
+                    .FirstOrDefault(),
+                // The fallback title: what the dish was called the last time it was cooked.
+                // CookedRecipe has no snapshot of its own, and CookLog's is the only one in
+                // the schema — see its RecipeTitle remarks for why it is denormalised.
+                SnapshotTitle = _db.CookLogs
+                    .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId)
+                    .OrderByDescending(cl => cl.CookedAt)
+                    .ThenByDescending(cl => cl.Id)
+                    .Select(cl => cl.RecipeTitle)
+                    .FirstOrDefault(),
+                // D4 — the most recent NON-EMPTY note, and its OWN cook's date. `Note != null`
+                // is exactly "carries a note": UpdateNoteAsync is the column's only writer and
+                // normalises blank to null on the way in, so a written-then-cleared note falls
+                // back to the one before it. Two scalar subqueries rather than one projecting
+                // a pair: identical Where and identical total ordering (CookedAt then Id, so
+                // same-timestamp cooks cannot disagree), which is what keeps the halves from
+                // ever describing different rows.
+                LatestNote = _db.CookLogs
+                    .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId && cl.Note != null)
+                    .OrderByDescending(cl => cl.CookedAt)
+                    .ThenByDescending(cl => cl.Id)
+                    .Select(cl => cl.Note)
+                    .FirstOrDefault(),
+                LatestNoteCookedAt = _db.CookLogs
+                    .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId && cl.Note != null)
+                    .OrderByDescending(cl => cl.CookedAt)
+                    .ThenByDescending(cl => cl.Id)
+                    .Select(cl => (DateTime?)cl.CookedAt)
+                    .FirstOrDefault(),
+            })
+            .ToListAsync(cancellationToken);
+
+        string? nextCursor = null;
+        if (rows.Count > limit)
+        {
+            rows.RemoveAt(limit);
+            var last = rows[^1];
+            nextCursor = new KeysetCursor(last.LastCookedAt, last.RecipeId).Encode();
+        }
+
+        // The cursor above is taken from the last row the SCAN reached, before the
+        // renderability filter below — deliberately, so a dropped row cannot make the next
+        // page start past a dish that was never returned. A page may therefore come back
+        // shorter than `limit` with a cursor still set, which is ordinary for a keyset page
+        // with a post-filter and is why the client pages on NextCursor rather than on count.
+        var items = rows
+            .Where(r => r.Readable is not null || r.SnapshotTitle is not null)
+            .Select(r => new CookedDishResponse(
+                r.RecipeId,
+                // Readable title first, snapshot second: the recipe may have been renamed
+                // since, and its current name is what the user will see if they open it.
+                r.Readable?.Title ?? r.SnapshotTitle!,
+                r.Readable?.ImageUrl,
+                r.TimesCooked,
+                r.LastCookedAt,
+                r.Rating,
+                r.LatestNote,
+                r.LatestNoteCookedAt,
+                // Availability IS "the readable projection came back", so the flag and the
+                // withheld image cannot drift apart the way two separate reads could.
+                r.Readable is not null))
+            .ToList();
+
+        return new CookedDishListResponse(items, nextCursor);
+    }
+
     public async Task<SocialResult<CommentResponse>> AddCommentAsync(Guid recipeId, string content, Guid currentUserId, CancellationToken cancellationToken = default)
     {
         var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);

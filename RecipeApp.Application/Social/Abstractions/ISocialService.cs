@@ -42,6 +42,21 @@ public interface ISocialService
     /// </summary>
     Task<RecipeListResponse> GetSavedRecipesAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Cooked (KAN-4): the caller's dishes, LastCookedAt DESC keyset-paged. One row per recipe
+    /// they have cooked at least once — dishes with no recorded cook are excluded (design D8),
+    /// which is what keeps the rows <see cref="RateRecipeAsync"/> creates out of a list of what
+    /// the user has actually made.
+    /// <para>
+    /// Unlike <see cref="GetSavedRecipesAsync"/> a dish is NOT dropped when its recipe stops
+    /// being visible: it renders from the title the cook snapshotted and reports
+    /// RecipeAvailable false (ADR-0001 — withdrawal takes the author's content, not the
+    /// reader's record). Only a dish with neither a readable recipe nor a snapshot falls out,
+    /// because nothing about it can be rendered.
+    /// </para>
+    /// </summary>
+    Task<CookedDishListResponse> GetCookedDishesAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default);
+
     Task<SocialResult<CommentResponse>> AddCommentAsync(Guid recipeId, string content, Guid currentUserId, CancellationToken cancellationToken = default);
 
     // Guest access (guest-access plan §3.2): read methods take a NULLABLE caller id — null

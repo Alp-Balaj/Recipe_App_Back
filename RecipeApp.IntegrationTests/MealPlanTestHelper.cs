@@ -77,4 +77,46 @@ internal static class MealPlanTestHelper
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options))!;
     }
+
+    /// <summary>
+    /// Re-publishes a recipe under a different visibility, as its author would from the edit
+    /// form — the "author stops sharing" move KAN-1 is about. Every other field is carried
+    /// across unchanged, because PUT /recipes/{id} is a whole-resource replace.
+    ///
+    /// Goes through the real endpoint rather than writing Visibility straight to the DB, for
+    /// the same reason the soft-delete tests call DELETE /recipes/{id}: the bug is in what the
+    /// READ paths compose, and a fixture that bypasses the write path can quietly stop
+    /// resembling one.
+    /// </summary>
+    public static async Task SetVisibilityAsync(
+        HttpClient author, RecipeResponse recipe, RecipeVisibility visibility)
+    {
+        var request = new UpdateRecipeRequest(
+            recipe.Title,
+            recipe.Description,
+            recipe.PrepTimeMinutes,
+            recipe.CookTimeMinutes,
+            recipe.Servings,
+            recipe.Difficulty,
+            recipe.CuisineType,
+            recipe.CaloriesPerServing,
+            recipe.ImageUrl,
+            visibility,
+            recipe.Ingredients,
+            recipe.Steps,
+            recipe.Tags);
+
+        (await author.PutAsJsonAsync($"/recipes/{recipe.Id}", request, TestJson.Options))
+            .EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
+    /// The same move for suites that only kept the recipe's id — it reads the current resource
+    /// back first, so the whole-resource PUT still carries every other field unchanged.
+    /// </summary>
+    public static async Task SetVisibilityAsync(HttpClient author, Guid recipeId, RecipeVisibility visibility)
+    {
+        var recipe = await author.GetFromJsonAsync<RecipeResponse>($"/recipes/{recipeId}", TestJson.Options);
+        await SetVisibilityAsync(author, recipe!, visibility);
+    }
 }
