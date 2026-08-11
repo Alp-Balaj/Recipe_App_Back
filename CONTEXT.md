@@ -19,6 +19,13 @@ The complete record of every cook a user has made, in time order. It is a
 record, not a curated collection — cooks are written as they happen.
 _Avoid_: history, diary, timeline
 
+**Backdated cook**:
+A cook the user enters after the fact, naming the day it happened. It is an
+ordinary cook in every other respect — it counts, it can carry a note, and it
+never displaces a more recent one (ADR-0003). Its date is a **day**, not a
+moment, and it cannot fall in the future or before the user's account existed.
+_Avoid_: recorded cook (every cook is recorded), manual cook, past entry
+
 **Note**:
 Free text a user attaches to a single cook, for their own future reference. A
 note belongs to one cook, never to the recipe, and is private to its author.

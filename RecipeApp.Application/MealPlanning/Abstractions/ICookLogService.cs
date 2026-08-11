@@ -17,12 +17,26 @@ public interface ICookLogService
     /// <paramref name="mealPlanEntryId"/> is given but is not an entry on one of their plans.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The aggregate bump is what keeps /plan and the recipe page telling the same story: a
     /// meal marked cooked here must show up in "you've cooked this 3 times" there. Both writes
     /// or neither — a log row without the bump is the drift this design exists to prevent.
+    /// </para>
+    /// <para>
+    /// <paramref name="cookedAt"/> null means now. Supplied, it records a cook that already
+    /// happened (KAN-6): only its DATE is kept, and it is Invalid outside the window between
+    /// the caller's account creation and today. A backdated cook must not reorder Cooked, so
+    /// the aggregate takes the LATER last-cooked and the EARLIER first-cooked rather than
+    /// stamping both with the write.
+    /// </para>
     /// </remarks>
     Task<MealPlanResult<CookLogResponse>> LogAsync(
-        Guid recipeId, Guid? mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default);
+        Guid recipeId,
+        Guid? mealPlanEntryId,
+        DateTime? cookedAt,
+        string? note,
+        Guid currentUserId,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The caller's cooks, newest first, keyset-paged. <paramref name="recipeId"/> narrows the

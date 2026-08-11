@@ -24,8 +24,35 @@ public class CookLogService : ICookLogService
         _db = db;
     }
 
+    /// <summary>
+    /// The time of day every backdated cook is stored at.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A day is not a moment, and the client picked a day. Midday is the hour with the most
+    /// clearance in both directions: rendered in local time it stays on the chosen day for every
+    /// offset from UTC-12 to UTC+11. Midnight would be wrong for half the planet, in the
+    /// direction that silently reports yesterday's dinner as the day before.
+    /// </para>
+    /// <para>
+    /// It is NOT wrong-proof, and the limit is arithmetic rather than a choice worth revisiting:
+    /// inhabited offsets span UTC-11 to UTC+14, which is 25 hours, so no single stored instant
+    /// can render as the same calendar day for all of them. Midday leaves UTC+12 to UTC+14
+    /// (New Zealand, Fiji, Kiribati) reading a backdated cook as the following day. Closing that
+    /// needs a date-only column beside this one, not a different hour — every hour fails
+    /// somewhere. The CEILING's day of slack is the separate, solvable half of the same problem:
+    /// it is about which dates those users may SEND, not how the result reads back.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeOnly StoredTimeOfDay = new(12, 0);
+
     public async Task<MealPlanResult<CookLogResponse>> LogAsync(
-        Guid recipeId, Guid? mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default)
+        Guid recipeId,
+        Guid? mealPlanEntryId,
+        DateTime? cookedAt,
+        string? note,
+        Guid currentUserId,
+        CancellationToken cancellationToken = default)
     {
         // Same visibility expression as adding a dish to a plan, for the same reason: you can
         // log a cook of exactly the recipes you can open. Soft-deleted falls out via the
@@ -58,7 +85,15 @@ public class CookLogService : ICookLogService
             }
         }
 
-        var now = DateTime.UtcNow;
+        // KAN-6. A supplied date is resolved LAST, after both ownership gates above, so a 400
+        // about dates can never be the thing that tells a caller a recipe they cannot see exists.
+        var resolved = await ResolveCookedAtAsync(cookedAt, currentUserId, cancellationToken);
+        if (resolved.Outcome is not MealPlanOutcome.Success)
+        {
+            return MealPlanResult<CookLogResponse>.Invalid(resolved.Detail!);
+        }
+
+        var cookTime = resolved.Value;
 
         var row = new CookLog
         {
@@ -67,7 +102,10 @@ public class CookLogService : ICookLogService
             RecipeId = recipe.Id,
             RecipeTitle = recipe.Title,
             MealPlanEntryId = mealPlanEntryId,
-            CookedAt = now,
+            CookedAt = cookTime,
+            // Same normalisation as UpdateNoteAsync, and for the same reason: "no note" has one
+            // representation, so a whitespace-only note does not render as an empty quotation.
+            Note = string.IsNullOrWhiteSpace(note) ? null : note.Trim(),
         };
         _db.CookLogs.Add(row);
 
@@ -92,14 +130,28 @@ public class CookLogService : ICookLogService
                 UserId = currentUserId,
                 RecipeId = recipe.Id,
                 TimesCooked = 1,
-                FirstCookedAt = now,
-                LastCookedAt = now,
+                FirstCookedAt = cookTime,
+                LastCookedAt = cookTime,
             });
         }
         else
         {
             aggregate.TimesCooked += 1;
-            aggregate.LastCookedAt = now;
+
+            // KAN-6, and the reason a backdated cook does not disturb Cooked. This used to stamp
+            // LastCookedAt with the moment of the write unconditionally, which was indistinguish-
+            // able from the right answer while every cook was "now" — and catastrophic the moment
+            // one is not. Cooked is ordered on (LastCookedAt, RecipeId), so an unconditional
+            // stamp would shove a dish cooked two years ago to the top of a most-recently-cooked
+            // list: the one thing that ordering exists to prevent, and the exact reason a user
+            // filling in their history would stop trusting the page they were filling in.
+            //
+            // Widening rather than replacing: the LATER end moves forward, the EARLIER end moves
+            // back, and a cook that falls between them moves neither. Applied to every cook, not
+            // only backdated ones — for a now-cook the max is "now" and the min is unchanged, so
+            // there is no second code path to keep in step with this one.
+            aggregate.LastCookedAt = cookTime > aggregate.LastCookedAt ? cookTime : aggregate.LastCookedAt;
+            aggregate.FirstCookedAt = cookTime < aggregate.FirstCookedAt ? cookTime : aggregate.FirstCookedAt;
         }
 
         await _db.SaveChangesAsync(cancellationToken);
@@ -108,6 +160,77 @@ public class CookLogService : ICookLogService
         // recipe, and the image travelled with it.
         return MealPlanResult<CookLogResponse>.Success(
             ToResponse(row, recipe.ImageUrl, recipeAvailable: true));
+    }
+
+    /// <summary>
+    /// Turns the client's optional date into the instant the cook is stored at, or a sentence
+    /// explaining why it cannot be (KAN-6).
+    /// </summary>
+    /// <returns>
+    /// The layer's own <see cref="MealPlanResult{T}"/> rather than a tuple, so the failure travels
+    /// in the shape LogAsync already returns and there is no second sentinel — a bare
+    /// <c>(DateTime, string?)</c> would carry <c>default(DateTime)</c> on the failing path, which
+    /// is a legal timestamp waiting to be used by a caller that forgot to check.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// Both bounds are INVENTED here, and that is worth saying out loud because it is the reason
+    /// they are spelled out at this length. Nothing else in this API takes a client-supplied
+    /// historical timestamp: every other client date is a bucket key (a week start) or a
+    /// watermark (notifications read up to), neither of which has a floor or a ceiling. There
+    /// was no convention to copy, so there is nowhere else to look these up.
+    /// </para>
+    /// <para>
+    /// The comparisons are between DAYS, never between instants. The client picked a day, the
+    /// row is stored at midday on that day, and an instant comparison against a midday stamp
+    /// would refuse or accept a date for reasons that have nothing to do with the date — see
+    /// each bound below.
+    /// </para>
+    /// </remarks>
+    private async Task<MealPlanResult<DateTime>> ResolveCookedAtAsync(
+        DateTime? cookedAt, Guid currentUserId, CancellationToken cancellationToken)
+    {
+        // No date is the pre-KAN-6 contract and stays exactly as it was: the moment of the write,
+        // to the tick. NOT normalised to midday — cook mode's cooks would all jump by up to
+        // twelve hours, and /cook-log is ordered on CookedAt, so a day's worth of them would
+        // collapse into one indistinguishable tie.
+        if (cookedAt is null)
+        {
+            return MealPlanResult<DateTime>.Success(DateTime.UtcNow);
+        }
+
+        // Kind is already proven Utc by LogCookRequestValidator; DateOnly.FromDateTime ignores it
+        // either way, and the stamp below re-specifies Utc explicitly rather than inheriting.
+        var day = DateOnly.FromDateTime(cookedAt.Value);
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+
+        // The ceiling, with one day of slack. Not sloppiness — the slack IS the timezone
+        // correction. A user at UTC+13 or +14 spends part of every day on a calendar date this
+        // server has not reached, so their perfectly ordinary "I cooked this tonight" arrives as
+        // tomorrow. Refusing it would make the feature unusable across the date line for hours at
+        // a time, and would do it as a validation error blaming the user for their own timezone.
+        // Two days ahead is beyond every offset that exists, so that is where the line goes.
+        if (day > today.AddDays(1))
+        {
+            return MealPlanResult<DateTime>.Invalid("You cannot record a cook in the future.");
+        }
+
+        // The floor: the caller's own account. Read as a DAY, so someone who registered at 09:00
+        // this morning can still record last night's dinner — comparing instants would refuse it,
+        // and would refuse it only for users who signed up after midday, which is precisely the
+        // kind of bound that never gets reproduced from a report.
+        var accountCreatedAt = await _db.Users
+            .Where(u => u.Id == currentUserId)
+            .Select(u => u.CreatedAt)
+            .SingleAsync(cancellationToken);
+
+        if (day < DateOnly.FromDateTime(accountCreatedAt))
+        {
+            return MealPlanResult<DateTime>.Invalid(
+                "You cannot record a cook from before your account existed.");
+        }
+
+        return MealPlanResult<DateTime>.Success(day.ToDateTime(StoredTimeOfDay, DateTimeKind.Utc));
     }
 
     public async Task<MealPlanResult<CookLogListResponse>> ListAsync(

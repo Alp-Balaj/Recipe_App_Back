@@ -29,10 +29,21 @@ public static class CookLogEndpoints
         group.MapPost("/", async (LogCookRequest request, ICookLogService cookLog,
             ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
-            var result = await cookLog.LogAsync(request.RecipeId, request.MealPlanEntryId, GetUserId(user), cancellationToken);
+            var result = await cookLog.LogAsync(
+                request.RecipeId, request.MealPlanEntryId, request.CookedAt, request.Note,
+                GetUserId(user), cancellationToken);
             return result.Outcome switch
             {
                 MealPlanOutcome.Success => Results.Created($"/cook-log/{result.Value!.Id}", result.Value),
+                // KAN-6's two date bounds. A 400 rather than the group's usual 404 because the
+                // caller CAN see this recipe and CAN cook it — the day they named is the problem,
+                // and it is one they can fix by naming another. Keyed on "cookedAt" so the same
+                // RFC-7807 shape ValidationFilter produces comes back, and the client's existing
+                // ApiValidationError handling surfaces the sentence without a second code path.
+                MealPlanOutcome.Invalid => Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["cookedAt"] = [result.Detail ?? "That date cannot be used."],
+                }),
                 _ => Results.NotFound(),
             };
         })

@@ -4,7 +4,30 @@ namespace RecipeApp.Application.MealPlanning.Dtos;
 // Positional records, appended-last on any future change, per the house rule.
 
 /// <summary>Log a cook. <paramref name="MealPlanEntryId"/> is null for an ad-hoc cook.</summary>
-public record LogCookRequest(Guid RecipeId, Guid? MealPlanEntryId);
+/// <remarks>
+/// <para>
+/// The two trailing fields are KAN-6 — "record a cook that happened in the past" — and are
+/// appended-last with defaults per the house rule, so every existing two-argument caller keeps
+/// compiling and every existing client keeps meaning what it meant.
+/// </para>
+/// <para>
+/// <paramref name="CookedAt"/> null means "now", which is what every caller before KAN-6 meant
+/// implicitly. When supplied it must be a UTC timestamp (the validator's only rule) and the
+/// service reads its DATE and nothing else — see CookLogService.LogAsync for why a day the user
+/// typed is not a moment, and where the two bounds on it live.
+/// </para>
+/// <para>
+/// <paramref name="Note"/> exists so a backdated cook can be annotated in the ONE gesture that
+/// created it. PATCH /cook-log/{id} still works on the row afterwards and remains the only way
+/// to change or clear a note; this is not a second note field, it is the initial value of the
+/// same one.
+/// </para>
+/// </remarks>
+public record LogCookRequest(
+    Guid RecipeId,
+    Guid? MealPlanEntryId,
+    DateTime? CookedAt = null,
+    string? Note = null);
 
 /// <summary>Set (or clear, with null) the note on one logged cook.</summary>
 public record UpdateCookNoteRequest(string? Note);
