@@ -232,15 +232,82 @@ public class SocialInteractionEndpointsTests(IntegrationTestFactory factory) : I
         // The owner soft-deletes one saved recipe and flips another to Private; both must
         // silently vanish from the saver's list (chat-suggestion convention), not error.
         (await ownerClient.DeleteAsync($"/recipes/{deletedRecipe.Id}")).EnsureSuccessStatusCode();
-        var hideRequest = ValidCreateRecipeRequest(RecipeVisibility.Private);
-        var hide = await ownerClient.PutAsJsonAsync($"/recipes/{hiddenRecipe.Id}", hideRequest, TestJson.Options);
-        hide.EnsureSuccessStatusCode();
+        await MakePrivateAsync(ownerClient, hiddenRecipe.Id);
 
         var listed = await saverClient.GetFromJsonAsync<RecipeListResponse>("/users/me/saved-recipes", TestJson.Options);
 
         Assert.Contains(listed!.Items, r => r.Id == keptRecipe.Id);
         Assert.DoesNotContain(listed.Items, r => r.Id == deletedRecipe.Id);
         Assert.DoesNotContain(listed.Items, r => r.Id == hiddenRecipe.Id);
+    }
+
+    // ADR-0001 (KAN-3): unsaving destroys the caller's own row and so needs no visibility.
+    // Saving still does — see SaveRecipe_NonVisibleRecipe_Returns404 below.
+
+    [Fact]
+    public async Task UnsaveRecipe_RecipeSinceMadePrivate_StillRemovesTheSave()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+        var before = await RankOfAsync(ownerClient, owner.UserId);
+
+        var saverClient = factory.CreateClient();
+        var saver = await AuthTestHelper.RegisterAndAuthenticateAsync(saverClient);
+        (await saverClient.PostAsync($"/recipes/{recipe.Id}/saves", null)).EnsureSuccessStatusCode();
+
+        await MakePrivateAsync(ownerClient, recipe.Id);
+        Assert.Equal(HttpStatusCode.NotFound, (await saverClient.GetAsync($"/recipes/{recipe.Id}")).StatusCode);
+
+        var response = await saverClient.DeleteAsync($"/recipes/{recipe.Id}/saves");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await db.SavedRecipes.AnyAsync(s => s.UserId == saver.UserId && s.RecipeId == recipe.Id));
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+    }
+
+    [Fact]
+    public async Task UnsaveRecipe_RecipeSinceDeleted_StillRemovesTheSave()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+        var before = await RankOfAsync(ownerClient, owner.UserId);
+
+        var saverClient = factory.CreateClient();
+        var saver = await AuthTestHelper.RegisterAndAuthenticateAsync(saverClient);
+        (await saverClient.PostAsync($"/recipes/{recipe.Id}/saves", null)).EnsureSuccessStatusCode();
+
+        (await ownerClient.DeleteAsync($"/recipes/{recipe.Id}")).EnsureSuccessStatusCode();
+
+        var response = await saverClient.DeleteAsync($"/recipes/{recipe.Id}/saves");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await db.SavedRecipes.AnyAsync(s => s.UserId == saver.UserId && s.RecipeId == recipe.Id));
+        // Soft-deleted: the author lookup behind the reversal has to see past the global
+        // query filter as well as the visibility rule.
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+    }
+
+    [Fact]
+    public async Task SaveRecipe_NonVisibleRecipe_Returns404()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient, RecipeVisibility.Private);
+
+        var otherClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(otherClient);
+
+        var response = await otherClient.PostAsync($"/recipes/{recipe.Id}/saves", null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
@@ -655,6 +722,28 @@ public class SocialInteractionEndpointsTests(IntegrationTestFactory factory) : I
         var response = await client.PostAsJsonAsync("/recipes", ValidCreateRecipeRequest(visibility), TestJson.Options);
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<RecipeResponse>(TestJson.Options))!;
+    }
+
+    // The author withdraws the recipe by flipping it to Private — "unavailable" without
+    // the recipe row going anywhere. Called with the OWNER's client.
+    private static async Task MakePrivateAsync(HttpClient ownerClient, Guid recipeId)
+    {
+        var create = ValidCreateRecipeRequest(RecipeVisibility.Private);
+        var update = new UpdateRecipeRequest(
+            create.Title,
+            create.Description,
+            create.PrepTimeMinutes,
+            create.CookTimeMinutes,
+            create.Servings,
+            create.Difficulty,
+            create.CuisineType,
+            create.CaloriesPerServing,
+            create.ImageUrl,
+            create.Visibility,
+            create.Ingredients,
+            create.Steps,
+            create.Tags);
+        (await ownerClient.PutAsJsonAsync($"/recipes/{recipeId}", update, TestJson.Options)).EnsureSuccessStatusCode();
     }
 
     private static async Task<CommentResponse> AddCommentAsync(HttpClient client, Guid recipeId, string content)

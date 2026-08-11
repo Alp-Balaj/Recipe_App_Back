@@ -115,13 +115,14 @@ public class SocialService : ISocialService
         return SocialResult<bool>.Success(true);
     }
 
+    // ADR-0001: unsaving DESTROYS the caller's own row, so unlike SaveRecipeAsync above it
+    // does not require the recipe to be visible. Gating it meant an author flipping a recipe
+    // to Private stranded every save of it — a row its owner could neither see (the saved
+    // list omits it) nor delete (this 404'd). Nothing here reads recipe content, so there is
+    // nothing to withhold.
     public async Task<SocialResult<bool>> UnsaveRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
-        if (authorId is null)
-        {
-            return SocialResult<bool>.NotFound();
-        }
+        var authorId = await RecipeAuthorRegardlessOfAvailabilityAsync(recipeId, cancellationToken);
 
         var deleted = await _db.SavedRecipes
             .Where(s => s.UserId == currentUserId && s.RecipeId == recipeId)
@@ -129,9 +130,12 @@ public class SocialService : ISocialService
 
         // Gamification (symmetric reversal): a real save->unsave transition subtracts the
         // SavedByOtherUser award from the author; a no-op unsave leaves the rank untouched.
-        if (deleted > 0)
+        // The award was made when the recipe was visible and is not undone by it becoming
+        // unavailable (removal never touches rank), so withdrawing the save must still
+        // withdraw the points — otherwise the author keeps them for a save nobody holds.
+        if (deleted > 0 && authorId is Guid author)
         {
-            await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.SavedByOtherUser, cancellationToken);
+            await RevertAuthorAsync(author, currentUserId, RankEvent.SavedByOtherUser, cancellationToken);
             await _db.SaveChangesAsync(cancellationToken);
         }
 
@@ -526,13 +530,14 @@ public class SocialService : ISocialService
         return SocialResult<CookedRecipeResponse>.Success(ToCookedResponse(recipeId, row));
     }
 
+    // ADR-0001, the destroying half of the rule that gates MarkCookedAsync and
+    // RateRecipeAsync above: clearing a dish removes only the caller's own rows, so it must
+    // keep working after the recipe becomes unavailable. A cook is a fact about the user,
+    // and the note they wrote is their own writing — an author withdrawing their recipe
+    // must not leave that stranded, visible nowhere and deletable nowhere.
     public async Task<SocialResult<CookedRecipeResponse>> ClearCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        var authorId = await VisibleRecipeAuthorAsync(recipeId, currentUserId, cancellationToken);
-        if (authorId is null)
-        {
-            return SocialResult<CookedRecipeResponse>.NotFound();
-        }
+        var authorId = await RecipeAuthorRegardlessOfAvailabilityAsync(recipeId, cancellationToken);
 
         var row = await _db.CookedRecipes
             .SingleOrDefaultAsync(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId, cancellationToken);
@@ -543,10 +548,15 @@ public class SocialService : ISocialService
             _db.CookedRecipes.Remove(row);
 
             // Symmetric reversal, and only when an award was actually made: a row that was
-            // never rated never awarded, so removing it must not dock the author.
-            if (hadRating)
+            // never rated never awarded, so removing it must not dock the author. The null
+            // author branch is defensive rather than reachable: removal is a SOFT delete, and
+            // a hard one would have taken this row with it (CookedRecipes cascades on the
+            // recipe FK) — or been refused outright, since CookLogs restricts it. If a row
+            // ever does outlive its recipe, skipping the reversal is the safe half: the
+            // author keeps points they earned, which beats docking the wrong person.
+            if (hadRating && authorId is Guid author)
             {
-                await RevertAuthorAsync(authorId.Value, currentUserId, RankEvent.RecipeCookedAndRated, cancellationToken);
+                await RevertAuthorAsync(author, currentUserId, RankEvent.RecipeCookedAndRated, cancellationToken);
             }
 
             await _db.SaveChangesAsync(cancellationToken);
@@ -1247,6 +1257,25 @@ public class SocialService : ISocialService
     private Task<Guid?> VisibleRecipeAuthorAsync(Guid recipeId, Guid? currentUserId, CancellationToken cancellationToken) =>
         _db.Recipes
             .Where(RecipeVisibilityPolicy.VisibleTo(currentUserId))
+            .Where(r => r.Id == recipeId)
+            .Select(r => (Guid?)r.CreatedByUserId)
+            .SingleOrDefaultAsync(cancellationToken);
+
+    // The counterpart for ADR-0001's DESTRUCTIVE writes (UnsaveRecipeAsync,
+    // ClearCookedAsync): the recipe's author whether or not the caller may still read the
+    // recipe, and whether or not it has been soft-deleted. Deliberately takes no caller id
+    // — there is no access decision here to make. It is NOT an authorization bypass: the
+    // only thing the id is used for is reversing an award on the author's rank, a number
+    // the caller never sees and cannot influence beyond withdrawing their own row. No call
+    // site may return it, or leak the fact that a row exists, to the caller.
+    //
+    // IgnoreQueryFilters is what lets the soft-delete case work at all; without it a
+    // withdrawn recipe reads as null and the author silently keeps points for a save or
+    // rating that no longer exists. Null therefore means the row is genuinely gone (a hard
+    // delete or an id that never existed), and callers skip the reversal rather than fail.
+    private Task<Guid?> RecipeAuthorRegardlessOfAvailabilityAsync(Guid recipeId, CancellationToken cancellationToken) =>
+        _db.Recipes
+            .IgnoreQueryFilters()
             .Where(r => r.Id == recipeId)
             .Select(r => (Guid?)r.CreatedByUserId)
             .SingleOrDefaultAsync(cancellationToken);

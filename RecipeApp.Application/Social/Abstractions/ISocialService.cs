@@ -21,7 +21,13 @@ public interface ISocialService
     /// <summary>Idempotent save. NotFound when the recipe isn't visible to the caller.</summary>
     Task<SocialResult<bool>> SaveRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
 
-    /// <summary>Idempotent unsave. NotFound when the recipe isn't visible to the caller.</summary>
+    /// <summary>
+    /// Idempotent unsave. Requires NO visibility (ADR-0001): it destroys the caller's own
+    /// row, so it keeps working after the author makes the recipe Private or removes it —
+    /// otherwise the save is an orphan its owner can neither see nor delete. Always Success,
+    /// including for a recipe that never existed, so the answer cannot be read as "this
+    /// recipe is out there somewhere and you're not allowed to see it".
+    /// </summary>
     Task<SocialResult<bool>> UnsaveRecipeAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -72,7 +78,11 @@ public interface ISocialService
 
     /// <summary>
     /// Removes the caller's cooked/rated row entirely (the undo path for a mis-tap), and
-    /// reverses the award if a rating had been given. Idempotent.
+    /// reverses the award if a rating had been given. Idempotent. Like
+    /// <see cref="UnsaveRecipeAsync"/>, and in contrast to <see cref="MarkCookedAsync"/> and
+    /// <see cref="RateRecipeAsync"/> above, this requires NO visibility (ADR-0001): a cook is
+    /// a fact about the user, so an author withdrawing the recipe must not strand the record
+    /// of it.
     /// </summary>
     Task<SocialResult<CookedRecipeResponse>> ClearCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
 
