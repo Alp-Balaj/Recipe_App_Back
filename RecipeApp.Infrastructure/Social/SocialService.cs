@@ -207,9 +207,14 @@ public class SocialService : ISocialService
     {
         var readable = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
 
-        // D8, and the reason it is a filter rather than a data fix: RateRecipeAsync has been
-        // creating rows with TimesCooked = 0 since 30 July, so Cooked — a record of what you
-        // have MADE — would otherwise open listing dishes the user only ever rated.
+        // D8, and the reason it is a filter rather than a data fix: RateRecipeAsync created
+        // rows with TimesCooked = 0 between 30 July and KAN-7, so Cooked — a record of what
+        // you have MADE — would otherwise list dishes the user only ever rated.
+        //
+        // KAN-7 closed the source; this stays, and stays the AUTHORITY on the question. The
+        // rows it was written for are still in the database — the ticket says so explicitly —
+        // and RateRecipeAsync's own precondition is now the same `TimesCooked > 0` on
+        // purpose, so the two can never answer "has this person cooked this" differently.
         var dishes = _db.CookedRecipes
             .Where(cr => cr.UserId == currentUserId)
             .Where(cr => cr.TimesCooked > 0);
@@ -637,21 +642,28 @@ public class SocialService : ISocialService
         var row = await _db.CookedRecipes
             .SingleOrDefaultAsync(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId, cancellationToken);
 
-        // Rating without having logged a cook is allowed — you can rate something you cooked
-        // before this feature existed. TimesCooked stays 0 to keep the two facts honest.
-        var wasUnrated = row?.Rating is null;
-        if (row is null)
+        // KAN-7. A rating is an opinion about a dish you MADE, so there has to be a cook of
+        // your own behind it. This used to create the row at TimesCooked = 0 instead, which
+        // is how a dish nobody made ended up in a collection of dishes they made: Cooked
+        // filters those out (D8) and still must, for every row written before this line
+        // existed, but they stop being made here.
+        //
+        // TimesCooked > 0 is the SAME predicate that filter uses, deliberately — two
+        // different answers to "has this person cooked this" is exactly the drift that put
+        // the filter there. Not row existence, and this is the case that makes the
+        // difference rather than a hypothetical one: a zero-cook row is a rating with
+        // nothing behind it, whether it was written before this rule existed or got there
+        // by its owner un-cooking every cook of the dish (UncookEntryAsync leaves Rating
+        // alone by design). Row existence would read both as a licence to re-rate.
+        //
+        // Nothing is written on the refusal, which is what lets the client offer to record
+        // the cook and try again: a half-written row would make the retry a re-rate.
+        if (row is null || row.TimesCooked <= 0)
         {
-            row = new CookedRecipe
-            {
-                UserId = currentUserId,
-                RecipeId = recipeId,
-                TimesCooked = 0,
-                FirstCookedAt = now,
-                LastCookedAt = now,
-            };
-            _db.CookedRecipes.Add(row);
+            return SocialResult<CookedRecipeResponse>.Conflict();
         }
+
+        var wasUnrated = row.Rating is null;
 
         row.Rating = rating;
         row.RatedAt = now;

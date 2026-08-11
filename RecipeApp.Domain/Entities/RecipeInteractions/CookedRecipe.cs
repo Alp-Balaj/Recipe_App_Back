@@ -9,7 +9,18 @@ namespace RecipeApp.Domain.Entities.RecipeInteractions;
 // the repeat information without a row per cook.
 //
 // Rating is nullable because the two halves are separable in practice — you can log a
-// cook and rate later, or rate something you cooked before the app existed. The rank
+// cook and rate later, and taking the rating back leaves the cooks (ADR-0002).
+//
+// Since KAN-7 the reverse is refused AT THE MOMENT OF RATING: RateRecipeAsync needs
+// TimesCooked > 0 to accept one. That is a rule about the write, NOT an invariant of the
+// row, and the difference matters — a rated row can still be sitting at TimesCooked = 0.
+// Two ways in, both fine and neither closed here:
+//   - it was rated before KAN-7, when rating created the row at 0 (ADR-0004);
+//   - its owner un-cooked every cook of the dish afterwards. CookLogService.UncookEntryAsync
+//     steps the count down and leaves Rating alone on purpose, because un-cooking is not a
+//     retraction of an opinion.
+// Either way Cooked filters the row out (design D8) and its owner cannot re-rate it until
+// they record another cook, which is exactly what "a rating needs a cook" means. The rank
 // award hangs off the null -> rated transition only, so re-rating cannot farm points.
 public class CookedRecipe
 {

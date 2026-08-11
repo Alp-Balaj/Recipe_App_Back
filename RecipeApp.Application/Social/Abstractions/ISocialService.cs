@@ -44,9 +44,10 @@ public interface ISocialService
 
     /// <summary>
     /// Cooked (KAN-4): the caller's dishes, LastCookedAt DESC keyset-paged. One row per recipe
-    /// they have cooked at least once — dishes with no recorded cook are excluded (design D8),
-    /// which is what keeps the rows <see cref="RateRecipeAsync"/> creates out of a list of what
-    /// the user has actually made.
+    /// they have cooked at least once — dishes with no cook behind them are excluded (design
+    /// D8), which is what keeps the zero-cook rows <see cref="RateRecipeAsync"/> wrote before
+    /// KAN-7 out of a list of what the user has actually made. KAN-7 stopped new ones being
+    /// written; this filter is what handles the ones already there.
     /// <para>
     /// Unlike <see cref="GetSavedRecipesAsync"/> a dish is NOT dropped when its recipe stops
     /// being visible: it renders from the title the cook snapshotted and reports
@@ -102,9 +103,17 @@ public interface ISocialService
     Task<SocialResult<CookedRecipeResponse>> MarkCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sets the caller's 1-5 rating, creating the row if they never logged a cook. Awards
-    /// RecipeCookedAndRated (+15) to the author ONLY on the null -> rated transition, so
-    /// re-rating cannot farm points.
+    /// Sets the caller's 1-5 rating on a dish they have cooked. Awards RecipeCookedAndRated
+    /// (+15) to the author ONLY on the null -> rated transition, so re-rating cannot farm
+    /// points.
+    /// <para>
+    /// KAN-7: a rating needs a cook of the CALLER's own behind it (TimesCooked > 0) —
+    /// somebody else's cook is not their claim to have made the dish. Without one this
+    /// answers <see cref="SocialOutcome.Conflict"/> and writes nothing, where it used to
+    /// create the row at TimesCooked = 0. The client's fix is to record the cook and retry;
+    /// the rows written the old way are left exactly as they are, and
+    /// <see cref="GetCookedDishesAsync"/> keeps filtering them out.
+    /// </para>
     /// </summary>
     Task<SocialResult<CookedRecipeResponse>> RateRecipeAsync(Guid recipeId, int rating, Guid currentUserId, CancellationToken cancellationToken = default);
 

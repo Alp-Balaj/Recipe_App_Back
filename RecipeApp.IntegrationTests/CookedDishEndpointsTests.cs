@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Application.Social.Dtos;
+using RecipeApp.Domain.Entities.RecipeInteractions;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -19,7 +20,8 @@ namespace RecipeApp.IntegrationTests;
 // why the two endpoints exist side by side rather than one being a filter of the other.
 //
 // The three tests carrying the design are A_dish_rated_but_never_cooked_is_absent (D8 — the
-// backstop for the rows RateRecipeAsync has been creating since 30 July),
+// backstop for the zero-cook rows RateRecipeAsync wrote between 30 July and KAN-7, which
+// closed the source but deliberately left the rows themselves alone),
 // An_unavailable_dish_renders_from_the_snapshot_title (D14/ADR-0001 — the record survives
 // the author withdrawing the recipe) and The_row_shows_the_latest_note_with_its_own_date
 // (D4 — a note older than the last cook must not read as if it described that cook).
@@ -98,15 +100,29 @@ public class CookedDishEndpointsTests(IntegrationTestFactory factory) : IClassFi
         var ratedOnly = await CreateRecipeAsync(client, "Rated from memory");
 
         await LogCookAsync(client, cooked.Id);
-        (await client.PutAsJsonAsync($"/recipes/{ratedOnly.Id}/rating", new RatingRequest(5), TestJson.Options))
-            .EnsureSuccessStatusCode();
+        // Seeded, because KAN-7 shut the door PUT /recipes/{id}/rating used to open: rating
+        // a dish with no cook behind it is now a 409 and creates nothing. The rows written
+        // before that are still in the database and this filter is what keeps them out, so
+        // the state has to be built directly or the backstop goes untested.
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            setupDb.CookedRecipes.Add(new CookedRecipe
+            {
+                UserId = ratedOnly.CreatedByUserId,
+                RecipeId = ratedOnly.Id,
+                TimesCooked = 0,
+                Rating = 5,
+                RatedAt = DateTime.UtcNow.AddDays(-30),
+            });
+            await setupDb.SaveChangesAsync();
+        }
 
         var list = await GetCookedAsync(client);
 
-        // D8. RateRecipeAsync has been creating CookedRecipe rows with TimesCooked = 0 since
-        // 30 July, so without this filter Cooked — a record of what you HAVE MADE — would open
-        // listing dishes the user never cooked. The row itself is left alone: this endpoint is
-        // a read, and the rating is still real.
+        // D8. Cooked — a record of what you HAVE MADE — would otherwise list dishes the user
+        // never cooked. The row itself is left alone: this endpoint is a read, and the rating
+        // is still real.
         Assert.DoesNotContain(list.Items, d => d.RecipeId == ratedOnly.Id);
         Assert.Contains(list.Items, d => d.RecipeId == cooked.Id);
 
