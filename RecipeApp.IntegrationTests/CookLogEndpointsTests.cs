@@ -603,6 +603,189 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         Assert.Single(log!.Items);
     }
 
+    // --- un-logging ONE cook (KAN-14) ----------------------------------------------------
+    //
+    // The entry-scoped delete above can only reach a cook that satisfied a plan slot. A cook
+    // logged from cook mode on a recipe opened from Discover has no slot, so until this
+    // endpoint the only thing that could take it back was DELETE /recipes/{id}/cooked — "I
+    // have never cooked this", which erases every cook of the dish and every note on them.
+    // A mis-tapped "Finished cooking" was permanent.
+
+    [Fact]
+    public async Task Un_logging_one_cook_leaves_the_others_alone()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Mercimek çorbası");
+
+        var first = await LogCookAsync(client, recipe.Id);
+        var second = await LogCookAsync(client, recipe.Id);
+        var third = await LogCookAsync(client, recipe.Id);
+
+        var response = await client.DeleteAsync($"/cook-log/{second.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        // The point of the gesture: ONE cook goes, and it is the one that was named. The
+        // entry-scoped sibling deletes every row against a slot, which is right for a slot
+        // and wrong for a row.
+        var log = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.Equal(new[] { third.Id, first.Id }, log!.Items.Select(i => i.Id).ToArray());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var aggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(2, aggregate.TimesCooked);
+    }
+
+    [Fact]
+    public async Task An_ad_hoc_cook_with_no_plan_slot_can_be_un_logged()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Discover-opened şakşuka");
+
+        // Exactly what cook mode's finish panel sends when the recipe was not planned:
+        // POST /recipes/{id}/cooked, which lands a CookLog row with a null MealPlanEntryId.
+        // This is the row KAN-14 exists for — DELETE /cook-log/entries/{entryId} has no id
+        // to be given.
+        (await client.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
+        var logged = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        var row = Assert.Single(logged!.Items);
+        Assert.Null(row.MealPlanEntryId);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/{row.Id}")).StatusCode);
+
+        var after = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.Empty(after!.Items);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var aggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(0, aggregate.TimesCooked);
+    }
+
+    [Fact]
+    public async Task Un_logging_a_cook_leaves_the_rating_and_the_dishs_other_recipes_alone()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Karnıyarık");
+        var other = await CreateRecipeAsync(client, "İmam bayıldı");
+
+        var cook = await LogCookAsync(client, recipe.Id);
+        await LogCookAsync(client, other.Id);
+        (await client.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options))
+            .EnsureSuccessStatusCode();
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        // Un-cooking says "I did not make this", not "I never had an opinion" — the same
+        // asymmetry ADR-0002 states from the other direction, and ADR-0004 explicitly allows
+        // a rated row to sit at zero cooks.
+        var aggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(0, aggregate.TimesCooked);
+        Assert.Equal(5, aggregate.Rating);
+
+        // And nothing reached the neighbouring dish, whose only connection is the same owner.
+        var untouched = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == other.Id);
+        Assert.Equal(1, untouched.TimesCooked);
+    }
+
+    [Fact]
+    public async Task Un_logging_the_same_cook_twice_is_not_found()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Kısır");
+        var cook = await LogCookAsync(client, recipe.Id);
+        await LogCookAsync(client, recipe.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
+
+        // NOT the entry-scoped delete's idempotent 204, and the difference is the scope
+        // rather than a inconsistency. An entry survives its cooks, so "no cooks against
+        // this slot" is a state it can still be in; a row does not survive its own deletion,
+        // so a second DELETE is asking about something that is not there. The count must not
+        // move a second time either — that is the half a wrong 204 would hide.
+        Assert.Equal(HttpStatusCode.NotFound, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var aggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(1, aggregate.TimesCooked);
+    }
+
+    [Fact]
+    public async Task Un_logging_another_users_cook_is_not_found()
+    {
+        var owner = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(owner, "Su böreği");
+        var cook = await LogCookAsync(owner, recipe.Id);
+
+        var stranger = await factory.CreateAuthenticatedClientAsync();
+        Assert.Equal(HttpStatusCode.NotFound, (await stranger.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
+
+        // A 404 must not have been a silent delete — the same pairing the entry-scoped test
+        // above makes, because "not yours" and "gone" are one status code here.
+        var log = await owner.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.Single(log!.Items);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var aggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(1, aggregate.TimesCooked);
+    }
+
+    [Fact]
+    public async Task Un_logging_a_cook_never_drives_the_count_negative()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Zeytinyağlı enginar");
+        var cook = await LogCookAsync(client, recipe.Id);
+
+        // Force the drift the floor exists for, the same way UncookEntryAsync's own floor
+        // test does and for the same reason: TimesCooked and the log are two separately
+        // writable records of one fact (a legacy aggregate from before CookLog existed
+        // carries a count with no rows behind it), and without forcing the state the floor
+        // is never actually exercised.
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var aggregate = await setupDb.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+            aggregate.TimesCooked = 0;
+            await setupDb.SaveChangesAsync();
+        }
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var final = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
+        Assert.Equal(0, final.TimesCooked);
+    }
+
+    [Fact]
+    public async Task Un_logging_a_cook_of_a_recipe_the_author_withdrew_still_works()
+    {
+        var author = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(author, "Someone else's lahmacun");
+
+        var cook = await factory.CreateAuthenticatedClientAsync();
+        var logged = await LogCookAsync(cook, recipe.Id);
+
+        // The author takes it away AFTER the cook happened: the row is now unreadable to its
+        // owner as a recipe, and their record of having made it is the thing ADR-0001 keeps.
+        // Keeping it is only half the rule — they must also be able to take it back.
+        await UpdateRecipeAsync(author, recipe, RecipeVisibility.Private, null);
+
+        var row = await cook.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.False(Assert.Single(row!.Items).RecipeAvailable);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await cook.DeleteAsync($"/cook-log/{logged.Id}")).StatusCode);
+
+        var after = await cook.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
+        Assert.Empty(after!.Items);
+    }
+
     // --- one record of every cook (roadmap spec 2, task 3) -------------------------------
     //
     // The log's claim to be the COMPLETE record of every cook only holds if every surface

@@ -79,4 +79,32 @@ public interface ICookLogService
     /// Rating is untouched — it lives on CookedRecipe and is a separate claim.
     /// </remarks>
     Task<MealPlanResult<bool>> UncookEntryAsync(Guid mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes ONE logged cook of the caller's own and decrements the per-recipe aggregate by
+    /// one (floored at 0). NotFound when the row is not the caller's, or is already gone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// KAN-14 — the cook-id-scoped sibling of <see cref="UncookEntryAsync"/>. That one can
+    /// only reach a cook that satisfied a plan slot, so a cook logged from cook mode on an
+    /// unplanned recipe had no undo at all: the only gesture wide enough to reach it was
+    /// <c>DELETE /recipes/{id}/cooked</c>, which means "I have never cooked this" and takes
+    /// every cook of the dish and every note with it. That gesture keeps its width and its
+    /// meaning (ADR-0002); this is the narrow one its own comment asked for.
+    /// </para>
+    /// <para>
+    /// NOT idempotent, unlike its sibling, and the difference is the scope rather than an
+    /// inconsistency. A plan entry outlives its cooks, so "no cooks against this slot" is a
+    /// state it can still be in and a repeat is Success; a log row does not outlive its own
+    /// deletion, so a second call is asking about something that is not there. NotFound
+    /// covers "not yours" and "already gone" alike, per this interface's 404-never-403 note.
+    /// </para>
+    /// <para>
+    /// Rating is untouched, for <see cref="UncookEntryAsync"/>'s reason: un-cooking is not a
+    /// retraction of an opinion. ADR-0004 says so explicitly — a rated row may sit at zero
+    /// cooks; what its owner cannot do is re-rate until they record another cook.
+    /// </para>
+    /// </remarks>
+    Task<MealPlanResult<bool>> UncookAsync(Guid cookLogId, Guid currentUserId, CancellationToken cancellationToken = default);
 }

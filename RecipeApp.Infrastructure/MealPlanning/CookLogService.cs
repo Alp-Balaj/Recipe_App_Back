@@ -400,6 +400,89 @@ public class CookLogService : ICookLogService
         return MealPlanResult<bool>.Success(true);
     }
 
+    public async Task<MealPlanResult<bool>> UncookAsync(
+        Guid cookLogId, Guid currentUserId, CancellationToken cancellationToken = default)
+    {
+        // Read untracked, and write with set-based statements below, for ClearRatingAsync's
+        // reason: two deletes of the same cook can genuinely be in flight together (a
+        // double-tapped undo), and a tracked Remove that loses that race throws
+        // DbUpdateConcurrencyException — a 500 on a gesture whose whole job is to be the safe
+        // way out of a mis-tap. The read is only for the RecipeId; the deletion itself is
+        // decided by the statement.
+        //
+        // Scoped to the caller on the way IN, not checked afterwards: a row that is not
+        // theirs must never be counted as found. No visibility check on the recipe, and that
+        // is ADR-0001 rather than an omission — this destroys a row of the caller's own, so
+        // an author withdrawing their recipe must not strand a cook its owner can no longer
+        // take back. Project() already makes the same call from the read side.
+        var row = await _db.CookLogs
+            .AsNoTracking()
+            .Where(cl => cl.Id == cookLogId && cl.UserId == currentUserId)
+            .Select(cl => new { cl.RecipeId })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (row is null)
+        {
+            return MealPlanResult<bool>.NotFound();
+        }
+
+        // The two statements are one transaction because they are one fact. LogAsync writes
+        // the row and the bump in a single SaveChanges for exactly this reason ("both rows or
+        // neither"), and an undo that removed the cook but kept the count would leave the
+        // drift this design exists to prevent — pointing the wrong way, and permanently,
+        // since nothing recomputes TimesCooked from the log.
+        //
+        // The only explicit transaction in the codebase, because it is the only place two
+        // set-based statements have to land together; SaveChanges wraps its own, and
+        // ExecuteDelete/ExecuteUpdate do not enrol in one. Safe without an execution-strategy
+        // wrapper: the Npgsql registration turns on no retrying strategy (Program.cs).
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+
+        var deleted = await _db.CookLogs
+            .Where(cl => cl.Id == cookLogId && cl.UserId == currentUserId)
+            .ExecuteDeleteAsync(cancellationToken);
+        if (deleted == 0)
+        {
+            // The loser of the race above: the row was there when we read it and is gone now.
+            // Same answer as never having existed, which is what the caller's next list read
+            // will agree with.
+            return MealPlanResult<bool>.NotFound();
+        }
+
+        // The floor lives in the PREDICATE rather than in a Math.Max over a value this
+        // request read, so two concurrent un-logs of different cooks of the same dish cannot
+        // both compute "2 - 1" from the same stale 2. Same floor as UncookEntryAsync and for
+        // the same open-ended reason — see its comment: TimesCooked and the log are two
+        // separately-writable records of one fact and are not guaranteed to move together
+        // (a cook from before CookLog existed has a count with no row behind it).
+        //
+        // No aggregate row at all is a no-op, not an error. The drift runs in that direction
+        // too, and a cook whose aggregate was already cleared is still the caller's to delete.
+        await _db.CookedRecipes
+            .Where(cr => cr.UserId == currentUserId && cr.RecipeId == row.RecipeId && cr.TimesCooked > 0)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(cr => cr.TimesCooked, cr => cr.TimesCooked - 1),
+                cancellationToken);
+
+        // LastCookedAt and FirstCookedAt are deliberately NOT recomputed, even when the cook
+        // just removed was the one they name. They can only be recomputed from the log, and
+        // the log is not the whole record: a dish cooked twice before CookLog existed and
+        // once since has one row to recompute from, so "narrow the range to what the log
+        // holds" would report the dish as first cooked this month. ADR-0003 has the range
+        // WIDENING only, which is the same rule read forwards. The cost is a watermark that
+        // can outlive the cook that set it; the alternative is one that invents a date.
+        //
+        // The CookedRecipe row itself stays, too, even when this takes the count to zero and
+        // nothing was ever rated. UncookEntryAsync leaves it (pinned by
+        // Un_cooking_a_double_tapped_entry_removes_every_row) and two sibling gestures
+        // answering differently is worse than the row: a zero-cook row still reads as
+        // CookedByMe (row existence, see SocialDtos), which is the phantom the KAN-13/KAN-16
+        // family is about and is not this ticket's to close on one path only.
+        // No SaveChanges: both writes above were statements, and the read was untracked.
+        await transaction.CommitAsync(cancellationToken);
+
+        return MealPlanResult<bool>.Success(true);
+    }
+
     // The shared read shape, applied LAST — after Where/OrderBy/Take. Projecting first and
     // then filtering the projection is what EF cannot translate here (it fails at runtime, not
     // at compile time, so the shape matters); every read below therefore narrows the entity
