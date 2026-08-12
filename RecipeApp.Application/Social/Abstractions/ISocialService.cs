@@ -136,6 +136,11 @@ public interface ISocialService
     /// the rows written the old way are left exactly as they are, and
     /// <see cref="GetCookedDishesAsync"/> keeps filtering them out.
     /// </para>
+    /// <para>
+    /// KAN-13 closed the other half: every SOCIAL reader of that table now applies the same
+    /// predicate too, so those old rows no longer report their owner as a cook on the recipe
+    /// page, in the feed, in "N made this" or in their followers' activity strip.
+    /// </para>
     /// </summary>
     Task<SocialResult<CookedRecipeResponse>> RateRecipeAsync(Guid recipeId, int rating, Guid currentUserId, CancellationToken cancellationToken = default);
 
@@ -166,6 +171,14 @@ public interface ISocialService
     /// live counts, caller-relative flags. Visibility matches GET /recipes/{id} — a recipe
     /// the caller can't see (or that is soft-deleted) is NotFound, never Forbidden (rule 2).
     /// Works for the recipe's own author — the whole point of F1.
+    /// <para>
+    /// KAN-13: <c>CookedByMe</c>, <c>MadeItCount</c> and <c>RecentMakers</c> all answer "who
+    /// has COOKED this" and all read <c>TimesCooked &gt; 0</c>
+    /// (<c>CookedRecipePolicy</c>, ADR-0005), never the existence of a CookedRecipe row — a
+    /// row can hold a rating and no cook. <c>MyRating</c>, <c>RatingCount</c> and
+    /// <c>AverageRating</c> answer the separate question about OPINIONS and are unnarrowed:
+    /// a rating from someone who never cooked the dish is still theirs and still counts.
+    /// </para>
     /// </summary>
     Task<SocialResult<RecipeSocialResponse>> GetRecipeSocialAsync(Guid recipeId, Guid? currentUserId, CancellationToken cancellationToken = default);
 

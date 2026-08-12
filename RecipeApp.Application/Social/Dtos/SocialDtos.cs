@@ -31,15 +31,23 @@ public record RatingRequest(int Rating);
 // SPA can render the new count without a refetch. TimesCooked is 0 and Rating null once the
 // row has been deleted.
 //
-// CookedByMe is appended last, per this file's convention (KAN-12). It is ROW EXISTENCE —
-// the same derivation as RecipeSocialResponse.CookedByMe and FeedItemResponse.CookedByMe
-// (`r.CookedBy.Any(...)`), so a client patching those caches from this reply cannot disagree
-// with the next read of them. It is deliberately NOT `TimesCooked > 0`: the two come apart in
-// both directions. Rating a dish you never cooked creates the row at TimesCooked = 0, and
-// ClearRatingAsync keeps a row whose count has drifted to 0 while cook-log rows survive
-// behind it. Inferring the flag from the count reports "you have not cooked this" in exactly
-// those cases, and the detail page's envelope merge prefers a client patch over the server's
-// own answer, so the wrong value does not heal on the next read.
+// CookedByMe is appended last, per this file's convention (KAN-12), and since KAN-13 it means
+// `TimesCooked > 0` — the one definition of "has this person cooked this", shared with
+// RecipeSocialResponse.CookedByMe, FeedItemResponse.CookedByMe, the activity strip's cooked
+// leg and Cooked itself (CookedRecipePolicy, ADR-0005). A client patching those caches from
+// this reply therefore cannot disagree with the next read of them, which is the property this
+// field exists for.
+//
+// It used to be ROW EXISTENCE, which is a different question: a row can carry a rating and no
+// cook, so rating a dish reported you as having made it. That is the bug KAN-13 fixed, and it
+// is why the flag is not simply the old derivation written down.
+//
+// Redundant on the wire now, and kept anyway — deliberately. `TimesCooked` is right there and
+// a client could derive this itself, but the derivation is a SERVER decision that has already
+// changed twice (row existence -> count), and the SPA prefers a cache patch over a later read,
+// so a client that re-derives locally does not just get an outdated rule: it overwrites the
+// correct answer with its own and the wrong value outlives the fetch that would have healed
+// it. One field, one authority, no client edit the next time the rule moves.
 public record CookedRecipeResponse(
     Guid RecipeId,
     int TimesCooked,

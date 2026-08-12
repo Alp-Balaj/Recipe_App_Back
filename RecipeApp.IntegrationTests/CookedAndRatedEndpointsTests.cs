@@ -690,19 +690,30 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
         var response = await cookClient.DeleteAsync($"/recipes/{recipe.Id}/rating");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        // TimesCooked is 0 here and the row still exists, which is the whole reason
-        // CookedByMe is on the wire rather than inferred from the count: a client deriving
-        // the flag from this 0 would tell the user they have never cooked a dish the log
-        // still lists, and the detail page's envelope merge would keep that answer.
+        // TimesCooked is 0 here and the row still exists — and since KAN-13 the reply says
+        // NOT COOKED, because "cooked" is TimesCooked > 0 on every surface now
+        // (CookedRecipePolicy). It used to say the opposite, off the row's mere existence.
+        //
+        // The change of answer is the point rather than a regression: Cooked has always
+        // filtered this dish out and rating it has been refused since KAN-7, both on that
+        // same predicate. A `true` here was the odd one out, and because the SPA patches its
+        // envelope cache from this reply and prefers the patch over the wire, it was the one
+        // that WON — this reply put a "you cooked this" onto a page whose own fetch said no.
         var driftBody = (await response.Content.ReadFromJsonAsync<CookedRecipeResponse>(TestJson.Options))!;
         Assert.Equal(0, driftBody.TimesCooked);
-        Assert.True(driftBody.CookedByMe);
+        Assert.False(driftBody.CookedByMe);
+
+        // What the caller sees on the next read agrees with what they were just told. This is
+        // the assertion the old contract could not have made.
+        var envelope = await cookClient.GetFromJsonAsync<RecipeSocialResponse>($"/recipes/{recipe.Id}/social", TestJson.Options);
+        Assert.False(envelope!.CookedByMe);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        // The row stays — /plan/cooks still lists that cook, and CookedByMe is row existence,
-        // so dropping it here would make one cook read as never having happened everywhere
-        // except the log it is still written in.
+        // The row stays regardless. It is no longer holding a flag up — nothing reads it as a
+        // cook any more — but a 0 with logged cooks behind it is a DRIFTED aggregate rather
+        // than an empty one, and deleting it would throw away the row a future repair would
+        // write the recovered count back into. /plan/cooks still lists the cook either way.
         var kept = await db.CookedRecipes.SingleAsync(cr => cr.UserId == cook.UserId && cr.RecipeId == recipe.Id);
         Assert.Null(kept.Rating);
         Assert.Equal(1, await db.CookLogs.CountAsync(cl => cl.UserId == cook.UserId && cl.RecipeId == recipe.Id));
