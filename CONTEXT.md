@@ -39,6 +39,12 @@ nothing about what they thought, and taking a rating back says nothing about the
 cooks (ADR-0002).
 _Avoid_: score, stars, review
 
+**Maker**:
+Someone who has cooked a recipe at least once — what "N made this" counts and
+whose faces sit beside it. Having rated a recipe never makes someone a maker,
+and every surface decides this the same way (ADR-0005).
+_Avoid_: cook (that is one occasion), rater, contributor
+
 ### Collections
 
 **Cooked**:

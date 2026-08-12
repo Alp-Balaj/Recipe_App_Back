@@ -292,16 +292,17 @@ public class SocialService : ISocialService
     /// with TimesCooked = 0 between 30 July and KAN-7, so Cooked — a record of what you have
     /// MADE — would otherwise list dishes the user only ever rated.
     /// <para>
-    /// KAN-7 closed the source; this stays, and stays the AUTHORITY on the question. The rows
-    /// it was written for are still in the database — the ticket says so explicitly — and
-    /// RateRecipeAsync's own precondition is now the same <c>TimesCooked &gt; 0</c> on purpose,
-    /// so the two can never answer "has this person cooked this" differently.
+    /// KAN-7 closed the source and this stays, because the rows it was written for are still
+    /// in the database — the ticket says so explicitly. What it is no longer is the AUTHORITY
+    /// on the question: KAN-13 found the same predicate spelled out separately in the social
+    /// envelope, the feed and the activity strip, all three getting it wrong, and moved the
+    /// rule to <see cref="CookedRecipePolicy"/>. This composes that policy like every other
+    /// reader now does, so being the only correct one is no longer something Cooked has to be.
     /// </para>
     /// </remarks>
     private IQueryable<CookedRecipe> CookedDishes(Guid currentUserId) =>
         _db.CookedRecipes
-            .Where(cr => cr.UserId == currentUserId)
-            .Where(cr => cr.TimesCooked > 0);
+            .Where(CookedRecipePolicy.CookedBy(currentUserId));
 
     /// <summary>
     /// A user-typed term as a LIKE "contains" pattern, with the metacharacters escaped so they
@@ -955,17 +956,21 @@ public class SocialService : ISocialService
             }
         }
 
-        // A row holding neither a cook nor a rating asserts nothing, and CookedByMe is
-        // row EXISTENCE (r.CookedBy.Any(...)), not TimesCooked > 0 — so leaving one behind
-        // would keep telling the envelope and the activity feed that someone who only ever
-        // rated the dish had cooked it. Rating without cooking is allowed and creates exactly
-        // that row (RateRecipeAsync), which is why this case is real rather than defensive.
+        // A row holding neither a cook nor a rating asserts nothing, so it goes. ADR-0002
+        // settled that; what has changed under it is the ARGUMENT. This used to be load
+        // bearing — CookedByMe was row existence, so leaving the row behind kept telling the
+        // envelope and the activity strip that someone who only ever rated the dish had
+        // cooked it. KAN-13 moved every one of those readers onto TimesCooked > 0
+        // (CookedRecipePolicy), so a leftover row is inert rather than a lie, and this delete
+        // is now housekeeping: the reason to remove it is that nothing is in it.
         //
-        // The CookLogs check is what makes "no cook" honest. TimesCooked and the log are two
-        // separately-writable records of one fact and are NOT guaranteed to agree —
-        // UncookEntryAsync's floor comment enumerates the ways they drift — so a 0 with rows
-        // behind it must keep its row, or a cook still listed on /plan/cooks would read as
-        // never having happened everywhere else.
+        // The CookLogs check therefore no longer decides what any surface SAYS — the two 0s it
+        // distinguishes now read identically everywhere. It still decides what is DESTROYED,
+        // which is the part worth keeping: TimesCooked and the log are two separately-writable
+        // records of one fact and are NOT guaranteed to agree (UncookEntryAsync's floor comment
+        // enumerates the ways they drift), so a 0 with logged cooks behind it is a drifted
+        // aggregate, not an empty one. Deleting it would throw away the only row a future
+        // repair could write the recovered count back into.
         if (row.TimesCooked == 0
             && !await _db.CookLogs.AnyAsync(cl => cl.UserId == currentUserId && cl.RecipeId == recipeId, cancellationToken))
         {
@@ -986,8 +991,14 @@ public class SocialService : ISocialService
         // What is LEFT: the cooks survived, the rating did not. Built here rather than through
         // ToCookedResponse because `row` was read before the update and still carries the old
         // rating — the only thing about it that is now stale.
+        //
+        // CookedByMe is TimesCooked > 0 like everywhere else (KAN-13), and this is the ONE
+        // reply where that changed the answer: a drifted row reaching here used to report
+        // true off its mere existence while the envelope it patches now reports false, which
+        // is the disagreement AC4 is about — the client prefers the patch over the wire, so
+        // the wrong value would have outlived the read that should have corrected it.
         return SocialResult<CookedRecipeResponse>.Success(
-            new CookedRecipeResponse(recipeId, row.TimesCooked, null, row.TimesCooked > 0 ? row.LastCookedAt : null, true));
+            new CookedRecipeResponse(recipeId, row.TimesCooked, null, row.TimesCooked > 0 ? row.LastCookedAt : null, row.TimesCooked > 0));
     }
 
     // F1 resolution (I3 revisited for the single-recipe case, 2026-07-19): the same
@@ -1021,12 +1032,21 @@ public class SocialService : ISocialService
                 // signal — the cast to double? is what keeps it from collapsing to 0.
                 AverageRating = r.CookedBy.Where(c => c.Rating != null).Average(c => (double?)c.Rating),
                 RatingCount = r.CookedBy.Count(c => c.Rating != null),
-                CookedByMe = isAuthenticated && r.CookedBy.Any(c => c.UserId == callerId),
+                // KAN-13: TimesCooked > 0, not row existence — CookedRecipePolicy owns the
+                // rule and says why. The three lines below it are the three questions this
+                // envelope used to conflate: who cooked it, how many did, and who they were.
+                CookedByMe = isAuthenticated && r.CookedBy.AsQueryable().Any(CookedRecipePolicy.CookedBy(callerId)),
                 // Guest callers carry Guid.Empty, which matches no row, so this is null for
                 // them without needing the isAuthenticated guard the booleans use.
+                //
+                // Deliberately NOT narrowed by the cook policy: an opinion is a separate fact
+                // from a cook (ADR-0002), so a rating on a zero-cook row is still its owner's
+                // rating and still counts in the two aggregates above.
                 MyRating = r.CookedBy.Where(c => c.UserId == callerId).Select(c => c.Rating).FirstOrDefault(),
-                MadeItCount = r.CookedBy.Count(),
+                MadeItCount = r.CookedBy.AsQueryable().Count(CookedRecipePolicy.IsACook()),
                 RecentMakers = r.CookedBy
+                    .AsQueryable()
+                    .Where(CookedRecipePolicy.IsACook())
                     .OrderByDescending(c => c.LastCookedAt)
                     .Take(RecentMakerLimit)
                     .Select(c => new UserSummaryResponse(c.UserId, c.User.Username, c.User.ProfileImageUrl))
@@ -1497,13 +1517,20 @@ public class SocialService : ISocialService
                 SavedByMe = isAuthenticated && r.SavedByUsers.Any(s => s.UserId == callerIdValue),
                 AverageRating = r.CookedBy.Where(c => c.Rating != null).Average(c => (double?)c.Rating),
                 RatingCount = r.CookedBy.Count(c => c.Rating != null),
-                CookedByMe = isAuthenticated && r.CookedBy.Any(c => c.UserId == callerIdValue),
+                // KAN-13, and the same three derivations as GetRecipeSocialAsync's envelope —
+                // the F1 parity test pins that these two build the identical shape, so the
+                // policy has to reach both or the parity is the thing that breaks.
+                CookedByMe = isAuthenticated && r.CookedBy.AsQueryable().Any(CookedRecipePolicy.CookedBy(callerIdValue)),
                 MyRating = r.CookedBy.Where(c => c.UserId == callerIdValue).Select(c => c.Rating).FirstOrDefault(),
-                // Feed redesign: the "N made this" row. Count is every cook; RecentMakers is
-                // only the handful the avatars can hold — see FeedItemResponse for why the
+                // Feed redesign: the "N made this" row. Count is every COOK — one row per
+                // person who has cooked it, never a rater who has not (KAN-13); RecentMakers
+                // is only the handful the avatars can hold, drawn from those same people, so
+                // the number and the faces cannot disagree. See FeedItemResponse for why the
                 // count is rows, not the sum of TimesCooked.
-                MadeItCount = r.CookedBy.Count(),
+                MadeItCount = r.CookedBy.AsQueryable().Count(CookedRecipePolicy.IsACook()),
                 RecentMakers = r.CookedBy
+                    .AsQueryable()
+                    .Where(CookedRecipePolicy.IsACook())
                     .OrderByDescending(c => c.LastCookedAt)
                     .Take(RecentMakerLimit)
                     .Select(c => new UserSummaryResponse(c.UserId, c.User.Username, c.User.ProfileImageUrl))
@@ -1608,7 +1635,11 @@ public class SocialService : ISocialService
                 s.SavedAt))
             .ToListAsync(cancellationToken);
 
+        // KAN-13: the strip's loudest claim — this leg is what puts "X cooked Y" in front of
+        // other people. It used to select every row of the table, so a rating with no cook
+        // behind it was broadcast to the rater's followers as a cook.
         var cooked = await _db.CookedRecipes
+            .Where(CookedRecipePolicy.IsACook())
             .Where(c => actorIds.Contains(c.UserId) && visible.Any(r => r.Id == c.RecipeId))
             .OrderByDescending(c => c.LastCookedAt)
             .Take(limit)
@@ -1823,10 +1854,14 @@ public class SocialService : ISocialService
             .Select(c => (Guid?)c.UserId)
             .SingleOrDefaultAsync(cancellationToken);
 
-    // CookedByMe is unconditionally true here: this overload is only reached holding the
-    // caller's row, and the flag is row existence (see CookedRecipeResponse).
+    // CookedByMe is derived, not asserted (KAN-13). Both callers happen to hold a row with a
+    // cook on it — MarkCookedAsync has just written one and RateRecipeAsync refuses without
+    // one — so this reads true for them today exactly as the old hardcoded `true` did. It is
+    // spelled out anyway because the next caller of this helper will not necessarily be in
+    // that position, and a constant that is only accidentally correct is the kind of thing
+    // this ticket was about.
     private static CookedRecipeResponse ToCookedResponse(Guid recipeId, CookedRecipe row) =>
-        new(recipeId, row.TimesCooked, row.Rating, row.TimesCooked > 0 ? row.LastCookedAt : null, true);
+        new(recipeId, row.TimesCooked, row.Rating, row.TimesCooked > 0 ? row.LastCookedAt : null, row.TimesCooked > 0);
 
     private static CommentResponse ToCommentResponse(Comment comment, string authorUsername, int likeCount, bool likedByMe) =>
         new(comment.Id, comment.Content, comment.CreatedAt, comment.UpdatedAt, comment.UserId, authorUsername, comment.RecipeId, likeCount, likedByMe);
