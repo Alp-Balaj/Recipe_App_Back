@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Application.Social.Dtos;
+using RecipeApp.Domain.Entities.RecipeInteractions;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -109,6 +110,7 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
 
         var raterClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+        (await raterClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
 
         var response = await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(4), TestJson.Options);
 
@@ -128,6 +130,7 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
 
         var raterClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+        (await raterClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
 
         // Toggling a star is exactly how rank would be farmed if the award were not gated
         // on the null -> rated transition.
@@ -144,6 +147,7 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
         var ownerClient = factory.CreateClient();
         var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
         var recipe = await CreateRecipeAsync(ownerClient);
+        (await ownerClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
         var before = await RankOfAsync(ownerClient, owner.UserId);
 
         await ownerClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options);
@@ -151,8 +155,156 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
         Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
     }
 
+    // --- a rating needs a cook behind it (KAN-7) -----------------------------------------
+    //
+    // Rating used to CREATE the aggregate at TimesCooked = 0, which is how a dish nobody
+    // made ended up in a collection of dishes they made. Cooked filters those out (D8) and
+    // still must, for the rows already in the database — but the source is closed here.
+    //
+    // "A cook of their own" is the whole rule: someone else's cook is not the rater's
+    // claim to have made the dish, and neither is a rating.
+
     [Fact]
-    public async Task RateRecipe_WithoutCooking_CreatesRowWithZeroCooks()
+    public async Task RateRecipe_WithNoCookOfTheirOwn_Returns409AndWritesNothing()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var raterClient = factory.CreateClient();
+        var rater = await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+
+        var response = await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(3), TestJson.Options);
+
+        // 409 rather than the group's usual 404: the caller CAN see this recipe and the
+        // rating itself is well-formed. What is missing is a cook, which is a thing they can
+        // go and record — so the client has somewhere to send them, which a 404 would not
+        // give it. The same reasoning as CookLogEndpoints' 400 on a refused date.
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False(await db.CookedRecipes.AnyAsync(cr => cr.UserId == rater.UserId && cr.RecipeId == recipe.Id));
+    }
+
+    [Fact]
+    public async Task RateRecipe_WhenOnlySomebodyElseCooked_IsStillRefused()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var cookClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(cookClient);
+        (await cookClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
+
+        var raterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+
+        var response = await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(3), TestJson.Options);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RateRecipe_AfterACookRecordedWithADate_IsAccepted()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var raterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+        // The client's "Pick a date" branch lands here — POST /cook-log carrying a day. A
+        // dated cook is an ordinary cook (ADR-0003), so it has to satisfy the precondition
+        // exactly as a live one does, or the prompt's own second option would dead-end.
+        //
+        // Today rather than a year ago: KAN-6's floor is the account's creation date, and
+        // this rater registered seconds ago. The path under test is the DATED one, which
+        // this exercises either way.
+        var dated = await raterClient.PostAsJsonAsync(
+            "/cook-log",
+            new LogCookRequest(recipe.Id, null, DateTime.UtcNow, null),
+            TestJson.Options);
+        dated.EnsureSuccessStatusCode();
+
+        var response = await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadFromJsonAsync<CookedRecipeResponse>(TestJson.Options))!;
+        Assert.Equal(5, body.Rating);
+        Assert.Equal(1, body.TimesCooked);
+    }
+
+    [Fact]
+    public async Task RateRecipe_ADishTheyHaveCooked_JustReplacesTheRating()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var raterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+        (await raterClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
+        (await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(2), TestJson.Options)).EnsureSuccessStatusCode();
+
+        // Re-rating is the case the new precondition is most likely to break by accident:
+        // the row already exists, so a check written against "is there a row" rather than
+        // "is there a cook" would pass here and the regression would hide.
+        var response = await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(4), TestJson.Options);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadFromJsonAsync<CookedRecipeResponse>(TestJson.Options))!;
+        Assert.Equal(4, body.Rating);
+        Assert.Equal(1, body.TimesCooked);
+    }
+
+    [Fact]
+    public async Task RateRecipe_OnALegacyZeroCookRow_IsRefusedAndLeavesTheRowUntouched()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var raterClient = factory.CreateClient();
+        var rater = await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+
+        // Rows like this one were written by every rating between 30 July and this ticket,
+        // and no HTTP call makes another — so the only honest way to stand one up is to seed
+        // it, the same way ClearRating_WhenTheCountHasDriftedToZero seeds its drift. The
+        // ticket says they are UNAFFECTED: this change neither deletes them nor un-rates
+        // them, and Cooked keeps filtering them out.
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            setupDb.CookedRecipes.Add(new CookedRecipe
+            {
+                UserId = rater.UserId,
+                RecipeId = recipe.Id,
+                TimesCooked = 0,
+                Rating = 3,
+                RatedAt = DateTime.UtcNow.AddDays(-30),
+            });
+            await setupDb.SaveChangesAsync();
+        }
+
+        var response = await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var untouched = await db.CookedRecipes.SingleAsync(cr => cr.UserId == rater.UserId && cr.RecipeId == recipe.Id);
+        Assert.Equal(3, untouched.Rating);
+        Assert.Equal(0, untouched.TimesCooked);
+
+        // And it stays out of Cooked, which is the backstop the source fix does not replace.
+        var dishes = await raterClient.GetFromJsonAsync<CookedDishListResponse>("/users/me/cooked-recipes", TestJson.Options);
+        Assert.DoesNotContain(dishes!.Items, d => d.RecipeId == recipe.Id);
+    }
+
+    [Fact]
+    public async Task RateRecipe_OutOfRangeAndUncooked_IsA400NotA409()
     {
         var ownerClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
@@ -161,12 +313,12 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
         var raterClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
 
-        var response = await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(3), TestJson.Options);
+        // Order matters to the client: a 409 is what opens "track the cook", and opening it
+        // for a request that was malformed anyway would walk the user through recording a
+        // cook only to refuse the rating again at the end of it.
+        var response = await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(9), TestJson.Options);
 
-        var body = (await response.Content.ReadFromJsonAsync<CookedRecipeResponse>(TestJson.Options))!;
-        Assert.Equal(0, body.TimesCooked);
-        Assert.Equal(3, body.Rating);
-        Assert.Null(body.LastCookedAt);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Theory]
@@ -199,6 +351,7 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
 
         var raterClient = factory.CreateClient();
         var rater = await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+        (await raterClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
         await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options);
 
         var response = await raterClient.DeleteAsync($"/recipes/{recipe.Id}/cooked");
@@ -469,9 +622,23 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
 
         var raterClient = factory.CreateClient();
         var rater = await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
-        // Rating without cooking is allowed and creates the row at TimesCooked = 0, which
-        // RecipeSocial_AveragesRatingsAndReportsTheCallersOwn pins as CookedByMe = true.
-        (await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(3), TestJson.Options)).EnsureSuccessStatusCode();
+        // Seeded rather than rated into existence: KAN-7 closed the only route that used to
+        // build this state over HTTP. The rows are still out there — everything rated
+        // between 30 July and that ticket — so retracting one has to keep working, and this
+        // is the case that leaves NOTHING behind, unlike the drifted row two tests down.
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            setupDb.CookedRecipes.Add(new CookedRecipe
+            {
+                UserId = rater.UserId,
+                RecipeId = recipe.Id,
+                TimesCooked = 0,
+                Rating = 3,
+                RatedAt = DateTime.UtcNow.AddDays(-30),
+            });
+            await setupDb.SaveChangesAsync();
+        }
 
         var response = await raterClient.DeleteAsync($"/recipes/{recipe.Id}/rating");
 
@@ -626,10 +793,12 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
 
         var firstClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(firstClient);
+        (await firstClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
         await firstClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options);
 
         var secondClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(secondClient);
+        (await secondClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
         await secondClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(2), TestJson.Options);
 
         var envelope = await secondClient.GetFromJsonAsync<RecipeSocialResponse>($"/recipes/{recipe.Id}/social", TestJson.Options);
@@ -667,6 +836,7 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
 
         var raterClient = factory.CreateClient();
         await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+        (await raterClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
         await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(4), TestJson.Options);
 
         var guestClient = factory.CreateClient();

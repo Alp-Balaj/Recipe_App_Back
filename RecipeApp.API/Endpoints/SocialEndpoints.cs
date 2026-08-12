@@ -92,6 +92,16 @@ public static class SocialEndpoints
             return result.Outcome switch
             {
                 SocialOutcome.Success => Results.Ok(result.Value),
+                // KAN-7: no cook of the caller's own to hang this rating on. A 409 rather
+                // than this group's usual 404 because nothing here is missing or hidden —
+                // the caller can see the recipe, the rating is in range, and the state that
+                // refuses them is one they can go and change. That distinction is what the
+                // client reads to offer "you cooked this before? track it" instead of the
+                // dead end a 404 would be.
+                SocialOutcome.Conflict => Results.Conflict(new
+                {
+                    error = "Record a cook of this recipe before rating it.",
+                }),
                 _ => Results.NotFound(),
             };
         })

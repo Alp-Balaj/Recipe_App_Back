@@ -33,9 +33,10 @@ _Avoid_: comment, review, feedback
 
 **Rating**:
 How a user rates a recipe, one to five. It is per user and recipe and holds for
-the dish as a whole, not for one attempt at it. It is a separate claim from
-cooking: a recipe may be rated without ever being cooked, and taking a rating
-back says nothing about the cooks (ADR-0002).
+the dish as a whole, not for one attempt at it. A user can only rate a dish they
+have a cook for (ADR-0004) — but the two claims are not symmetric: cooking says
+nothing about what they thought, and taking a rating back says nothing about the
+cooks (ADR-0002).
 _Avoid_: score, stars, review
 
 ### Collections

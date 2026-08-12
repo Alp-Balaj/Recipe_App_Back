@@ -12,7 +12,10 @@ public record SocialResult<T>(SocialOutcome Outcome, T? Value)
     public static SocialResult<T> Success(T v) => new(SocialOutcome.Success, v);
     public static SocialResult<T> NotFound() => new(SocialOutcome.NotFound, default);
     public static SocialResult<T> Forbidden() => new(SocialOutcome.Forbidden, default);
-    // A uniqueness clash the caller can resolve by choosing a different value — a
-    // username-change to one already taken (PUT /users/me → 409).
+    // A state clash the caller can resolve themselves, as distinct from something missing
+    // (NotFound) or forbidden to them (Forbidden). Two cases today: a username-change to one
+    // already taken (PUT /users/me → 409), and rating a recipe with no cook of the caller's
+    // own behind it (PUT /recipes/{id}/rating → 409, KAN-7). Each endpoint has at most one,
+    // so the status code alone tells its client which fix to offer.
     public static SocialResult<T> Conflict() => new(SocialOutcome.Conflict, default);
 }

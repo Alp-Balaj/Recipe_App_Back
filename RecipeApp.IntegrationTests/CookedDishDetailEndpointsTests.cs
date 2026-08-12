@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.MealPlanning.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
 using RecipeApp.Application.Social.Dtos;
+using RecipeApp.Domain.Entities.RecipeInteractions;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -284,12 +285,27 @@ public class CookedDishDetailEndpointsTests(IntegrationTestFactory factory) : IC
     {
         var client = await factory.CreateAuthenticatedClientAsync();
         var recipe = await CreateRecipeAsync(client, "Rated from memory");
-        (await client.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options))
-            .EnsureSuccessStatusCode();
 
-        // D8, the same filter the list applies: RateRecipeAsync has been creating TimesCooked=0
-        // rows since 30 July, and Cooked is a record of what you HAVE MADE. A dish the list
-        // refuses to show must not have a page reachable behind it either.
+        // Seeded, because KAN-7 shut the door PUT /recipes/{id}/rating used to open: rating a
+        // dish with no cook behind it is now a 409 and creates nothing. The rows written before
+        // that are still in the database, which is what this test is about, so the state has to
+        // be built directly — see CookedDishEndpointsTests' list-side twin.
+        using (var setup = factory.Services.CreateScope())
+        {
+            var db = setup.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.CookedRecipes.Add(new CookedRecipe
+            {
+                UserId = recipe.CreatedByUserId,
+                RecipeId = recipe.Id,
+                TimesCooked = 0,
+                Rating = 5,
+                RatedAt = DateTime.UtcNow.AddDays(-30),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // D8, the same filter the list applies: Cooked is a record of what you HAVE MADE, so a
+        // dish the list refuses to show must not have a page reachable behind it either.
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/users/me/cooked-recipes/{recipe.Id}")).StatusCode);
     }
 
