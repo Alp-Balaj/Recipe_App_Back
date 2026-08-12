@@ -846,29 +846,46 @@ public class SocialService : ISocialService
     // must not leave that stranded, visible nowhere and deletable nowhere.
     public async Task<SocialResult<CookedRecipeResponse>> ClearCookedAsync(Guid recipeId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
-        var authorId = await RecipeAuthorRegardlessOfAvailabilityAsync(recipeId, cancellationToken);
+        // KAN-15: ExecuteDelete rather than a tracked read-then-Remove, for the same reason
+        // ClearRatingAsync below reads AsNoTracking and writes set-based. Two clear-cooked
+        // requests can race — a double tap, or a retry — both reading Rating = 4 before
+        // either deletes. A tracked Remove let both decide "this was rated" from that same
+        // stale read, then had the loser's SaveChanges match zero rows and throw
+        // DbUpdateConcurrencyException, 500ing an endpoint that promises idempotence just
+        // above. Splitting the delete on `Rating != null` is the delete-shaped version of
+        // ClearRatingAsync's ExecuteUpdate predicate: the WHERE clause decides the
+        // rated -> gone transition in the database, so exactly one of two racing deletes can
+        // ever match a rated row, and only that one reverts the award. The other branch below
+        // (no rating filter) is the leftover cleanup for a row that was never rated, or never
+        // existed — nothing was ever awarded on that path, so it deletes unconditionally with
+        // no reversal to guard, and races safely for the same reason: a second concurrent
+        // caller there just deletes zero rows.
+        //
+        // Argued, NOT test-pinned, same as ClearRatingAsync's comment explains: requests fired
+        // through Task.WhenAll at the in-process host serialise before reaching this method, so
+        // a test written for this race passes just as happily against the buggy version it is
+        // meant to catch. The sequential double-clear (KAN-12's shape) already exercises the
+        // no-row and unrated-row branches; there is no way to add a race the suite can fail.
+        var deletedRated = await _db.CookedRecipes
+            .Where(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId && cr.Rating != null)
+            .ExecuteDeleteAsync(cancellationToken);
 
-        var row = await _db.CookedRecipes
-            .SingleOrDefaultAsync(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId, cancellationToken);
-
-        if (row is not null)
+        if (deletedRated > 0)
         {
-            var hadRating = row.Rating is not null;
-            _db.CookedRecipes.Remove(row);
-
-            // Symmetric reversal, and only when an award was actually made: a row that was
-            // never rated never awarded, so removing it must not dock the author. The null
-            // author branch is defensive rather than reachable: removal is a SOFT delete, and
-            // a hard one would have taken this row with it (CookedRecipes cascades on the
-            // recipe FK) — or been refused outright, since CookLogs restricts it. If a row
-            // ever does outlive its recipe, skipping the reversal is the safe half: the
-            // author keeps points they earned, which beats docking the wrong person.
-            if (hadRating && authorId is Guid author)
+            var authorId = await RecipeAuthorRegardlessOfAvailabilityAsync(recipeId, cancellationToken);
+            if (authorId is Guid author)
             {
                 await RevertAuthorAsync(author, currentUserId, RankEvent.RecipeCookedAndRated, cancellationToken);
+                // The rank change is the ONLY thing staged here; the row above was already
+                // gone by the time this line runs, deleted by the statement, not tracked.
+                await _db.SaveChangesAsync(cancellationToken);
             }
-
-            await _db.SaveChangesAsync(cancellationToken);
+        }
+        else
+        {
+            await _db.CookedRecipes
+                .Where(cr => cr.UserId == currentUserId && cr.RecipeId == recipeId)
+                .ExecuteDeleteAsync(cancellationToken);
         }
 
         // Deliberately wide, and stated in the spec as such: "I have never cooked this" must
@@ -884,10 +901,10 @@ public class SocialService : ISocialService
         // narrower, so a surface that calls this still has to ask first (KAN-8): it deletes
         // writing, and the caller is the only one who knows there was any.
         //
-        // Unconditional — outside the `if (row is not null)` above, not inside it — because a
-        // user can hold CookLog rows with no CookedRecipe aggregate (e.g. the aggregate was
-        // already cleared once and the log was left behind before this change existed); a
-        // delete gated on the aggregate existing would strand exactly those rows.
+        // Unconditional — after both branches above, never gated on either one matching a
+        // row — because a user can hold CookLog rows with no CookedRecipe aggregate (e.g. the
+        // aggregate was already cleared once and the log was left behind before this change
+        // existed); a delete gated on the aggregate existing would strand exactly those rows.
         await _db.CookLogs
             .Where(cl => cl.UserId == currentUserId && cl.RecipeId == recipeId)
             .ExecuteDeleteAsync(cancellationToken);
