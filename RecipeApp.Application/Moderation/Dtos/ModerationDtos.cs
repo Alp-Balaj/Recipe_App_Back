@@ -39,7 +39,14 @@ public record ReportResponse(
 // them, so an admin can spot a repeat target without opening their user record.
 public record AdminReportTargetAuthor(Guid Id, string Username, int TotalReportsAgainst);
 
-public record AdminReportListItem(ReportResponse Report, UserSummaryResponse Reporter, AdminReportTargetAuthor TargetAuthor);
+// TargetAuthor is NULLABLE, and the null is load-bearing rather than defensive. A report's
+// target author is resolved through whichever of the three target FKs is set — but
+// Report.CommentId is OnDelete(SetNull), so removing a reported comment (the ordinary
+// response to a comment report) leaves a row whose three FKs are ALL null. At that point
+// no author is recoverable from the database, and saying so is the honest answer: the
+// report itself survives on TargetSummary's snapshot, which is exactly what that column
+// was added for. Callers render the snapshot and omit the context line.
+public record AdminReportListItem(ReportResponse Report, UserSummaryResponse Reporter, AdminReportTargetAuthor? TargetAuthor);
 
 public record AdminReportListResponse(IReadOnlyList<AdminReportListItem> Items, string? NextCursor);
 

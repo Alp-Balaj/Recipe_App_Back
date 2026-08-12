@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using RecipeApp.Application.Moderation.Dtos;
 using RecipeApp.Application.Recipes.Dtos;
+using RecipeApp.Application.Social.Dtos;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.ValueObjects;
 using RecipeApp.Infrastructure.Persistence;
@@ -111,10 +112,10 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
 
         var queue = await GetReportsAsync(adminClient, "Open");
-        var ownItems = queue.Items.Where(i => i.TargetAuthor.Id == author.UserId).ToList();
+        var ownItems = queue.Items.Where(i => i.TargetAuthor?.Id == author.UserId).ToList();
         Assert.Equal(3, ownItems.Count);
-        Assert.All(ownItems, i => Assert.Equal(author.Username, i.TargetAuthor.Username));
-        Assert.All(ownItems, i => Assert.Equal(3, i.TargetAuthor.TotalReportsAgainst));
+        Assert.All(ownItems, i => Assert.Equal(author.Username, i.TargetAuthor!.Username));
+        Assert.All(ownItems, i => Assert.Equal(3, i.TargetAuthor!.TotalReportsAgainst));
         Assert.Contains(ownItems, i => i.Reporter.Username == reporterA.Username);
         Assert.Contains(ownItems, i => i.Reporter.Username == reporterC.Username);
 
@@ -124,9 +125,102 @@ public class AdminEndpointsTests(IntegrationTestFactory factory) : IClassFixture
         Assert.Equal(HttpStatusCode.OK, resolve.StatusCode);
 
         var queueAfter = await GetReportsAsync(adminClient, status: null);
-        var afterItems = queueAfter.Items.Where(i => i.TargetAuthor.Id == author.UserId).ToList();
+        var afterItems = queueAfter.Items.Where(i => i.TargetAuthor?.Id == author.UserId).ToList();
         Assert.Equal(3, afterItems.Count);
-        Assert.All(afterItems, i => Assert.Equal(3, i.TargetAuthor.TotalReportsAgainst));
+        Assert.All(afterItems, i => Assert.Equal(3, i.TargetAuthor!.TotalReportsAgainst));
+    }
+
+    // --- the queue survives its own triage actions ---------------------------------------
+    //
+    // Both tests below moderate the reported content and then RELOAD the queue. That reload
+    // is the whole point: every existing queue test reads the list before any hide/remove has
+    // happened, so the projection's target-author resolution was never exercised against a
+    // target the moderation actions had made unreachable.
+
+    [Fact]
+    public async Task ReportQueue_AfterTargetRecipeIsHidden_StillNamesTheAuthorAndKeepsTheCount()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var reporterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(reporterClient);
+        var reportResponse = await reporterClient.PostAsJsonAsync("/reports",
+            new CreateReportRequest(ReportTargetType.Recipe, recipe.Id, ReportReason.Spam, null), TestJson.Options);
+        reportResponse.EnsureSuccessStatusCode();
+        var report = (await reportResponse.Content.ReadFromJsonAsync<ReportResponse>(TestJson.Options))!;
+
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        var before = (await GetReportsAsync(adminClient, "Open")).Items.Single(i => i.Report.Id == report.Id);
+        Assert.Equal(owner.UserId, before.TargetAuthor!.Id);
+        var countBefore = before.TargetAuthor.TotalReportsAgainst;
+
+        // The ordinary response to a recipe report: hide the recipe. This soft-deletes it,
+        // and Recipes carries HasQueryFilter(r => !r.IsDeleted) — the queue's admin read
+        // must see through that filter, exactly like every other D5 read.
+        (await adminClient.PostAsJsonAsync(
+            $"/admin/recipes/{recipe.Id}/hide", new AdminActionRequest("Spam."), TestJson.Options))
+            .EnsureSuccessStatusCode();
+
+        var response = await adminClient.GetAsync("/admin/reports?status=Open&limit=50");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = (await response.Content.ReadFromJsonAsync<AdminReportListResponse>(TestJson.Options))!;
+        var item = body.Items.Single(i => i.Report.Id == report.Id);
+
+        // Hiding the recipe changes nothing an admin reads: same author, same tally.
+        Assert.NotNull(item.TargetAuthor);
+        Assert.Equal(owner.UserId, item.TargetAuthor.Id);
+        Assert.Equal(owner.Username, item.TargetAuthor.Username);
+        Assert.Equal(countBefore, item.TargetAuthor.TotalReportsAgainst);
+    }
+
+    [Fact]
+    public async Task ReportQueue_AfterTargetCommentIsRemoved_KeepsTheReportWithNoTargetAuthor()
+    {
+        var ownerClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+
+        var commenterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(commenterClient);
+        var commentResponse = await commenterClient.PostAsJsonAsync(
+            $"/recipes/{recipe.Id}/comments", new CommentRequest("Rude remark."), TestJson.Options);
+        commentResponse.EnsureSuccessStatusCode();
+        var comment = (await commentResponse.Content.ReadFromJsonAsync<CommentResponse>(TestJson.Options))!;
+
+        var reporterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(reporterClient);
+        var reportResponse = await reporterClient.PostAsJsonAsync("/reports",
+            new CreateReportRequest(ReportTargetType.Comment, comment.Id, ReportReason.Harassment, null), TestJson.Options);
+        reportResponse.EnsureSuccessStatusCode();
+        var report = (await reportResponse.Content.ReadFromJsonAsync<ReportResponse>(TestJson.Options))!;
+
+        var adminClient = factory.CreateClient();
+        await AdminTestHelper.RegisterAdminAndAuthenticateAsync(factory, adminClient);
+
+        // The ordinary response to a comment report: remove the comment. Comments have no
+        // soft delete, and Report.CommentId is OnDelete(SetNull) — so this report keeps its
+        // TargetType=Comment while every one of its three target FKs is now null.
+        (await adminClient.PostAsJsonAsync(
+            $"/admin/comments/{comment.Id}/remove", new AdminActionRequest("Harassment."), TestJson.Options))
+            .EnsureSuccessStatusCode();
+
+        var response = await adminClient.GetAsync("/admin/reports?status=Open&limit=50");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = (await response.Content.ReadFromJsonAsync<AdminReportListResponse>(TestJson.Options))!;
+        var item = body.Items.Single(i => i.Report.Id == report.Id);
+
+        // No FK is left to resolve an author from, and the response says so rather than
+        // inventing one. The report is still triageable because TargetSummary snapshotted
+        // the comment when it was filed.
+        Assert.Null(item.TargetAuthor);
+        Assert.Contains("Rude remark.", item.Report.TargetSummary);
+        Assert.Equal(ReportStatus.Open, item.Report.Status);
     }
 
     // --- content actions + the separate admin read (D5) ---------------------------------

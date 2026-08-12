@@ -38,9 +38,14 @@ public class AdminService : IAdminService
     public async Task<AdminReportListResponse> GetReportsAsync(
         ReportStatus? status, KeysetCursor? cursor, int limit, CancellationToken cancellationToken = default)
     {
+        // D5 admin read: IgnoreQueryFilters. The queue joins out to Recipes to name the
+        // target's author, and Recipes carries HasQueryFilter(r => !r.IsDeleted) — so
+        // without this, HIDING a reported recipe (the ordinary response to a recipe
+        // report) drops the join and the author resolves to null. Triage is precisely
+        // the read that must see hidden content, same as GetRecipeAsync below.
         var reports = status is ReportStatus s
-            ? _db.Reports.Where(r => r.Status == s)
-            : _db.Reports;
+            ? _db.Reports.IgnoreQueryFilters().Where(r => r.Status == s)
+            : _db.Reports.IgnoreQueryFilters();
 
         if (cursor is not null)
         {
@@ -56,6 +61,11 @@ public class AdminService : IAdminService
         // itself carries the target snapshot. TargetAuthorId/Username resolve the ONE FK
         // that is actually set (Recipe.CreatedByUserId, Comment.UserId, or TargetUserId
         // itself) to whoever the report is effectively against.
+        //
+        // Both are NULLABLE on purpose. A report whose comment has been removed has no FK
+        // left to resolve (OnDelete SetNull), so this projects null rather than dereferencing
+        // TargetUserId!.Value — which is what used to throw "Nullable object must have a
+        // value" and 500 the whole queue over one orphaned row.
         var projected = reports
             .OrderByDescending(r => r.CreatedAt)
             .ThenByDescending(r => r.Id)
@@ -66,9 +76,9 @@ public class AdminService : IAdminService
                 ReporterUsername = r.Reporter.Username,
                 ReporterImageUrl = r.Reporter.ProfileImageUrl,
                 ResolvedByUsername = r.ResolvedByUser != null ? r.ResolvedByUser.Username : null,
-                TargetAuthorId = r.RecipeId != null ? r.Recipe!.CreatedByUserId
-                    : r.CommentId != null ? r.Comment!.UserId
-                    : r.TargetUserId!.Value,
+                TargetAuthorId = r.RecipeId != null ? (Guid?)r.Recipe!.CreatedByUserId
+                    : r.CommentId != null ? (Guid?)r.Comment!.UserId
+                    : r.TargetUserId,
                 TargetAuthorUsername = r.RecipeId != null ? r.Recipe!.CreatedByUser.Username
                     : r.CommentId != null ? r.Comment!.User.Username
                     : r.TargetUser!.Username,
@@ -77,7 +87,16 @@ public class AdminService : IAdminService
         // Second Select so the correlated count can reference TargetAuthorId above rather
         // than repeating the three-way FK resolution inline. All statuses count — the
         // spec-mandated behavior that a triaged report never shrinks the count the queue
-        // shows for the same target author.
+        // shows for the same target author. This subquery joins to Recipes too, so hiding a
+        // reported recipe would shrink its author's tally as well — it does not, because
+        // IgnoreQueryFilters is scoped to the whole COMPILED QUERY, not to the operator it
+        // is chained onto. The single call above covers this correlated subquery. (Verified
+        // by mutation: dropping it makes ReportQueue_AfterTargetRecipeIsHidden fail here.)
+        //
+        // The null guard is not cosmetic: with TargetAuthorId null, EF's nullable-equality
+        // rewrite of `x.TargetUserId == p.TargetAuthorId` matches every OTHER report whose
+        // TargetUserId is also null, i.e. every recipe and comment report in the table. The
+        // count is meaningless without an author, so it is not computed without one.
         var rows = await projected
             .Select(p => new
             {
@@ -87,7 +106,7 @@ public class AdminService : IAdminService
                 p.ResolvedByUsername,
                 p.TargetAuthorId,
                 p.TargetAuthorUsername,
-                TotalReportsAgainst = _db.Reports.Count(x =>
+                TotalReportsAgainst = p.TargetAuthorId == null ? 0 : _db.Reports.Count(x =>
                     x.TargetUserId == p.TargetAuthorId
                     || (x.RecipeId != null && x.Recipe!.CreatedByUserId == p.TargetAuthorId)
                     || (x.CommentId != null && x.Comment!.UserId == p.TargetAuthorId)),
@@ -106,7 +125,11 @@ public class AdminService : IAdminService
             rows.Select(r => new AdminReportListItem(
                 ReportService.ToResponse(r.Report, r.ReporterUsername, r.ReporterImageUrl, r.ResolvedByUsername),
                 new UserSummaryResponse(r.Report.ReporterId, r.ReporterUsername, r.ReporterImageUrl),
-                new AdminReportTargetAuthor(r.TargetAuthorId, r.TargetAuthorUsername, r.TotalReportsAgainst)))
+                // Null when the target FK is gone (a removed comment) — the report still
+                // renders off its TargetSummary snapshot, it just has no author to name.
+                r.TargetAuthorId is Guid authorId && r.TargetAuthorUsername is string authorUsername
+                    ? new AdminReportTargetAuthor(authorId, authorUsername, r.TotalReportsAgainst)
+                    : null))
                 .ToList(),
             nextCursor);
     }
