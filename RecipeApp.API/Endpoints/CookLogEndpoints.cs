@@ -113,6 +113,25 @@ public static class CookLogEndpoints
                 _ => Results.NotFound(),
             };
         });
+
+        // KAN-14 — un-log ONE cook, the row-scoped counterpart of the entry-scoped delete
+        // above. A cook logged from cook mode on an unplanned recipe has no entry id, so
+        // that route cannot name it and the only thing that could reach it was DELETE
+        // /recipes/{id}/cooked — "I have never cooked this", which erases the whole dish.
+        //
+        // No route conflict with it: "entries" is a literal segment and never matches
+        // {id:guid}. Same 204 for the same reason — nothing is left to return, and the
+        // client refetches rather than patching a body.
+        group.MapDelete("/{id:guid}", async (Guid id, ICookLogService cookLog,
+            ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await cookLog.UncookAsync(id, GetUserId(user), cancellationToken);
+            return result.Outcome switch
+            {
+                MealPlanOutcome.Success => Results.NoContent(),
+                _ => Results.NotFound(),
+            };
+        });
     }
 
     // Same policy as every other list in the app: default 20, above-cap clamps to 50,
