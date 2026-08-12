@@ -365,6 +365,30 @@ public class CookedAndRatedEndpointsTests(IntegrationTestFactory factory) : ICla
     }
 
     [Fact]
+    public async Task ClearCooked_RevertsTheAuthorsAwardOnceAndOnlyOnce()
+    {
+        var ownerClient = factory.CreateClient();
+        var owner = await AuthTestHelper.RegisterAndAuthenticateAsync(ownerClient);
+        var recipe = await CreateRecipeAsync(ownerClient);
+        var before = await RankOfAsync(ownerClient, owner.UserId);
+
+        var raterClient = factory.CreateClient();
+        await AuthTestHelper.RegisterAndAuthenticateAsync(raterClient);
+        (await raterClient.PostAsync($"/recipes/{recipe.Id}/cooked", null)).EnsureSuccessStatusCode();
+        (await raterClient.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options)).EnsureSuccessStatusCode();
+        Assert.Equal(before + CookedAndRatedPoints, await RankOfAsync(ownerClient, owner.UserId));
+
+        Assert.Equal(HttpStatusCode.OK, (await raterClient.DeleteAsync($"/recipes/{recipe.Id}/cooked")).StatusCode);
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+
+        // KAN-15: the second clear has no row left to find a rating on, so it must not dock
+        // the author again — and it must answer 200, not the DbUpdateConcurrencyException 500
+        // a tracked Remove used to throw once the row was already gone.
+        Assert.Equal(HttpStatusCode.OK, (await raterClient.DeleteAsync($"/recipes/{recipe.Id}/cooked")).StatusCode);
+        Assert.Equal(before, await RankOfAsync(ownerClient, owner.UserId));
+    }
+
+    [Fact]
     public async Task ClearCooked_NeverRated_LeavesTheRankAlone()
     {
         var ownerClient = factory.CreateClient();
