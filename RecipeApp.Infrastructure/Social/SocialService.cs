@@ -203,9 +203,17 @@ public class SocialService : ISocialService
     //   Visibility therefore feeds the PROJECTION here — title, image, RecipeAvailable — and
     //   is never a Where. `readable` is composed exactly as CookLogService.Project composes
     //   it, for the same reasons spelled out there.
-    public async Task<CookedDishListResponse> GetCookedDishesAsync(KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)
+    public async Task<CookedDishListResponse> GetCookedDishesAsync(string? q, KeysetCursor? cursor, int limit, Guid currentUserId, CancellationToken cancellationToken = default)
     {
         var dishes = CookedDishes(currentUserId);
+
+        // Search (KAN-9) narrows BEFORE the cursor and the ordering, so the keyset walks the
+        // filtered set: page two of a search is the next slice of the results, not the next
+        // slice of the collection with a filter laid over it afterwards.
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            dishes = WhereTitleMatches(dishes, q.Trim(), currentUserId);
+        }
 
         if (cursor is not null)
         {
@@ -288,6 +296,77 @@ public class SocialService : ISocialService
         _db.CookedRecipes
             .Where(cr => cr.UserId == currentUserId)
             .Where(cr => cr.TimesCooked > 0);
+
+    /// <summary>
+    /// A user-typed term as a LIKE "contains" pattern, with the metacharacters escaped so they
+    /// are the literal characters the user typed.
+    /// </summary>
+    /// <remarks>
+    /// Escape the backslash FIRST, then the two LIKE metacharacters — reversing the order
+    /// double-escapes the escapes. Unescaped, a lone "%" is match-anything, so a search box
+    /// answers a single typed character with the entire collection. Pair every use with
+    /// <c>EF.Functions.ILike(column, pattern, "\\")</c>: the escape character has to be declared
+    /// or Postgres does not treat these as escapes at all.
+    /// <para>
+    /// One copy for this file's three searches (the two follow lists and Cooked).
+    /// IngredientCatalogueService has its own, out of reach of a private helper here.
+    /// </para>
+    /// </remarks>
+    private static string ContainsPattern(string term) =>
+        "%" + term
+            .Replace("\\", "\\\\")
+            .Replace("%", "\\%")
+            .Replace("_", "\\_") + "%";
+
+    /// <summary>
+    /// The search box (KAN-9): the caller's dishes narrowed to those whose DISPLAYED title
+    /// contains <paramref name="term"/>, case-insensitively.
+    /// </summary>
+    /// <remarks>
+    /// The displayed title is <c>readable title ?? snapshot title</c> — the same two sources in
+    /// the same precedence as <see cref="ToResponse"/>, expressed here as one COALESCE rather
+    /// than as two independent matches. Matching the titles INDEPENDENTLY (<c>readable ILIKE p
+    /// OR snapshot ILIKE p</c>) is the tempting shape and is wrong twice over: it returns a
+    /// renamed dish for a word that appears nowhere on the row the reader gets back, and it
+    /// evaluates RecipeVisibilityPolicy — two EXISTS over UserFollows on its FriendsOnly branch
+    /// — a second time per row. A NULL COALESCE (no readable recipe, no snapshot) makes ILIKE
+    /// null, so the row falls out here as well as at <see cref="IsRenderable"/>; there is
+    /// nothing to search it by and nothing to render.
+    /// <para>
+    /// This is a SECOND copy of that precedence — <see cref="ProjectDishes"/> owns the first,
+    /// and EF cannot share a sub-expression between the two without an expression expander this
+    /// project does not have. So they are kept in step by a test, not by construction: WHAT a
+    /// dish is called must stay one answer, and
+    /// <c>Search_matches_the_name_on_screen_not_the_one_it_was_cooked_under</c> fails the moment
+    /// this predicate and that projection disagree about which title wins. Change one, change
+    /// both.
+    /// </para>
+    /// <para>
+    /// Substring, not full-text: this is a private collection scanned from memory ("chick" ->
+    /// chicken thighs), and the tsvector the recipe search uses does not exist for a snapshot
+    /// title. The pattern is escaped rather than concatenated, so % and _ typed into the box are
+    /// literal characters — unescaped, a lone "%" answers with the entire collection.
+    /// </para>
+    /// </remarks>
+    private IQueryable<CookedRecipe> WhereTitleMatches(IQueryable<CookedRecipe> dishes, string term, Guid currentUserId)
+    {
+        var pattern = ContainsPattern(term);
+        var readable = _db.Recipes.Where(RecipeVisibilityPolicy.VisibleTo(currentUserId));
+
+        return dishes.Where(cr => EF.Functions.ILike(
+            readable
+                .Where(r => r.Id == cr.RecipeId)
+                .Select(r => r.Title)
+                .FirstOrDefault()
+            ?? _db.CookLogs
+                .Where(cl => cl.UserId == currentUserId && cl.RecipeId == cr.RecipeId)
+                .OrderByDescending(cl => cl.CookedAt)
+                .ThenByDescending(cl => cl.Id)
+                .Select(cl => cl.RecipeTitle)
+                .FirstOrDefault()!,
+            pattern,
+            "\\"));
+    }
 
     // The shared read shape, applied LAST — after Where/OrderBy/Take. That is CookLogService's
     // first rule and the one that fails at runtime rather than at compile time if it is broken,
@@ -1014,12 +1093,7 @@ public class SocialService : ISocialService
 
         if (!string.IsNullOrWhiteSpace(q))
         {
-            // Escape backslash FIRST, then the two LIKE metacharacters — reversing the order
-            // would double-escape the escapes. Same treatment as IngredientCatalogueService.
-            var pattern = "%" + q.Trim()
-                .Replace("\\", "\\\\")
-                .Replace("%", "\\%")
-                .Replace("_", "\\_") + "%";
+            var pattern = ContainsPattern(q.Trim());
             follows = follows.Where(f => EF.Functions.ILike(f.Follower.Username, pattern, "\\"));
         }
 
@@ -1080,10 +1154,7 @@ public class SocialService : ISocialService
 
         if (!string.IsNullOrWhiteSpace(q))
         {
-            var pattern = "%" + q.Trim()
-                .Replace("\\", "\\\\")
-                .Replace("%", "\\%")
-                .Replace("_", "\\_") + "%";
+            var pattern = ContainsPattern(q.Trim());
             follows = follows.Where(f => EF.Functions.ILike(f.Following.Username, pattern, "\\"));
         }
 
