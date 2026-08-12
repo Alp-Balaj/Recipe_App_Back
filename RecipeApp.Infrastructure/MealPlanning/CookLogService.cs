@@ -3,6 +3,10 @@ using RecipeApp.Application.Common;
 using RecipeApp.Application.MealPlanning;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.MealPlanning.Dtos;
+// KAN-18: both un-log deletes answer with CookedRecipeResponse — the SAME row shape the social
+// endpoints use, deliberately, so the client patches one cache from four writes. See
+// UncookResponse.
+using RecipeApp.Application.Social.Dtos;
 using RecipeApp.Domain.Entities.RecipeInteractions;
 using RecipeApp.Infrastructure.Persistence;
 using RecipeApp.Infrastructure.Recipes;
@@ -341,7 +345,7 @@ public class CookLogService : ICookLogService
             ToResponse(row, recipe?.ImageUrl, recipeAvailable: recipe is not null));
     }
 
-    public async Task<MealPlanResult<bool>> UncookEntryAsync(
+    public async Task<MealPlanResult<UncookResponse>> UncookEntryAsync(
         Guid mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
         // The same ownership question LogAsync asks, and for the same reason: an entry id
@@ -350,7 +354,7 @@ public class CookLogService : ICookLogService
             .AnyAsync(e => e.Id == mealPlanEntryId && e.MealPlan.UserId == currentUserId, cancellationToken);
         if (!ownsEntry)
         {
-            return MealPlanResult<bool>.NotFound();
+            return MealPlanResult<UncookResponse>.NotFound();
         }
 
         var rows = await _db.CookLogs
@@ -359,7 +363,11 @@ public class CookLogService : ICookLogService
         if (rows.Count == 0)
         {
             // Already the desired end state. Success, not NotFound — see the interface note.
-            return MealPlanResult<bool>.Success(true);
+            //
+            // KAN-18: an EMPTY list, not the recipe's current state. Nothing was written, so
+            // there is nothing for a client to patch, and naming the recipe here would invite a
+            // cache write on the strength of an event that did not happen.
+            return MealPlanResult<UncookResponse>.Success(new UncookResponse([]));
         }
 
         _db.CookLogs.RemoveRange(rows);
@@ -397,10 +405,23 @@ public class CookLogService : ICookLogService
         // rank (see SocialService.MarkCookedAsync), so there is nothing to revert.
         await _db.SaveChangesAsync(cancellationToken);
 
-        return MealPlanResult<bool>.Success(true);
+        // KAN-18: built from `aggregates`, which the SaveChanges above has just written, so
+        // this is the post-write state and not the pre-write one that was read. A recipe with
+        // no aggregate row at all is still named — see ToCookedState.
+        var affected = recipeIds
+            .Select(id =>
+            {
+                var aggregate = aggregates.SingleOrDefault(a => a.RecipeId == id);
+                return ToCookedState(id, aggregate is null
+                    ? null
+                    : new AggregateState(aggregate.TimesCooked, aggregate.Rating, aggregate.LastCookedAt));
+            })
+            .ToList();
+
+        return MealPlanResult<UncookResponse>.Success(new UncookResponse(affected));
     }
 
-    public async Task<MealPlanResult<bool>> UncookAsync(
+    public async Task<MealPlanResult<UncookResponse>> UncookAsync(
         Guid cookLogId, Guid currentUserId, CancellationToken cancellationToken = default)
     {
         // Read untracked, and write with set-based statements below, for ClearRatingAsync's
@@ -422,7 +443,7 @@ public class CookLogService : ICookLogService
             .SingleOrDefaultAsync(cancellationToken);
         if (row is null)
         {
-            return MealPlanResult<bool>.NotFound();
+            return MealPlanResult<UncookResponse>.NotFound();
         }
 
         // The two statements are one transaction because they are one fact. LogAsync writes
@@ -445,7 +466,7 @@ public class CookLogService : ICookLogService
             // The loser of the race above: the row was there when we read it and is gone now.
             // Same answer as never having existed, which is what the caller's next list read
             // will agree with.
-            return MealPlanResult<bool>.NotFound();
+            return MealPlanResult<UncookResponse>.NotFound();
         }
 
         // The floor lives in the PREDICATE rather than in a Math.Max over a value this
@@ -484,10 +505,53 @@ public class CookLogService : ICookLogService
         // because un-cooking is not a retraction of an opinion. Deleting the row for the
         // never-rated case alone would make this gesture's outcome depend on whether an
         // unrelated fact happened to be recorded.
+        //
+        // KAN-18: the state the client patches its caches from, read back INSIDE the
+        // transaction and after the decrement, so it is what the commit is about to make true
+        // rather than what this request found on the way in. Untracked for the same reason the
+        // read at the top is: ExecuteUpdate does not tell the change tracker anything, so a
+        // tracked read here could be answered from a stale identity-map entry.
+        var aggregate = await _db.CookedRecipes
+            .AsNoTracking()
+            .Where(cr => cr.UserId == currentUserId && cr.RecipeId == row.RecipeId)
+            .Select(cr => new AggregateState(cr.TimesCooked, cr.Rating, cr.LastCookedAt))
+            .SingleOrDefaultAsync(cancellationToken);
+
         // No SaveChanges: both writes above were statements, and the read was untracked.
         await transaction.CommitAsync(cancellationToken);
 
-        return MealPlanResult<bool>.Success(true);
+        return MealPlanResult<UncookResponse>.Success(
+            new UncookResponse([ToCookedState(row.RecipeId, aggregate)]));
+    }
+
+    // The shape the aggregate is read into by both un-log paths — one from tracked entities, one
+    // from a projection — so ToCookedState below has a single input to answer for. The recipe id
+    // is passed alongside rather than carried here: the caller always knows it, and a recipe with
+    // no aggregate row still has to be named.
+    private sealed record AggregateState(int TimesCooked, int? Rating, DateTime? LastCookedAt);
+
+    /// <summary>
+    /// One recipe's post-write state for the KAN-18 reply. A null <paramref name="aggregate"/>
+    /// is "no row", which reads as not cooked and never rated.
+    /// </summary>
+    /// <remarks>
+    /// CookedByMe is <c>TimesCooked &gt; 0</c>, the one definition (CookedRecipePolicy,
+    /// ADR-0005), and LastCookedAt is withheld once the count reaches zero — both exactly as
+    /// <c>SocialService.ClearRatingAsync</c> answers, because this is the same row and a client
+    /// patches one cache from both. Written out rather than composed from the policy expression
+    /// because that one is built for EF to translate; the value here is already in memory, and
+    /// compiling an expression to ask it a question about an int would be indirection, not
+    /// safety. If the rule ever changes, ADR-0005 names both sites.
+    /// </remarks>
+    private static CookedRecipeResponse ToCookedState(Guid recipeId, AggregateState? aggregate)
+    {
+        var timesCooked = aggregate?.TimesCooked ?? 0;
+        return new CookedRecipeResponse(
+            recipeId,
+            timesCooked,
+            aggregate?.Rating,
+            timesCooked > 0 ? aggregate?.LastCookedAt : null,
+            timesCooked > 0);
     }
 
     // The shared read shape, applied LAST — after Where/OrderBy/Take. Projecting first and

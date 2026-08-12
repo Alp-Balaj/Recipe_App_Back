@@ -67,22 +67,31 @@ public interface ICookLogService
         Guid id, string? note, Guid currentUserId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Removes every cook the caller logged against one plan entry, and decrements the
-    /// per-recipe aggregate by exactly that many (floored at 0).
+    /// Removes every cook the caller logged against one plan entry, decrements the per-recipe
+    /// aggregate by exactly that many (floored at 0), and reports each affected recipe's
+    /// resulting state.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Idempotent: un-cooking an entry that was never cooked is Success, not NotFound —
     /// NotFound is reserved for an entry that is not on one of the caller's own plans, so
     /// the two answers stay distinguishable. Deleting ALL matching rows rather than one is
     /// what makes a double-tapped cook fully reversible: CookLog has no unique key, so a
     /// single-row delete could leave the entry looking cooked after the user un-cooked it.
     /// Rating is untouched — it lives on CookedRecipe and is a separate claim.
+    /// </para>
+    /// <para>
+    /// The reply is KAN-18 and is EMPTY for the idempotent no-op: no rows went, so no recipe's
+    /// state changed and there is nothing for a client to patch. See <see cref="UncookAsync"/>
+    /// for why the state is reported at all rather than derived by the caller.
+    /// </para>
     /// </remarks>
-    Task<MealPlanResult<bool>> UncookEntryAsync(Guid mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default);
+    Task<MealPlanResult<UncookResponse>> UncookEntryAsync(Guid mealPlanEntryId, Guid currentUserId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Removes ONE logged cook of the caller's own and decrements the per-recipe aggregate by
-    /// one (floored at 0). NotFound when the row is not the caller's, or is already gone.
+    /// Removes ONE logged cook of the caller's own, decrements the per-recipe aggregate by
+    /// one (floored at 0), and reports the dish's resulting state. NotFound when the row is not
+    /// the caller's, or is already gone.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -105,6 +114,16 @@ public interface ICookLogService
     /// retraction of an opinion. ADR-0004 says so explicitly — a rated row may sit at zero
     /// cooks; what its owner cannot do is re-rate until they record another cook.
     /// </para>
+    /// <para>
+    /// KAN-18 — the reply carries the dish's state AFTER the write, always naming the recipe
+    /// even when no aggregate row was found (that is the strongest "you have not cooked this",
+    /// not an absence of news). The client cannot work this out for itself: since KAN-13
+    /// "cooked" is <c>TimesCooked &gt; 0</c> (ADR-0005), a rule the server owns and has already
+    /// changed once, and the SPA prefers a cache patch over a later read — so a client deriving
+    /// the flag locally would overwrite the correct answer and outlive the fetch that should
+    /// have healed it. Same argument, and the same shape, as
+    /// <c>ISocialService.ClearRatingAsync</c>. See docs/adr/0006.
+    /// </para>
     /// </remarks>
-    Task<MealPlanResult<bool>> UncookAsync(Guid cookLogId, Guid currentUserId, CancellationToken cancellationToken = default);
+    Task<MealPlanResult<UncookResponse>> UncookAsync(Guid cookLogId, Guid currentUserId, CancellationToken cancellationToken = default);
 }

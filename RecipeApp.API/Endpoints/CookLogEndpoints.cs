@@ -101,15 +101,19 @@ public static class CookLogEndpoints
         // row-scoped: the client knows which meal it is un-cooking, not which log row, and
         // making it find the row first would be a read it should not need.
         //
-        // 204, unlike POST's 201: there is no row left to return, and the client refetches
-        // the plan for the authoritative cookedAt rather than patching a body.
+        // 200 with a body since KAN-18, where it used to be 204 on the grounds that "there is
+        // no row left to return". True of the LOG row, and it turned out not to be the whole
+        // story: the write also moves the caller's per-recipe aggregate, and since KAN-13 that
+        // aggregate decides "you cooked this" (ADR-0005). A 204 left the client no way to learn
+        // the flag had flipped, and the one cache that never refetches — the per-recipe social
+        // envelope — went on saying the opposite for the rest of the session. See docs/adr/0006.
         group.MapDelete("/entries/{entryId:guid}", async (Guid entryId, ICookLogService cookLog,
             ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var result = await cookLog.UncookEntryAsync(entryId, GetUserId(user), cancellationToken);
             return result.Outcome switch
             {
-                MealPlanOutcome.Success => Results.NoContent(),
+                MealPlanOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
         });
@@ -120,15 +124,15 @@ public static class CookLogEndpoints
         // /recipes/{id}/cooked — "I have never cooked this", which erases the whole dish.
         //
         // No route conflict with it: "entries" is a literal segment and never matches
-        // {id:guid}. Same 204 for the same reason — nothing is left to return, and the
-        // client refetches rather than patching a body.
+        // {id:guid}. Same 200 and the same body shape as its sibling above — one gesture in two
+        // scopes must not need two client code paths, and KAN-18 was in both.
         group.MapDelete("/{id:guid}", async (Guid id, ICookLogService cookLog,
             ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var result = await cookLog.UncookAsync(id, GetUserId(user), cancellationToken);
             return result.Outcome switch
             {
-                MealPlanOutcome.Success => Results.NoContent(),
+                MealPlanOutcome.Success => Results.Ok(result.Value),
                 _ => Results.NotFound(),
             };
         });

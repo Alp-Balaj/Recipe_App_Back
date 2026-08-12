@@ -496,15 +496,26 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
             .EnsureSuccessStatusCode();
 
         var response = await client.DeleteAsync($"/cook-log/entries/{entry.Id}");
-        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // KAN-18: the reply says what the caller's row now IS, because the client patches its
+        // caches from it rather than re-deriving. The rating rides along in the same shape the
+        // rating endpoints answer with, so a client cannot end up holding two disagreeing
+        // copies of one row.
+        var body = (await response.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!;
+        var state = Assert.Single(body.Recipes);
+        Assert.Equal(recipe.Id, state.RecipeId);
+        Assert.Equal(0, state.TimesCooked);
+        Assert.False(state.CookedByMe);
+        Assert.Equal(4, state.Rating);
 
         var log = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
         Assert.Empty(log!.Items);
 
         // The rating survives: un-cooking says "I did not make this", not "I never had an
-        // opinion". There is no GET for the cooked aggregate — CookedRecipeResponse comes
-        // back only from the mutating POST/DELETE /recipes/{id}/cooked — so this reads the
-        // aggregate row straight from the db, same as Logging_a_cook_writes_both_rows above.
+        // opinion". The reply above already says so; this reads the aggregate row straight from
+        // the db as well, same as Logging_a_cook_writes_both_rows above, so a reply that agreed
+        // with itself and not with the database would still fail.
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         var aggregate = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
@@ -529,7 +540,14 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         await LogCookAsync(client, recipe.Id, entry.Id);
 
         var response = await client.DeleteAsync($"/cook-log/entries/{entry.Id}");
-        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // One entry, one recipe, one state in the reply — even though two rows went. The
+        // client patches per RECIPE, so the reply is deduplicated the same way.
+        var body = (await response.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!;
+        var state = Assert.Single(body.Recipes);
+        Assert.Equal(0, state.TimesCooked);
+        Assert.False(state.CookedByMe);
 
         var log = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
         Assert.Empty(log!.Items);
@@ -575,9 +593,19 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
 
         // The real un-cook: one row removed from a TimesCooked that is already 0. Unfloored
         // this computes -1.
-        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/entries/{entry.Id}")).StatusCode);
-        // The repeat: no rows left, so this must still be a no-op 204, not a second decrement.
-        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/entries/{entry.Id}")).StatusCode);
+        var first = await client.DeleteAsync($"/cook-log/entries/{entry.Id}");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(0, Assert.Single(
+            (await first.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!.Recipes).TimesCooked);
+
+        // The repeat: no rows left, so this must still be a no-op success, not a second
+        // decrement. KAN-18 gives that no-op a shape — an EMPTY list, meaning "no recipe's
+        // state changed". A repeat that named the recipe would be honest about the outcome and
+        // wrong about the event, and the client would patch a cache from a write that never
+        // happened.
+        var repeat = await client.DeleteAsync($"/cook-log/entries/{entry.Id}");
+        Assert.Equal(HttpStatusCode.OK, repeat.StatusCode);
+        Assert.Empty((await repeat.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!.Recipes);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -622,7 +650,15 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         var third = await LogCookAsync(client, recipe.Id);
 
         var response = await client.DeleteAsync($"/cook-log/{second.Id}");
-        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // KAN-18's second acceptance criterion, from the server's end: un-logging one of
+        // several cooks leaves the dish cooked. This is the reply the client's flag comes from,
+        // so a decrement that forgot the two remaining cooks would turn the recipe page off.
+        var state = Assert.Single(
+            (await response.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!.Recipes);
+        Assert.Equal(2, state.TimesCooked);
+        Assert.True(state.CookedByMe);
 
         // The point of the gesture: ONE cook goes, and it is the one that was named. The
         // entry-scoped sibling deletes every row against a slot, which is right for a slot
@@ -651,7 +687,18 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         var row = Assert.Single(logged!.Items);
         Assert.Null(row.MealPlanEntryId);
 
-        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/{row.Id}")).StatusCode);
+        var response = await client.DeleteAsync($"/cook-log/{row.Id}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // KAN-18's first criterion: the LAST cook going means the dish is no longer cooked, and
+        // the server is the one that says so. This is the exact reply the recipe page's flag is
+        // patched from — before it existed the page went on saying "you cooked this" for the
+        // rest of the session, because nothing on the client could learn otherwise.
+        var state = Assert.Single(
+            (await response.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!.Recipes);
+        Assert.Equal(recipe.Id, state.RecipeId);
+        Assert.Equal(0, state.TimesCooked);
+        Assert.False(state.CookedByMe);
 
         var after = await client.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
         Assert.Empty(after!.Items);
@@ -674,7 +721,16 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         (await client.PutAsJsonAsync($"/recipes/{recipe.Id}/rating", new RatingRequest(5), TestJson.Options))
             .EnsureSuccessStatusCode();
 
-        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
+        var response = await client.DeleteAsync($"/cook-log/{cook.Id}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // Only the dish that lost a cook is in the reply. The neighbour is untouched, so naming
+        // it would invite the client to patch a cache entry nothing changed.
+        var state = Assert.Single(
+            (await response.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!.Recipes);
+        Assert.Equal(recipe.Id, state.RecipeId);
+        Assert.False(state.CookedByMe);
+        Assert.Equal(5, state.Rating);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -699,13 +755,13 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         var cook = await LogCookAsync(client, recipe.Id);
         await LogCookAsync(client, recipe.Id);
 
-        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
 
-        // NOT the entry-scoped delete's idempotent 204, and the difference is the scope
+        // NOT the entry-scoped delete's idempotent success, and the difference is the scope
         // rather than a inconsistency. An entry survives its cooks, so "no cooks against
         // this slot" is a state it can still be in; a row does not survive its own deletion,
         // so a second DELETE is asking about something that is not there. The count must not
-        // move a second time either — that is the half a wrong 204 would hide.
+        // move a second time either — that is the half a wrong success would hide.
         Assert.Equal(HttpStatusCode.NotFound, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
 
         using var scope = factory.Services.CreateScope();
@@ -755,12 +811,48 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
             await setupDb.SaveChangesAsync();
         }
 
-        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/cook-log/{cook.Id}")).StatusCode);
+        var response = await client.DeleteAsync($"/cook-log/{cook.Id}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(0, Assert.Single(
+            (await response.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!.Recipes).TimesCooked);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         var final = await db.CookedRecipes.SingleAsync(cr => cr.RecipeId == recipe.Id);
         Assert.Equal(0, final.TimesCooked);
+    }
+
+    [Fact]
+    public async Task Un_logging_a_cook_whose_aggregate_is_gone_still_reports_the_dish_uncooked()
+    {
+        var client = await factory.CreateAuthenticatedClientAsync();
+        var recipe = await CreateRecipeAsync(client, "Pilav üstü tavuk");
+        var cook = await LogCookAsync(client, recipe.Id);
+
+        // The other direction of the same drift the floor above is about: a CookLog row whose
+        // CookedRecipe aggregate is not there at all. UncookAsync treats that as a no-op rather
+        // than an error (the cook is still the caller's to delete), so KAN-18's reply has to
+        // answer for a row it cannot read.
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            await setupDb.CookedRecipes.Where(cr => cr.RecipeId == recipe.Id).ExecuteDeleteAsync();
+        }
+
+        var response = await client.DeleteAsync($"/cook-log/{cook.Id}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // Named, not omitted: the recipe's state DID change as far as any client holding a
+        // cached flag is concerned, and "no aggregate row" is the strongest possible "you have
+        // not cooked this". An empty list here would leave the recipe page saying otherwise,
+        // which is the whole bug.
+        var state = Assert.Single(
+            (await response.Content.ReadFromJsonAsync<UncookResponse>(TestJson.Options))!.Recipes);
+        Assert.Equal(recipe.Id, state.RecipeId);
+        Assert.Equal(0, state.TimesCooked);
+        Assert.False(state.CookedByMe);
+        Assert.Null(state.Rating);
+        Assert.Null(state.LastCookedAt);
     }
 
     [Fact]
@@ -780,7 +872,7 @@ public class CookLogEndpointsTests(IntegrationTestFactory factory) : IClassFixtu
         var row = await cook.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
         Assert.False(Assert.Single(row!.Items).RecipeAvailable);
 
-        Assert.Equal(HttpStatusCode.NoContent, (await cook.DeleteAsync($"/cook-log/{logged.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await cook.DeleteAsync($"/cook-log/{logged.Id}")).StatusCode);
 
         var after = await cook.GetFromJsonAsync<CookLogListResponse>("/cook-log", TestJson.Options);
         Assert.Empty(after!.Items);

@@ -1,3 +1,5 @@
+using RecipeApp.Application.Social.Dtos;
+
 namespace RecipeApp.Application.MealPlanning.Dtos;
 
 // Wire contracts for the cook log (plan-page redesign / roadmap spec 2, 2026-08-10).
@@ -74,3 +76,24 @@ public record CookLogListResponse(IReadOnlyList<CookLogResponse> Items, string? 
 // empty body to tell those apart from, which is exactly the cold-start trap MealPlanWeekPage
 // documents.
 public record CookLogLatestResponse(CookLogResponse? Latest, int TotalCount);
+
+// KAN-18 — what BOTH un-log deletes answer with, in place of the 204 they used to send.
+//
+// Un-logging changes a fact the client is holding: since KAN-13 "you cooked this" is
+// TimesCooked > 0, so removing the last cook flips it. Nothing in the reply meant the client
+// could learn that, and the SPA's per-recipe social envelope is seeded once and never
+// re-fetched (useSocialEnvelope's recorded no-resync limitation), so the recipe page went on
+// saying "you cooked this" for the rest of the session. See docs/adr/0006.
+//
+// Reusing CookedRecipeResponse rather than declaring a slimmer pair of fields is the point:
+// this is the SAME row POST/DELETE /recipes/{id}/cooked and DELETE /recipes/{id}/rating answer
+// with, and the client patches one cache from all four. A second shape carrying the same facts
+// is how the two copies start disagreeing — the drift KAN-13 and ADR-0005 exist to end.
+//
+// A LIST because the count is genuinely 0, 1 or more. The entry-scoped delete removes every
+// cook logged against one plan slot, and a slot's rows carry the recipe they named at the time,
+// so two are possible if the slot's recipe was swapped between cooks; the same delete is
+// idempotent, and a repeat that changed nothing answers with an EMPTY list rather than
+// restating a state no write moved. One recipe per entry, never duplicated — the client patches
+// per recipe.
+public record UncookResponse(IReadOnlyList<CookedRecipeResponse> Recipes);
