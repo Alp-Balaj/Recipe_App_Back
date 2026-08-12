@@ -30,8 +30,27 @@ The client half is what makes it permanent rather than merely stale. The SPA's
 per-recipe `SocialEnvelope` is seeded once and patched by mutations; a later feed
 refetch does not re-sync an already-seeded entry, a limitation `useSocialEnvelope`
 records in its own header. Feed cards self-corrected because they are refetched.
-The recipe page did not heal at all — not on a refetch, not on navigating away and
-back.
+The envelope entry did not heal at all — not on a refetch, not on navigating away
+and back.
+
+## What this is NOT (checked, 2026-08-12)
+
+KAN-18 describes the recipe detail page going on saying "you cooked this". **No
+surface renders `envelope.cookedByMe` today.** `RecipeDetailPage` never reads it
+(its rate-gating comes from the server's 409, per `rateNeedsCook.test.tsx`); the
+only rendered cooked flag is `FeedRail.tsx`'s, off feed items, which the existing
+invalidation already healed. So the ticket's stated symptom was not reachable, and
+this ADR is about an INVARIANT, not a screen.
+
+The invariant is worth the wire change anyway, and is not merely tidiness: the
+stale flag feeds `isFullyKnown()`, which is what decides whether the F1 fallback
+fetches at all. A wrong-but-non-null `cookedByMe` therefore suppresses the one
+request that could have corrected it, and hands that wrong value to the next
+surface that reads the envelope — which KAN-16 is about to be.
+
+The missing surface is itself worth a ticket: a recipe page that cannot tell you
+whether you have made the dish is the likelier explanation for how KAN-18 came to
+be written the way it was.
 
 ## Considered options
 
@@ -74,6 +93,15 @@ recipe:
   different case: `UncookAsync` treats a missing aggregate as a no-op rather than
   an error, and "no row" is the strongest available "you have not cooked this".
 
+**Known gap in the empty case.** "This request changed nothing" is not the same
+as "nothing has changed since the client last knew". If the first delete commits
+but its response is lost, the retry answers `{recipes: []}` and a client that
+never saw the first reply keeps its stale flag for the session. The feed still
+heals through the existing invalidation; the envelope does not. Closing it means
+reporting the entry's recipe state unconditionally — one extra read on a no-op
+path — and is deliberately left as a follow-up rather than widened into this
+change.
+
 ## Consequences
 
 Two endpoints changed status code, so any client asserting 204 breaks loudly
@@ -82,10 +110,13 @@ is updated in the same change: `useCookLogMutations` now patches the feed and
 envelope caches from the reply through the same helper `useSocialMutations` uses,
 so there is still ONE write path onto those caches.
 
-`UncookAsync` reads the aggregate back inside its existing transaction, after the
-decrement — one extra round trip on a gesture that already had two. The
-entry-scoped path builds the reply from entities it had already loaded and
-tracked, so it adds no query at all.
+Both paths re-read the aggregate rather than reporting what they computed —
+`UncookAsync` inside its existing transaction after the decrement, `UncookEntryAsync`
+after its `SaveChanges`. One extra round trip each. The entry-scoped decrement is
+last-writer-wins (unlike its sibling, which puts the arithmetic in the predicate),
+so a concurrent cook is already clobbered there; re-reading does not un-lose that
+race, it stops the REPLY publishing the clobbered value into a client cache that
+never re-syncs.
 
 The rating rides along in the reply and it is not noise: a dish can sit at zero
 cooks with a rating standing (ADR-0004), and a client patching a cache from this

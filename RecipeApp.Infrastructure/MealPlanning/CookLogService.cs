@@ -405,17 +405,26 @@ public class CookLogService : ICookLogService
         // rank (see SocialService.MarkCookedAsync), so there is nothing to revert.
         await _db.SaveChangesAsync(cancellationToken);
 
-        // KAN-18: built from `aggregates`, which the SaveChanges above has just written, so
-        // this is the post-write state and not the pre-write one that was read. A recipe with
-        // no aggregate row at all is still named — see ToCookedState.
+        // KAN-18: the state to report, RE-READ rather than taken from the entities above.
+        //
+        // Those hold what this request computed — `Math.Max(0, <value read earlier> - removed)`
+        // — and this method's decrement is last-writer-wins, unlike UncookAsync's, which puts
+        // the arithmetic in the predicate. A POST /cook-log for the same dish committing
+        // between the read and the SaveChanges above is already clobbered (pre-existing, and
+        // not this ticket's to fix), but the REPLY must not go on to publish that clobbered
+        // value: a client writes it into an envelope entry that never re-syncs, so a wrong
+        // `cookedByMe: false` here outlives every later read of it. Re-reading cannot un-lose
+        // the race; it can keep the answer honest about where the row actually ended up.
+        var written = await _db.CookedRecipes
+            .AsNoTracking()
+            .Where(cr => cr.UserId == currentUserId && recipeIds.Contains(cr.RecipeId))
+            .Select(cr => new { cr.RecipeId, State = new AggregateState(cr.TimesCooked, cr.Rating, cr.LastCookedAt) })
+            .ToListAsync(cancellationToken);
+
+        // Driven off recipeIds, not off what came back: a recipe with no aggregate row at all
+        // is still named — see ToCookedState.
         var affected = recipeIds
-            .Select(id =>
-            {
-                var aggregate = aggregates.SingleOrDefault(a => a.RecipeId == id);
-                return ToCookedState(id, aggregate is null
-                    ? null
-                    : new AggregateState(aggregate.TimesCooked, aggregate.Rating, aggregate.LastCookedAt));
-            })
+            .Select(id => ToCookedState(id, written.SingleOrDefault(w => w.RecipeId == id)?.State))
             .ToList();
 
         return MealPlanResult<UncookResponse>.Success(new UncookResponse(affected));
