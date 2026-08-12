@@ -474,9 +474,16 @@ public class CookLogService : ICookLogService
         // The CookedRecipe row itself stays, too, even when this takes the count to zero and
         // nothing was ever rated. UncookEntryAsync leaves it (pinned by
         // Un_cooking_a_double_tapped_entry_removes_every_row) and two sibling gestures
-        // answering differently is worse than the row: a zero-cook row still reads as
-        // CookedByMe (row existence, see SocialDtos), which is the phantom the KAN-13/KAN-16
-        // family is about and is not this ticket's to close on one path only.
+        // answering differently is worse than the row.
+        //
+        // A zero-cook row left behind here no longer claims its owner cooked the dish:
+        // KAN-13 moved every social reader onto TimesCooked > 0 (CookedRecipePolicy,
+        // ADR-0005), so the row this leaves is inert rather than a phantom cook on the
+        // recipe page, the feed, "N made this" and the activity strip. What it still holds
+        // is the rating, which is the point — ADR-0004 keeps a rated row at zero cooks
+        // because un-cooking is not a retraction of an opinion. Deleting the row for the
+        // never-rated case alone would make this gesture's outcome depend on whether an
+        // unrelated fact happened to be recorded.
         // No SaveChanges: both writes above were statements, and the read was untracked.
         await transaction.CommitAsync(cancellationToken);
 
