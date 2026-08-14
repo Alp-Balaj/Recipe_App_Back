@@ -71,3 +71,46 @@ Said of a recipe a user can no longer open — because it was removed, or becaus
 its author no longer shares it with them. The user's own records of it survive;
 only the affordances that need the recipe's content go away.
 _Avoid_: deleted, hidden, missing, gone
+
+### Accounts
+
+**Verified email**:
+An address whose owner has proved they receive mail there. Registration collects
+an address; only verification turns it into a fact the app will rely on.
+"Verified" is said of addresses and of nothing else.
+_Avoid_: confirmed email, validated email, real email
+
+**Second factor**:
+A proof of identity separate from the password, produced by something the account
+holder has. A password and an emailed code are not two factors when that same
+mailbox can also reset the password.
+_Avoid_: 2FA, MFA, OTP, token, code (that is one instance of one kind)
+
+**Enrolled**:
+Said of an account that has a second factor registered. Enrolment belongs to the
+account rather than to any one sign-in, and it is the single question asked before
+an AI feature or the admin surface will open.
+_Avoid_: 2FA enabled, MFA, protected, secured, hardened
+
+**Challenge**:
+The moment an account is asked to produce its second factor. Signing in raises
+one; so does every guarded action.
+_Avoid_: verification, prompt, check, 2FA step
+
+**Elevated**:
+Said of a signed-in session that has answered a challenge recently. Elevation
+belongs to one session, never to the account, and it lapses on its own. A session
+answers a challenge — it is never "verified".
+_Avoid_: verified, confirmed, authenticated, trusted, privileged
+
+**Guarded action**:
+An act that an elevated session may perform and an ordinary one may not:
+disabling the second factor, reissuing recovery codes, changing the account's
+email address, and moderating.
+_Avoid_: sensitive action, protected action, privileged action
+
+**Recovery code**:
+A single-use secret, issued at enrolment, that answers a challenge in the
+authenticator's place. Spending one uses it up. It is the recovery path that does
+not run through email.
+_Avoid_: backup code, one-time code, emergency code
