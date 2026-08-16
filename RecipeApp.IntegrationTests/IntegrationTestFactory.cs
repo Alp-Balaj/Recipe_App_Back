@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
 using RecipeApp.Application.Chat.Abstractions;
+using RecipeApp.Application.Mail.Abstractions;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Recipes.Abstractions;
@@ -139,6 +140,19 @@ public class IntegrationTestFactory : WebApplicationFactory<Program>, IAsyncLife
             // the container DB.
             services.RemoveAll<IFoodScanAssistant>();
             services.AddScoped<IFoodScanAssistant, FakeFoodScanAssistant>();
+
+            // Accounts (KAN-19): the mail seam. Unlike the AI fakes above this one is not
+            // about avoiding a paid call — it is about the suite never handing a message to a
+            // provider at all. The default registration is already the logging no-op sender
+            // (no Mail:Smtp:Host is configured here), so this replacement is not what stops
+            // delivery; what it adds is a RECORD, so a test can pull the real link out of the
+            // real message and walk the flow end to end.
+            //
+            // Singleton, so the recording survives across request scopes and the test can read
+            // it from the factory's root provider. Safe under the shared TestServer without a
+            // reset because it keys by recipient — see FakeMailSender.
+            services.RemoveAll<IMailSender>();
+            services.AddSingleton<IMailSender, FakeMailSender>();
 
             // Built through the shared configurator, exactly like Program.cs and the
             // design-time factory. Two things ride on that: the dynamic-JSON opt-in (the jsonb

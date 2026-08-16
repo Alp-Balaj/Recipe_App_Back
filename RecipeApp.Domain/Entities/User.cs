@@ -42,6 +42,12 @@ public class User
     // one should ever raise the wizard again. Deriving this from the two lists being empty
     // would nag forever the user whose honest answer is "no preferences".
     public DateTime? OnboardingCompletedAt { get; set; }
+    // Accounts (KAN-19). Null until the owner of this address has proved they receive
+    // mail there — a RECORDED fact, following the precedent set by the field above, not
+    // something inferred from the existence of a token row. Verification is not required to
+    // register, so an account may or may not have a verified email and this column is how the
+    // system knows which. Later work (recovery of a second factor) stands on it.
+    public DateTime? EmailVerifiedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Recipes this user created

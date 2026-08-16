@@ -70,6 +70,13 @@ public class AuthServiceLoginTests
             // both ignored above, so they are carved out with the rest.
             builder.Ignore<Domain.Entities.Moderation.Report>();
             builder.Ignore<Domain.Entities.Moderation.AuditLogEntry>();
+            // Accounts (KAN-19): the emailed-link tokens. Carved out with the rest because
+            // this context is deliberately users-only — LoginAsync never touches them, and
+            // leaving them in the model would make the intent of this class ambiguous the
+            // next time somebody reads it. (They would in fact map: AccountToken holds no
+            // jsonb. AccountRecoveryServiceTests keeps its own context, which does NOT ignore
+            // them, because there they are the thing under test.)
+            builder.Ignore<Domain.Entities.AccountToken>();
         }
     }
 

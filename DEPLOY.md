@@ -90,10 +90,24 @@ jobs:
 | `ImageStorage__R2__SecretAccessKey` | R2 token secret |
 | `ImageStorage__R2__Bucket` | bucket name |
 | `ImageStorage__R2__PublicBaseUrl` | `https://pub-….r2.dev` or the custom domain |
+| `Mail__AppBaseUrl` | the deployed origin, e.g. `https://<service>.up.railway.app` — where the links in verification / reset emails point |
+| `Mail__FromAddress` | an address the sending domain is authorised to send as |
+| `Mail__Smtp__Host` | SMTP host of the transactional mail provider |
+| `Mail__Smtp__Port` | usually `587` (STARTTLS) |
+| `Mail__Smtp__Username` | provider SMTP username |
+| `Mail__Smtp__Password` | provider SMTP password / API key |
 | `ASPNETCORE_ENVIRONMENT` | `Production` |
 
 Setting `ImageStorage__R2__Bucket` is what flips the app from local-disk to R2 storage; the
 app fails fast at startup naming any of the other four R2 keys that is missing.
+
+`Mail__Smtp__Host` is the equivalent switch for mail (KAN-19): set it and the app sends for
+real, leave it unset and it uses a logging no-op sender that delivers nothing. **Account
+recovery is inert without it** — email verification and password reset both appear to work
+and no message ever arrives, with the link written to the application log instead. That is
+the right default for local development and CI and the wrong one for production, so it is
+the first thing to check if a user reports never receiving a reset email. Deliverability
+itself — sending domain, SPF/DKIM, bounce handling — is ops work outside this file.
 
 ## 2. Local production rehearsal
 

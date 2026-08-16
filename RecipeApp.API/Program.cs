@@ -25,6 +25,7 @@ using RecipeApp.Infrastructure.Auth;
 using RecipeApp.Infrastructure.Chat;
 using RecipeApp.Infrastructure.Events;
 using RecipeApp.Infrastructure.Images;
+using RecipeApp.Infrastructure.Mail;
 using RecipeApp.Infrastructure.MealPlanning;
 using RecipeApp.Infrastructure.Moderation;
 using RecipeApp.Infrastructure.Notifications;
@@ -80,6 +81,12 @@ builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection(JwtSett
 builder.Services.AddScoped<IPasswordHasher, PasswordHasher>();
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
+// Accounts (KAN-19): the mail seam (provider chosen by configuration — see AddMail),
+// the recovery service behind /auth/email-verification and /auth/password-reset, and the
+// retention sweep for the tokens they issue.
+builder.Services.AddMail(builder.Configuration);
+builder.Services.AddScoped<IAccountRecoveryService, AccountRecoveryService>();
+builder.Services.AddHostedService<AccountTokenPruneWorker>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
 // The ingredient catalogue (stream G, slice G2 — D8/D9).
 builder.Services.AddScoped<IIngredientResolver, IngredientResolver>();
@@ -393,6 +400,13 @@ forwardedHeadersOptions.KnownIPNetworks.Clear();
 forwardedHeadersOptions.KnownProxies.Clear();
 app.UseForwardedHeaders(forwardedHeadersOptions);
 
+// Accounts (KAN-19): security headers on EVERY response. Registered here — directly
+// after the forwarded-headers pass that establishes the real scheme, and above everything
+// else — so it covers the API, the SPA's own static assets, the /images mount and the error
+// handler's ProblemDetails alike. See SecurityHeaders for why the policy allows inline
+// styles but not inline scripts, and why the headers are written in OnStarting.
+app.UseSecurityHeaders();
+
 // Global exception handler first, so it wraps auth and every endpoint. Logs the exception
 // and returns a ProblemDetails 500 with no stack trace (safe in Production).
 app.UseExceptionHandler();
@@ -455,6 +469,13 @@ if (!useR2ImageStorage)
     {
         FileProvider = new PhysicalFileProvider(imageRootPath),
         RequestPath = "/images",
+        // Accounts (KAN-19): nosniff HERE as well as globally, and deliberately not
+        // "instead of". These bytes are user-supplied, stored unaltered, and validated only
+        // by their first few — a file with a valid image header and a JavaScript tail
+        // survives upload. This is the header that stops a browser being talked into running
+        // one as script from the origin that holds the session token, so it is set on the
+        // response itself rather than left depending on middleware ordering staying right.
+        OnPrepareResponse = ctx => ctx.Context.Response.Headers["X-Content-Type-Options"] = "nosniff",
     });
 }
 

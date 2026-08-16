@@ -50,6 +50,10 @@ public class ApplicationDbContext : DbContext
     public DbSet<Notification> Notifications => Set<Notification>();
     // Admin Rework: app-wide observability events; best-effort writes, 90-day retention.
     public DbSet<AppEvent> AppEvents => Set<AppEvent>();
+    // Accounts (KAN-19): the single-use emailed-link secrets, for both purposes. Queried
+    // directly by every recovery path (lookup by digest, invalidate-by-purpose, prune), so
+    // promoted rather than left nav-only.
+    public DbSet<AccountToken> AccountTokens => Set<AccountToken>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -330,6 +334,44 @@ public class ApplicationDbContext : DbContext
         builder.Entity<AppEvent>()
             .HasIndex(e => new { e.CreatedAt, e.Id })
             .IsDescending();
+
+        // ── Accounts (KAN-19): the emailed-link tokens ──────────────────────────
+        //
+        // Text enum like everything else.
+        builder.Entity<AccountToken>()
+            .Property(t => t.Purpose)
+            .HasConversion<string>();
+
+        // The digest is the LOOKUP KEY — every read of this table is "find the row for this
+        // candidate token" — so it is bounded, required and uniquely indexed. Unique because
+        // two rows sharing a digest would make "which token is this" ambiguous, and because a
+        // collision here is far likelier to be a bug than a SHA-256 collision.
+        builder.Entity<AccountToken>()
+            .Property(t => t.TokenHash)
+            .HasMaxLength(64)
+            .IsRequired();
+
+        builder.Entity<AccountToken>()
+            .HasIndex(t => t.TokenHash)
+            .IsUnique();
+
+        // Backs the invalidate-outstanding-tokens delete that runs on every issue.
+        builder.Entity<AccountToken>()
+            .HasIndex(t => new { t.UserId, t.Purpose });
+
+        // Backs the retention sweep (AccountTokenPruneWorker), whose whole query is a range
+        // scan on this column.
+        builder.Entity<AccountToken>()
+            .HasIndex(t => t.ExpiresAtUtc);
+
+        // Cascade, unlike most FKs into Users here: a token is meaningless without its user
+        // and there is nothing in it worth keeping once the account is gone. (Users are not
+        // hard-deleted today; this is the safety net rather than the usual path.)
+        builder.Entity<AccountToken>()
+            .HasOne(t => t.User)
+            .WithMany()
+            .HasForeignKey(t => t.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         builder.Entity<Recipe>()
             .Property(r => r.Ingredients)
