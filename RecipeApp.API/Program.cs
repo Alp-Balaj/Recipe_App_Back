@@ -15,6 +15,7 @@ using RecipeApp.API.Endpoints;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Common;
 using RecipeApp.Application.Events;
+using RecipeApp.Application.Mail.Abstractions;
 using RecipeApp.Application.MealPlanning.Abstractions;
 using RecipeApp.Application.Moderation.Abstractions;
 using RecipeApp.Application.Notifications.Abstractions;
@@ -362,6 +363,24 @@ builder.Services.AddAuthorization(options =>
 });
 
 var app = builder.Build();
+
+// Accounts (KAN-19). Say which mail sender was selected and what it resolved to, because
+// misconfiguring this is SILENT in every other way: LoggingMailSender returns success and
+// delivers nothing, and the request endpoints answer identically whether a message was
+// sent, suppressed by the cooldown, or never attempted at all. Anything not supplied by
+// the environment also falls through to the appsettings.json defaults, which are the
+// developer's, not the deployment's — an unset Mail__FromAddress in production is not a
+// blank the operator can spot but a plausible-looking address that was never theirs.
+//
+// One line at boot turns all of that into a fact you can read. The SMTP password is
+// deliberately absent: this log is not a private one.
+var mailOptions = app.Services.GetRequiredService<MailOptions>();
+app.Logger.LogInformation(
+    "Mail: sender={Sender} host={Host} from={From} appBaseUrl={AppBaseUrl}",
+    app.Services.GetRequiredService<IMailSender>().GetType().Name,
+    string.IsNullOrWhiteSpace(mailOptions.Smtp.Host) ? "(none)" : mailOptions.Smtp.Host,
+    mailOptions.FromAddress,
+    mailOptions.AppBaseUrl);
 
 // The ingredient catalogue is reference data the application needs, not sample data, so
 // it loads at startup rather than from tools/seed. Idempotent, and safe to run on every
