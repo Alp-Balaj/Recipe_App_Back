@@ -88,6 +88,12 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddMail(builder.Configuration);
 builder.Services.AddScoped<IAccountRecoveryService, AccountRecoveryService>();
 builder.Services.AddHostedService<AccountTokenPruneWorker>();
+
+// Accounts (KAN-20): sessions as rows. Scoped like everything else taking the DbContext; the
+// liveness cache it reads on every request lives in the singleton IMemoryCache, exactly as
+// UserSecurityStateService's does.
+builder.Services.AddScoped<IUserSessionService, UserSessionService>();
+builder.Services.AddHostedService<UserSessionPruneWorker>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
 // The ingredient catalogue (stream G, slice G2 — D8/D9).
 builder.Services.AddScoped<IIngredientResolver, IngredientResolver>();
@@ -318,6 +324,26 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         // deploy and revocation still catches them the moment their user is actioned.
         options.Events = new JwtBearerEvents
         {
+            // Accounts (KAN-20): the access token arrives in an `httpOnly` cookie now. The
+            // handler only knows how to read an Authorization header, so this is where the
+            // cookie is handed to it.
+            //
+            // The header WINS when both are present, and that ordering is deliberate. It is
+            // what keeps the bearer path a supported way in: sessions issued before this phase
+            // live out their lifetime, and the integration suite goes on authenticating the
+            // way every one of its ~40 files was written to, instead of being rewritten into a
+            // cookie harness to prove things that have nothing to do with cookies.
+            OnMessageReceived = context =>
+            {
+                if (string.IsNullOrEmpty(context.Token)
+                    && !context.HttpContext.Request.Headers.ContainsKey("Authorization"))
+                {
+                    context.Token = SessionCookies.ReadAccessToken(context.HttpContext);
+                }
+
+                return Task.CompletedTask;
+            },
+
             OnTokenValidated = async context =>
             {
                 var sub = context.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
@@ -344,6 +370,33 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                     || claimedVersion != state.TokenVersion)
                 {
                     context.Fail("Token has been revoked.");
+                    return;
+                }
+
+                // Accounts (KAN-20, decision D2): per-device revocation. Without this check,
+                // deleting a session row would only stop the REFRESH — the access token
+                // already in that device's cookie jar would keep working until it expired, so
+                // "sign this device out" would quietly mean "in up to fifteen minutes", on the
+                // one screen whose entire premise is that it acts now.
+                //
+                // A token carrying NO `sid` was issued before this phase and is let through on
+                // the TokenVersion check alone. That is the whole migration story for live
+                // sessions: they keep working, they are simply not revocable one at a time,
+                // and they age out within the week the old lifetime gave them.
+                var sid = context.Principal?.FindFirst(JwtTokenService.SessionIdClaim)?.Value;
+                if (sid is not null)
+                {
+                    if (!Guid.TryParse(sid, out var sessionId))
+                    {
+                        context.Fail("Token carries an unreadable session id.");
+                        return;
+                    }
+
+                    var sessions = context.HttpContext.RequestServices.GetRequiredService<IUserSessionService>();
+                    if (!await sessions.IsLiveAsync(sessionId, context.HttpContext.RequestAborted))
+                    {
+                        context.Fail("Session has been revoked.");
+                    }
                 }
             },
         };

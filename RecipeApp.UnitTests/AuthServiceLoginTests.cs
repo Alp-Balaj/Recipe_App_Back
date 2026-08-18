@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using RecipeApp.Application.Auth.Abstractions;
@@ -32,7 +33,7 @@ public class AuthServiceLoginTests
 
     private sealed class FakeJwtTokenService : IJwtTokenService
     {
-        public (string Token, DateTime ExpiresAtUtc) GenerateToken(User user) =>
+        public (string Token, DateTime ExpiresAtUtc) GenerateToken(User user, Guid? sessionId = null) =>
             ("fake-token", new DateTime(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc));
     }
 
@@ -86,8 +87,17 @@ public class AuthServiceLoginTests
             .Options);
 
     // Empty configuration: no Admin:Emails, so the promotion path stays inert here.
+    //
+    // Accounts (KAN-20): a REAL UserSessionService over the same in-memory context rather than
+    // a stub. Sign-in opens a session now, so a stub would let this class go on passing while
+    // the thing every login depends on was broken — and UserSession maps on InMemory fine (no
+    // jsonb), so there is nothing to gain by faking it.
     private static AuthService NewService(ApplicationDbContext db, CountingPasswordHasher hasher) =>
-        new(db, hasher, new FakeJwtTokenService(), new ConfigurationBuilder().Build(), new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
+        new(db, hasher, new FakeJwtTokenService(), NewSessions(db), new ConfigurationBuilder().Build(),
+            new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
+
+    private static UserSessionService NewSessions(ApplicationDbContext db) =>
+        new(db, new MemoryCache(new MemoryCacheOptions()));
 
     private static User KnownUser(CountingPasswordHasher hasher) => new()
     {
@@ -201,7 +211,7 @@ public class AuthServiceLoginTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:Emails:0"] = "KNOWN@example.com" })
             .Build();
-        var service = new AuthService(db, hasher, new FakeJwtTokenService(), configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
+        var service = new AuthService(db, hasher, new FakeJwtTokenService(), NewSessions(db), configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
 
         var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
 
@@ -220,7 +230,7 @@ public class AuthServiceLoginTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:Emails:0"] = "someone-else@example.com" })
             .Build();
-        var service = new AuthService(db, hasher, new FakeJwtTokenService(), configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
+        var service = new AuthService(db, hasher, new FakeJwtTokenService(), NewSessions(db), configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
 
         var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
 

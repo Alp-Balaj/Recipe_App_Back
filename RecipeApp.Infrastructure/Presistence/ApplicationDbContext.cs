@@ -55,6 +55,9 @@ public class ApplicationDbContext : DbContext
     // promoted rather than left nav-only.
     public DbSet<AccountToken> AccountTokens => Set<AccountToken>();
 
+    // Accounts (KAN-20): one row per signed-in device. See UserSession.
+    public DbSet<UserSession> UserSessions => Set<UserSession>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         builder.Entity<Like>()
@@ -371,6 +374,49 @@ public class ApplicationDbContext : DbContext
             .HasOne(t => t.User)
             .WithMany()
             .HasForeignKey(t => t.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // ── Accounts (KAN-20): sessions as rows ────────────────────────────────
+        //
+        // Same shape as AccountToken above and for the same reasons: the digest is the
+        // lookup key on every refresh, so it is bounded, required and uniquely indexed.
+        builder.Entity<UserSession>()
+            .Property(s => s.RefreshTokenHash)
+            .HasMaxLength(64)
+            .IsRequired();
+
+        builder.Entity<UserSession>()
+            .HasIndex(s => s.RefreshTokenHash)
+            .IsUnique();
+
+        // NOT unique, unlike the live digest. Two rows may briefly hold no previous digest
+        // at all (null), and a unique index over nullable columns is a trap waiting for the
+        // day someone changes the provider's null semantics.
+        builder.Entity<UserSession>()
+            .Property(s => s.PreviousRefreshTokenHash)
+            .HasMaxLength(64);
+
+        builder.Entity<UserSession>()
+            .HasIndex(s => s.PreviousRefreshTokenHash);
+
+        // Backs the devices list and the two revocation deletes, all of which are
+        // "this user's sessions".
+        builder.Entity<UserSession>()
+            .HasIndex(s => s.UserId);
+
+        // Backs the retention sweep (UserSessionPruneWorker), a range scan on this column.
+        builder.Entity<UserSession>()
+            .HasIndex(s => s.ExpiresAtUtc);
+
+        builder.Entity<UserSession>()
+            .Property(s => s.UserAgent)
+            .HasMaxLength(256);
+
+        // Cascade, like AccountToken: a session is meaningless without its user.
+        builder.Entity<UserSession>()
+            .HasOne(s => s.User)
+            .WithMany()
+            .HasForeignKey(s => s.UserId)
             .OnDelete(DeleteBehavior.Cascade);
 
         builder.Entity<Recipe>()

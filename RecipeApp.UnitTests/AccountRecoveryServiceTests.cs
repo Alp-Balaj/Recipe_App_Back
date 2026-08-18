@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
@@ -58,7 +59,7 @@ public class AccountRecoveryServiceTests
 
     private sealed class StubJwtTokenService : IJwtTokenService
     {
-        public (string Token, DateTime ExpiresAtUtc) GenerateToken(User user) =>
+        public (string Token, DateTime ExpiresAtUtc) GenerateToken(User user, Guid? sessionId = null) =>
             ("fake-token", new DateTime(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc));
     }
 
@@ -118,6 +119,7 @@ public class AccountRecoveryServiceTests
         ApplicationDbContext Db,
         RecordingMailSender Mail,
         NoOpSecurityState SecurityState,
+        UserSessionService Sessions,
         User User);
 
     private static async Task<Harness> NewHarnessAsync(Action<User>? configureUser = null)
@@ -137,11 +139,15 @@ public class AccountRecoveryServiceTests
 
         var mail = new RecordingMailSender();
         var securityState = new NoOpSecurityState();
+        // Accounts (KAN-20): the real session service, for the same reason AuthServiceLoginTests
+        // uses one — a reset now revokes sessions and opens a new one, and both are assertable
+        // here only if the rows are real.
+        var sessions = new UserSessionService(db, new MemoryCache(new MemoryCacheOptions()));
         var service = new AccountRecoveryService(
-            db, hasher, new StubJwtTokenService(), securityState, mail, new MailOptions(),
+            db, hasher, new StubJwtTokenService(), securityState, sessions, mail, new MailOptions(),
             new NoOpAppEventLogger(), NullLogger<AccountRecoveryService>.Instance);
 
-        return new Harness(service, db, mail, securityState, user);
+        return new Harness(service, db, mail, securityState, sessions, user);
     }
 
     // ── Issuing ─────────────────────────────────────────────────────────────────────────
@@ -383,6 +389,46 @@ public class AccountRecoveryServiceTests
         // Without this the bump would not bite until the 60-second cache TTL lapsed, and the
         // sessions the reset is supposed to revoke would keep working for a minute.
         Assert.Contains(h.User.Id, h.SecurityState.Invalidated);
+    }
+
+    // Accounts (KAN-20). The TokenVersion bump above kills every other device's ACCESS token —
+    // but each of those devices also holds a refresh cookie, and a refresh mints a fresh access
+    // token. Without this delete, "every other device is signed out" would hold for one
+    // access-token lifetime and then quietly undo itself.
+    [Fact]
+    public async Task ResettingAPassword_RevokesEveryOtherDevicesSession()
+    {
+        var h = await NewHarnessAsync();
+        var phone = await h.Sessions.CreateAsync(h.User.Id, userAgent: null);
+        var laptop = await h.Sessions.CreateAsync(h.User.Id, userAgent: null);
+        await h.Service.RequestPasswordResetAsync(h.User.Email);
+
+        await h.Service.ResetPasswordAsync(h.Mail.LastLinkToken(), "BrandNewPassword9");
+
+        Assert.False(await h.Sessions.IsLiveAsync(phone.SessionId));
+        Assert.False(await h.Sessions.IsLiveAsync(laptop.SessionId));
+    }
+
+    // …and the one device the reset must NOT sign out is the one that performed it. The order
+    // matters: the revoke runs before the new session is opened, so a reversal would leave the
+    // user staring at a login screen holding the password they chose two seconds ago.
+    [Fact]
+    public async Task ResettingAPassword_LeavesTheResettingDeviceSignedIn()
+    {
+        var h = await NewHarnessAsync();
+        await h.Sessions.CreateAsync(h.User.Id, userAgent: null);
+        await h.Service.RequestPasswordResetAsync(h.User.Email);
+
+        var result = await h.Service.ResetPasswordAsync(h.Mail.LastLinkToken(), "BrandNewPassword9");
+
+        Assert.Equal(PasswordResetOutcome.Reset, result.Outcome);
+        Assert.NotNull(result.Tokens);
+        Assert.NotNull(result.Tokens!.RefreshToken);
+
+        // The refresh token it was handed names a live session — the only one left.
+        var rotated = await h.Sessions.RotateAsync(result.Tokens.RefreshToken!, userAgent: null);
+        Assert.NotNull(rotated);
+        Assert.Equal(h.User.Id, (await h.Db.UserSessions.SingleAsync()).UserId);
     }
 
     [Fact]

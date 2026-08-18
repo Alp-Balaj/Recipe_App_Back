@@ -34,5 +34,5 @@ public interface IAccountRecoveryService
     /// the returned session is a fresh one for the resetting device.
     /// </summary>
     Task<PasswordResetResult> ResetPasswordAsync(
-        string token, string newPassword, CancellationToken cancellationToken = default);
+        string token, string newPassword, string? userAgent = null, CancellationToken cancellationToken = default);
 }

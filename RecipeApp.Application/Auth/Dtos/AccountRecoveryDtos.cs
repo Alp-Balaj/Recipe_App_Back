@@ -1,3 +1,5 @@
+using RecipeApp.Application.Auth;
+
 namespace RecipeApp.Application.Auth.Dtos;
 
 // Accounts (KAN-19): the wire shapes for email verification and password reset.
@@ -41,15 +43,24 @@ public class PasswordResetResult
     public PasswordResetOutcome Outcome { get; }
     public AuthResponse? Response { get; }
 
-    private PasswordResetResult(PasswordResetOutcome outcome, AuthResponse? response)
+    /// <summary>
+    /// Accounts (KAN-20): the session the reset opened for the resetting device, for the
+    /// endpoint to set as cookies. Non-null exactly when the outcome is Reset.
+    /// </summary>
+    public SessionTokens? Tokens { get; }
+
+    private PasswordResetResult(PasswordResetOutcome outcome, AuthResponse? response, SessionTokens? tokens)
     {
         Outcome = outcome;
         Response = response;
+        Tokens = tokens;
     }
 
-    public static PasswordResetResult Reset(AuthResponse response) => new(PasswordResetOutcome.Reset, response);
-    public static PasswordResetResult Expired() => new(PasswordResetOutcome.Expired, null);
-    public static PasswordResetResult Invalid() => new(PasswordResetOutcome.Invalid, null);
+    public static PasswordResetResult Reset(AuthResponse response, SessionTokens tokens) =>
+        new(PasswordResetOutcome.Reset, response, tokens);
+
+    public static PasswordResetResult Expired() => new(PasswordResetOutcome.Expired, null, null);
+    public static PasswordResetResult Invalid() => new(PasswordResetOutcome.Invalid, null, null);
 }
 
 public enum PasswordResetOutcome

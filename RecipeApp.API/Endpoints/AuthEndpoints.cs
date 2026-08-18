@@ -3,6 +3,7 @@ using System.Security.Claims;
 using RecipeApp.API.Filters;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
+using RecipeApp.Infrastructure.Auth;
 
 namespace RecipeApp.API.Endpoints;
 
@@ -15,21 +16,82 @@ public static class AuthEndpoints
         // group, so it stays unlimited (and auth-required via the fallback policy).
         var group = app.MapGroup("/auth").AllowAnonymous().RequireRateLimiting(RateLimitPolicies.Auth);
 
-        group.MapPost("/register", async (RegisterRequest request, IAuthService authService, CancellationToken cancellationToken) =>
+        // Accounts (KAN-20): both sign-in paths now OPEN A SESSION and set the two cookies.
+        // The body is unchanged — see AuthService.SignInAsync for why the access token is
+        // still in it and why the SPA nonetheless reads none of it.
+        group.MapPost("/register", async (
+            RegisterRequest request, IAuthService authService, HttpContext http, CancellationToken cancellationToken) =>
         {
-            var result = await authService.RegisterAsync(request, cancellationToken);
-            return result.Succeeded
-                ? Results.Ok(result.Response)
-                : Results.Conflict(new { error = result.Error });
+            var result = await authService.RegisterAsync(request, UserAgent(http), cancellationToken);
+            if (!result.Succeeded)
+            {
+                return Results.Conflict(new { error = result.Error });
+            }
+
+            SessionCookies.Write(http, result.Tokens!);
+            return Results.Ok(result.Response);
         })
         .AddEndpointFilter<ValidationFilter<RegisterRequest>>();
 
-        group.MapPost("/login", async (LoginRequest request, IAuthService authService, CancellationToken cancellationToken) =>
+        group.MapPost("/login", async (
+            LoginRequest request, IAuthService authService, HttpContext http, CancellationToken cancellationToken) =>
         {
-            var result = await authService.LoginAsync(request, cancellationToken);
-            return result.Succeeded
-                ? Results.Ok(result.Response)
-                : Results.Unauthorized();
+            var result = await authService.LoginAsync(request, UserAgent(http), cancellationToken);
+            if (!result.Succeeded)
+            {
+                return Results.Unauthorized();
+            }
+
+            SessionCookies.Write(http, result.Tokens!);
+            return Results.Ok(result.Response);
+        });
+
+        // ── Accounts (KAN-20): the session lifecycle ───────────────────────────────
+        //
+        // Refresh and logout are both ANONYMOUS, and neither is an oversight.
+        //
+        // Refresh is the endpoint you reach precisely BECAUSE your access token has expired —
+        // requiring a valid one would make it unreachable at the only moment it is wanted. Its
+        // credential is the refresh cookie, which it reads itself.
+        //
+        // Logout has the same problem with worse consequences: a user coming back to a tab
+        // after lunch would find the sign-out button 401ing, leaving the session they were
+        // trying to end alive. It identifies the session by the same cookie, and answers 204
+        // whether or not one was there — logging out of nothing is not an error, and an
+        // endpoint that reports which cookies are real is an oracle nobody needs.
+        group.MapPost("/refresh", async (
+            IAuthService authService, HttpContext http, CancellationToken cancellationToken) =>
+        {
+            var refreshToken = SessionCookies.ReadRefreshToken(http);
+            if (refreshToken is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            var renewal = await authService.RefreshAsync(refreshToken, UserAgent(http), cancellationToken);
+            if (renewal is null)
+            {
+                // Expired, revoked, superseded past the grace window, or never real. The
+                // cookies go regardless: whatever the caller is holding, it does not work, and
+                // leaving it in the jar means every future request carries a dead credential.
+                SessionCookies.Clear(http);
+                return Results.Unauthorized();
+            }
+
+            SessionCookies.Write(http, renewal.Tokens);
+            return Results.Ok(renewal.Me);
+        });
+
+        group.MapPost("/logout", async (
+            IUserSessionService sessions, HttpContext http, CancellationToken cancellationToken) =>
+        {
+            if (SessionCookies.ReadRefreshToken(http) is string refreshToken)
+            {
+                await sessions.RevokeByRefreshTokenAsync(refreshToken, cancellationToken);
+            }
+
+            SessionCookies.Clear(http);
+            return Results.NoContent();
         });
 
         // ── Accounts (KAN-19): email verification and password reset ───────────────
@@ -119,9 +181,20 @@ public static class AuthEndpoints
         .AddEndpointFilter<ValidationFilter<RequestPasswordResetRequest>>();
 
         group.MapPost("/password-reset/confirm", async (
-            ResetPasswordRequest request, IAccountRecoveryService recovery, CancellationToken cancellationToken) =>
+            ResetPasswordRequest request, IAccountRecoveryService recovery, HttpContext http,
+            CancellationToken cancellationToken) =>
         {
-            var result = await recovery.ResetPasswordAsync(request.Token, request.NewPassword, cancellationToken);
+            var result = await recovery.ResetPasswordAsync(
+                request.Token, request.NewPassword, UserAgent(http), cancellationToken);
+
+            // Accounts (KAN-20): the resetting device is handed cookies like any other
+            // sign-in. Without this the one device a reset is supposed to leave signed in
+            // would be the one holding a bearer token in a body the SPA no longer reads.
+            if (result.Outcome == PasswordResetOutcome.Reset)
+            {
+                SessionCookies.Write(http, result.Tokens!);
+            }
+
             // Same 410-vs-400 split as the verification confirm above, for the same reason.
             return result.Outcome switch
             {
@@ -152,6 +225,85 @@ public static class AuthEndpoints
             var username = user.FindFirstValue(JwtRegisteredClaimNames.UniqueName) ?? user.FindFirstValue(ClaimTypes.Name);
             return Results.Ok(new { userId = sub, username });
         });
+
+        MapSessionEndpoints(app);
+    }
+
+    // ── Accounts (KAN-20): the active-devices list ─────────────────────────────
+    //
+    // Mapped on `app` rather than on either /auth group, exactly as /auth/me is: these need
+    // the fallback RequireAuthenticatedUser policy (so they cannot sit on the anonymous
+    // group), and they must NOT carry the IP-partitioned auth rate limit — that limit exists
+    // to slow brute force on the anonymous surface, and spending it here would mean someone
+    // who opens Settings twice gets throttled out of their own account management.
+    private static void MapSessionEndpoints(WebApplication app)
+    {
+        app.MapGet("/auth/sessions", async (
+            ClaimsPrincipal principal, IUserSessionService sessions, CancellationToken cancellationToken) =>
+        {
+            if (!TryGetUserId(principal, out var userId))
+            {
+                return Results.Unauthorized();
+            }
+
+            var list = await sessions.ListAsync(userId, TryGetSessionId(principal), cancellationToken);
+            return Results.Ok(list);
+        });
+
+        // The literal route is mapped BEFORE the {sessionId} one. Route precedence already
+        // prefers a literal segment over a parameter, so this is belt and braces — but the
+        // failure it guards against is silent (a Guid parse of "others" failing and answering
+        // 404 to a button that looked like it worked), so the order stays deliberate.
+        app.MapDelete("/auth/sessions/others", async (
+            ClaimsPrincipal principal, IUserSessionService sessions, CancellationToken cancellationToken) =>
+        {
+            if (!TryGetUserId(principal, out var userId))
+            {
+                return Results.Unauthorized();
+            }
+
+            // "Sign out everywhere ELSE". A button that signs you out of the device you are
+            // pressing it on is one people press once and never trust again — and the person
+            // reaching for it is usually worried about a device that is not this one.
+            if (TryGetSessionId(principal) is not Guid current)
+            {
+                // A pre-KAN-20 bearer token: no session row, so there is no "this one" to
+                // exclude and every session really is another device.
+                await sessions.RevokeAllAsync(userId, cancellationToken);
+                return Results.NoContent();
+            }
+
+            await sessions.RevokeOthersAsync(userId, current, cancellationToken);
+            return Results.NoContent();
+        });
+
+        app.MapDelete("/auth/sessions/{sessionId:guid}", async (
+            Guid sessionId, ClaimsPrincipal principal, IUserSessionService sessions, HttpContext http,
+            CancellationToken cancellationToken) =>
+        {
+            if (!TryGetUserId(principal, out var userId))
+            {
+                return Results.Unauthorized();
+            }
+
+            // Ownership lives inside the service's predicate, so a session id belonging to
+            // somebody else is indistinguishable here from one that does not exist.
+            if (!await sessions.RevokeAsync(userId, sessionId, cancellationToken))
+            {
+                return Results.NotFound();
+            }
+
+            // Dropping your OWN current device is allowed, and it is the same act as logging
+            // out, so it has to end the same way — otherwise the row is gone while the browser
+            // keeps presenting cookies for it, and the SPA looks signed in until its next call
+            // fails somewhere unrelated.
+            if (TryGetSessionId(principal) == sessionId)
+            {
+                SessionCookies.Clear(http);
+            }
+
+            return Results.NoContent();
+        });
     }
 
     // The same "sub, falling back to NameIdentifier" read /auth/me above does, lifted out
@@ -162,4 +314,21 @@ public static class AuthEndpoints
             ?? principal.FindFirstValue(ClaimTypes.NameIdentifier);
         return Guid.TryParse(sub, out userId);
     }
+
+    /// <summary>
+    /// The caller's session row id, from the access token's `sid` claim. Null for a token
+    /// issued before KAN-20 — a real state rather than a broken one, so every caller has to
+    /// say what it does about it instead of assuming the claim is there.
+    /// </summary>
+    private static Guid? TryGetSessionId(ClaimsPrincipal principal) =>
+        Guid.TryParse(principal.FindFirstValue(JwtTokenService.SessionIdClaim), out var sessionId)
+            ? sessionId
+            : null;
+
+    /// <summary>
+    /// The request's User-Agent, for the devices list's label. Absent is normal (a script, a
+    /// test) and reads as "Unknown device" rather than as an error.
+    /// </summary>
+    private static string? UserAgent(HttpContext context) =>
+        context.Request.Headers.UserAgent.ToString() is { Length: > 0 } agent ? agent : null;
 }

@@ -1,6 +1,7 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using RecipeApp.Application.Auth;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
 using RecipeApp.Application.Events;
@@ -57,6 +58,7 @@ public class AccountRecoveryService : IAccountRecoveryService
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenService _jwtTokenService;
     private readonly IUserSecurityStateService _securityState;
+    private readonly IUserSessionService _sessions;
     private readonly IMailSender _mail;
     private readonly MailOptions _mailOptions;
     private readonly IAppEventLogger _events;
@@ -67,6 +69,7 @@ public class AccountRecoveryService : IAccountRecoveryService
         IPasswordHasher passwordHasher,
         IJwtTokenService jwtTokenService,
         IUserSecurityStateService securityState,
+        IUserSessionService sessions,
         IMailSender mail,
         MailOptions mailOptions,
         IAppEventLogger events,
@@ -76,6 +79,7 @@ public class AccountRecoveryService : IAccountRecoveryService
         _passwordHasher = passwordHasher;
         _jwtTokenService = jwtTokenService;
         _securityState = securityState;
+        _sessions = sessions;
         _mail = mail;
         _mailOptions = mailOptions;
         _events = events;
@@ -205,7 +209,7 @@ public class AccountRecoveryService : IAccountRecoveryService
     }
 
     public async Task<PasswordResetResult> ResetPasswordAsync(
-        string token, string newPassword, CancellationToken cancellationToken = default)
+        string token, string newPassword, string? userAgent = null, CancellationToken cancellationToken = default)
     {
         var record = await FindTokenAsync(token, AccountTokenPurpose.PasswordReset, cancellationToken);
 
@@ -248,6 +252,13 @@ public class AccountRecoveryService : IAccountRecoveryService
         // bite until the 60-second TTL lapses. Same call AdminService makes after a ban.
         _securityState.Invalidate(user.Id);
 
+        // Accounts (KAN-20): the bump kills the other devices' ACCESS tokens, but each of them
+        // also holds a refresh cookie, and a refresh mints a fresh access token. Without this
+        // delete "every other device is signed out" would last one access-token lifetime and
+        // then quietly undo itself. Runs BEFORE the resetting device's session is opened, so
+        // the one session that survives a reset is the one that performed it.
+        await _sessions.RevokeAllAsync(user.Id, cancellationToken);
+
         _logger.LogInformation("User {UserId} reset their password; sessions revoked.", user.Id);
         await _events.LogAsync(AppEventType.PasswordReset, actorUserId: user.Id);
 
@@ -262,11 +273,13 @@ public class AccountRecoveryService : IAccountRecoveryService
             await _events.LogAsync(AppEventType.MailSendFailed, actorUserId: user.Id, detail: "password-changed");
         }
 
-        // The resetting device gets a session issued AFTER the bump, so the one thing the
-        // reset does not sign out is the person who performed it.
-        var (jwt, expiresAtUtc) = _jwtTokenService.GenerateToken(user);
+        // The resetting device gets a session issued AFTER the bump and after the revoke
+        // above, so the one thing the reset does not sign out is the person who performed it.
+        var session = await _sessions.CreateAsync(user.Id, userAgent, cancellationToken);
+        var (jwt, expiresAtUtc) = _jwtTokenService.GenerateToken(user, session.SessionId);
         return PasswordResetResult.Reset(
-            new AuthResponse(jwt, expiresAtUtc, user.Id, user.Username, user.Role));
+            new AuthResponse(jwt, expiresAtUtc, user.Id, user.Username, user.Role),
+            new SessionTokens(jwt, expiresAtUtc, session.RefreshToken, session.ExpiresAtUtc));
     }
 
     // ── Token mechanics ─────────────────────────────────────────────────────────────
@@ -358,16 +371,11 @@ public class AccountRecoveryService : IAccountRecoveryService
             .FirstOrDefaultAsync(t => t.TokenHash == hash && t.Purpose == purpose, cancellationToken);
     }
 
-    // 32 bytes from the CSPRNG, URL-safe base64 — long enough that guessing is not a strategy
-    // and short enough to survive a mail client's line wrapping.
-    private static string GenerateToken() =>
-        Base64Url(RandomNumberGenerator.GetBytes(32));
+    // Both moved to SecretTokens when KAN-20's refresh tokens became a second caller — same
+    // generation, same digest, one implementation.
+    private static string GenerateToken() => SecretTokens.Generate();
 
-    private static string HashToken(string plaintext) =>
-        Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(plaintext)));
-
-    private static string Base64Url(byte[] bytes) =>
-        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    private static string HashToken(string plaintext) => SecretTokens.Hash(plaintext);
 
     private string BuildLink(string path, string token) =>
         $"{_mailOptions.AppBaseUrl.TrimEnd('/')}{path}?token={Uri.EscapeDataString(token)}";
