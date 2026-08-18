@@ -375,10 +375,20 @@ var app = builder.Build();
 // One line at boot turns all of that into a fact you can read. The SMTP password is
 // deliberately absent: this log is not a private one.
 var mailOptions = app.Services.GetRequiredService<MailOptions>();
+var mailSender = app.Services.GetRequiredService<IMailSender>();
+// The endpoint reported is the SELECTED transport's, not one provider's field: a line saying
+// host=(none) while Resend is happily sending would recreate exactly the confusion this log
+// exists to end.
+var mailEndpoint = mailSender switch
+{
+    ResendMailSender => mailOptions.Resend.BaseUrl,
+    SmtpMailSender => $"{mailOptions.Smtp.Host}:{mailOptions.Smtp.Port}",
+    _ => "(none)",
+};
 app.Logger.LogInformation(
-    "Mail: sender={Sender} host={Host} from={From} appBaseUrl={AppBaseUrl}",
-    app.Services.GetRequiredService<IMailSender>().GetType().Name,
-    string.IsNullOrWhiteSpace(mailOptions.Smtp.Host) ? "(none)" : mailOptions.Smtp.Host,
+    "Mail: sender={Sender} endpoint={Endpoint} from={From} appBaseUrl={AppBaseUrl}",
+    mailSender.GetType().Name,
+    mailEndpoint,
     mailOptions.FromAddress,
     mailOptions.AppBaseUrl);
 

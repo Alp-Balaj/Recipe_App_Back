@@ -20,12 +20,27 @@ public class MailOptions
     public string FromName { get; set; } = "What are we cooking?";
 
     /// <summary>
-    /// The provider selector. Empty (the default) means no provider is configured and the
-    /// logging no-op sender is used, so local development and the tests never deliver a
-    /// message to a real inbox. Set it and the SMTP sender takes over — see
-    /// MailServiceCollectionExtensions.
+    /// The HTTP provider. An API key here selects <see cref="ResendMailSender"/>, and it is
+    /// checked FIRST because it is the transport that works on hosts that block outbound
+    /// SMTP — see MailServiceCollectionExtensions.
+    /// </summary>
+    public ResendOptions Resend { get; set; } = new();
+
+    /// <summary>
+    /// The SMTP provider. Empty (the default) means no SMTP provider is configured. With no
+    /// provider of either kind the logging no-op sender is used, so local development and
+    /// the tests never deliver a message to a real inbox.
     /// </summary>
     public SmtpOptions Smtp { get; set; } = new();
+
+    public class ResendOptions
+    {
+        /// <summary>The API key. Secret: it arrives as an env var, never from appsettings.</summary>
+        public string ApiKey { get; set; } = string.Empty;
+
+        /// <summary>Overridable so a test or a proxy can point this somewhere else.</summary>
+        public string BaseUrl { get; set; } = "https://api.resend.com/";
+    }
 
     public class SmtpOptions
     {

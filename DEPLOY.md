@@ -92,7 +92,8 @@ jobs:
 | `ImageStorage__R2__PublicBaseUrl` | `https://pub-….r2.dev` or the custom domain |
 | `Mail__AppBaseUrl` | the deployed origin, e.g. `https://<service>.up.railway.app` — where the links in verification / reset emails point |
 | `Mail__FromAddress` | an address the sending domain is authorised to send as |
-| `Mail__Smtp__Host` | SMTP host of the transactional mail provider |
+| `Mail__Resend__ApiKey` | Resend API key — **use this on Railway**, see below |
+| `Mail__Smtp__Host` | SMTP host, if sending over SMTP instead (blocked on Railway below Pro) |
 | `Mail__Smtp__Port` | usually `587` (STARTTLS) |
 | `Mail__Smtp__Username` | provider SMTP username |
 | `Mail__Smtp__Password` | provider SMTP password / API key |
@@ -101,13 +102,30 @@ jobs:
 Setting `ImageStorage__R2__Bucket` is what flips the app from local-disk to R2 storage; the
 app fails fast at startup naming any of the other four R2 keys that is missing.
 
-`Mail__Smtp__Host` is the equivalent switch for mail (KAN-19): set it and the app sends for
-real, leave it unset and it uses a logging no-op sender that delivers nothing. **Account
-recovery is inert without it** — email verification and password reset both appear to work
-and no message ever arrives, with the link written to the application log instead. That is
-the right default for local development and CI and the wrong one for production, so it is
-the first thing to check if a user reports never receiving a reset email. Deliverability
-itself — sending domain, SPF/DKIM, bounce handling — is ops work outside this file.
+Mail (KAN-19) has the equivalent switch, and it is a three-way one. `Mail__Resend__ApiKey`
+selects the HTTP sender; failing that `Mail__Smtp__Host` selects the SMTP sender; failing
+both, a logging no-op sender delivers nothing. **Account recovery is inert on the no-op
+sender** — verification and reset both appear to work and no message ever arrives, with the
+link written to the application log instead. That is the right default for local development
+and CI and the wrong one for production.
+
+**On Railway, use the API key, not SMTP.** Railway blocks outbound SMTP ports (25, 465, 587,
+2525) on every plan below Pro, and a blocked port is not refused but blackholed — so SMTP
+does not fail fast, it hangs for `SmtpClient`'s full 100-second default timeout and then
+reports what looks like a provider outage. The symptom is a `POST /auth/password-reset/request`
+that takes 1.7 minutes and still returns its normal empty 202, because that endpoint answers
+identically however the send went. `Mail__Resend__ApiKey` sends over HTTPS on 443 instead,
+which nothing blocks.
+
+Every boot logs one line — `Mail: sender=… endpoint=… from=… appBaseUrl=…` — naming the
+sender that was actually selected and what it resolved to. Read it first when a user reports
+never receiving a reset email; it distinguishes an unset variable from a value that fell
+through to the `appsettings.json` defaults, which no variables list can show you.
+
+Deliverability itself — sending domain, SPF/DKIM, bounce handling — is ops work outside this
+file. Note that until a domain is verified with the provider, a sandbox From address
+typically delivers only to the account holder's own address, so recovery works for the
+developer and for nobody else.
 
 ## 2. Local production rehearsal
 
