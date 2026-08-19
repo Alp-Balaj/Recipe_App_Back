@@ -6,6 +6,7 @@ using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
 using RecipeApp.Domain.Entities;
 using RecipeApp.Infrastructure.Auth;
+using RecipeApp.Infrastructure.Mail;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.UnitTests;
@@ -93,8 +94,28 @@ public class AuthServiceLoginTests
     // the thing every login depends on was broken — and UserSession maps on InMemory fine (no
     // jsonb), so there is nothing to gain by faking it.
     private static AuthService NewService(ApplicationDbContext db, CountingPasswordHasher hasher) =>
-        new(db, hasher, new FakeJwtTokenService(), NewSessions(db), new ConfigurationBuilder().Build(),
-            new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
+        NewService(db, hasher, new ConfigurationBuilder().Build());
+
+    // Accounts (KAN-21): a REAL SecondFactorService and a REAL SignInBackoff, for the same
+    // reason KAN-20 used a real session service — login now asks "is this account enrolled?"
+    // and "is this identifier waiting out a delay?" on every call, and stubbing either would
+    // let this class keep passing while a question every sign-in depends on was answered
+    // wrongly. Both run happily on the in-memory provider.
+    //
+    // A FRESH backoff per service, because it is the one thing here with memory: sharing one
+    // would let a test that deliberately fails four passwords throttle its neighbours.
+    private static AuthService NewService(
+        ApplicationDbContext db, CountingPasswordHasher hasher, IConfiguration configuration)
+    {
+        var sessions = NewSessions(db);
+        var secondFactor = new SecondFactorService(
+            db, new FakeJwtTokenService(), sessions, new SignInBackoff(), new NoOpMailSender(),
+            new MailOptions(), new NoOpAppEventLogger(), NullLogger<SecondFactorService>.Instance);
+
+        return new AuthService(
+            db, hasher, new FakeJwtTokenService(), sessions, secondFactor, new SignInBackoff(),
+            configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
+    }
 
     private static UserSessionService NewSessions(ApplicationDbContext db) =>
         new(db, new MemoryCache(new MemoryCacheOptions()));
@@ -211,7 +232,7 @@ public class AuthServiceLoginTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:Emails:0"] = "KNOWN@example.com" })
             .Build();
-        var service = new AuthService(db, hasher, new FakeJwtTokenService(), NewSessions(db), configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
+        var service = NewService(db, hasher, configuration);
 
         var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
 
@@ -230,7 +251,7 @@ public class AuthServiceLoginTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:Emails:0"] = "someone-else@example.com" })
             .Build();
-        var service = new AuthService(db, hasher, new FakeJwtTokenService(), NewSessions(db), configuration, new NoOpAppEventLogger(), NullLogger<AuthService>.Instance);
+        var service = NewService(db, hasher, configuration);
 
         var result = await service.LoginAsync(new LoginRequest("known", "CorrectPassword1"));
 

@@ -130,6 +130,16 @@ public static class AdminEndpoints
             return ToActionResult(result.Outcome, Results.NoContent);
         });
 
+        // Accounts (KAN-21): the recovery ladder's second rung. Sits with ban/suspend rather
+        // than on the account surface because it is an act performed ON someone by someone
+        // else, and the audit row is what makes that acceptable.
+        group.MapPost("/users/{id:guid}/second-factor/reset", async (Guid id, AdminActionRequest request, IAdminService admin, ClaimsPrincipal user, CancellationToken cancellationToken) =>
+        {
+            var result = await admin.ResetSecondFactorAsync(id, GetUserId(user), request.Reason, cancellationToken);
+            return ToActionResult(result.Outcome, Results.NoContent);
+        })
+        .AddEndpointFilter<ValidationFilter<AdminActionRequest>>();
+
         group.MapPost("/users/{id:guid}/promote", async (Guid id, IAdminService admin, ClaimsPrincipal user, CancellationToken cancellationToken) =>
         {
             var result = await admin.PromoteUserAsync(id, GetUserId(user), cancellationToken);

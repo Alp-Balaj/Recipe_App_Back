@@ -143,9 +143,16 @@ public class AccountRecoveryServiceTests
         // uses one — a reset now revokes sessions and opens a new one, and both are assertable
         // here only if the rows are real.
         var sessions = new UserSessionService(db, new MemoryCache(new MemoryCacheOptions()));
+        // Accounts (KAN-21): a real SecondFactorService, same reasoning as the real session
+        // service above. A reset now ASKS whether the account is enrolled, because an enrolled
+        // one must be challenged rather than signed in — see ResetPasswordAsync — and a stub
+        // answering "no" would hide the day that stopped working.
+        var secondFactor = new SecondFactorService(
+            db, new StubJwtTokenService(), sessions, new SignInBackoff(), mail, new MailOptions(),
+            new NoOpAppEventLogger(), NullLogger<SecondFactorService>.Instance);
         var service = new AccountRecoveryService(
-            db, hasher, new StubJwtTokenService(), securityState, sessions, mail, new MailOptions(),
-            new NoOpAppEventLogger(), NullLogger<AccountRecoveryService>.Instance);
+            db, hasher, new StubJwtTokenService(), securityState, sessions, secondFactor, mail,
+            new MailOptions(), new NoOpAppEventLogger(), NullLogger<AccountRecoveryService>.Instance);
 
         return new Harness(service, db, mail, securityState, sessions, user);
     }

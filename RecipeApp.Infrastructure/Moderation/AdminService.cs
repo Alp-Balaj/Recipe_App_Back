@@ -9,6 +9,7 @@ using RecipeApp.Application.Social.Dtos;
 using RecipeApp.Domain.Entities.Moderation;
 using RecipeApp.Domain.Enums;
 using RecipeApp.Domain.Services;
+using RecipeApp.Infrastructure.Auth;
 using RecipeApp.Infrastructure.Persistence;
 
 namespace RecipeApp.Infrastructure.Moderation;
@@ -471,6 +472,62 @@ public class AdminService : IAdminService
         _securityState.Invalidate(userId);
 
         _logger.LogWarning("Admin {AdminId} demoted admin {UserId} to User.", adminUserId, userId);
+        return ModerationResult<bool>.Success(true);
+    }
+
+    // Accounts (KAN-21): the recovery ladder's second rung.
+    //
+    // Instant, where the emailed reset waits 48 hours, and the difference is entirely about
+    // WHO is asking. The emailed path proves only that someone can read a mailbox, which is
+    // not enough on its own — hence the wait. This path has a human on the other end who has
+    // satisfied themselves about who they are talking to, which is the strongest of the three
+    // proofs and the only one that can be given immediately.
+    //
+    // Unlike ban and suspend, an ADMIN is not exempt from this. Those two refuse an admin
+    // target because moderating a colleague through this surface is the wrong shape; helping
+    // one back into their own account is exactly the right one — and once ADR-0007's gate
+    // lands, an admin locked out of their authenticator is locked out of /admin itself, so
+    // refusing here would mean the last admin out turns the lights off permanently.
+    public async Task<ModerationResult<bool>> ResetSecondFactorAsync(
+        Guid userId, Guid adminUserId, string? reason, CancellationToken cancellationToken = default)
+    {
+        var user = await _db.Users.SingleOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        if (user is null)
+        {
+            return ModerationResult<bool>.NotFound();
+        }
+
+        var enrolled = await _db.UserSecondFactors
+            .AnyAsync(f => f.UserId == userId && f.EnrolledAt != null, cancellationToken);
+        if (!enrolled)
+        {
+            return ModerationResult<bool>.Conflict();
+        }
+
+        await SecondFactorService.RemoveFactorRowsAsync(_db, userId, cancellationToken);
+
+        // Every session goes, and the version bump kills the access tokens already in flight —
+        // the same pair ban and suspend use. The account's security just changed materially,
+        // and a device signed in from before it must not ride through.
+        _db.UserSessions.RemoveRange(
+            await _db.UserSessions.Where(s => s.UserId == userId).ToListAsync(cancellationToken));
+        user.TokenVersion++;
+
+        // A pending emailed countdown is cancelled rather than deleted: the row is the record
+        // that somebody asked, which stays worth having even once it is moot.
+        var pending = await _db.SecondFactorResetRequests
+            .Where(r => r.UserId == userId && r.CancelledAt == null && r.CompletedAt == null)
+            .ToListAsync(cancellationToken);
+        foreach (var request in pending)
+        {
+            request.CancelledAt = DateTime.UtcNow;
+        }
+
+        Append(adminUserId, AuditAction.SecondFactorReset, userId, reason);
+        await _db.SaveChangesAsync(cancellationToken);
+        _securityState.Invalidate(userId);
+
+        _logger.LogWarning("Admin {AdminId} reset the second factor for user {UserId}.", adminUserId, userId);
         return ModerationResult<bool>.Success(true);
     }
 

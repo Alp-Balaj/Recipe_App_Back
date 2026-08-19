@@ -16,4 +16,20 @@ public record AuthResponse(string Token, DateTime ExpiresAtUtc, Guid UserId, str
 // makes. Appended with a default so existing positional constructions keep compiling.
 // It is the negation of User.OnboardingCompletedAt, never "both preference lists are
 // empty": a user whose honest answer was "no preferences" has finished onboarding.
-public record MeResponse(Guid UserId, string Username, UserRole Role, bool NeedsOnboarding = false);
+//
+// Accounts (KAN-21): SecondFactorResetEffectiveAtUtc rides along for a third reason of the
+// same kind, and it is the mechanism behind "every live session is warned". An emailed
+// second-factor reset is a 48-hour countdown somebody may have started against this account,
+// and the person who can stop it is whoever is signed in — so the warning has to reach every
+// session rather than one settings screen nobody has open. /auth/me is read on every boot and
+// /auth/refresh answers with this same shape, so a countdown started now is visible to every
+// live session within one access-token lifetime, without a poll or a socket.
+//
+// Appended with a default, like NeedsOnboarding before it, so existing positional
+// constructions keep compiling.
+public record MeResponse(
+    Guid UserId,
+    string Username,
+    UserRole Role,
+    bool NeedsOnboarding = false,
+    DateTime? SecondFactorResetEffectiveAtUtc = null);

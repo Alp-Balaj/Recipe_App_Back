@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using RecipeApp.API.Filters;
+using RecipeApp.Application.Auth;
 using RecipeApp.Application.Auth.Abstractions;
 using RecipeApp.Application.Auth.Dtos;
 using RecipeApp.Infrastructure.Auth;
@@ -33,17 +34,39 @@ public static class AuthEndpoints
         })
         .AddEndpointFilter<ValidationFilter<RegisterRequest>>();
 
+        // Accounts (KAN-21): sign-in is now TWO calls for an enrolled account, and this is the
+        // first of them. The response is a UNION — an AuthResponse when a session was opened,
+        // or a SecondFactorChallengeResponse (carrying `challengeRequired: true` as its
+        // discriminator) when one was not. Both are 200, because both are the endpoint working
+        // as designed; a typed client branches on the discriminator.
+        //
+        // The 429 branch is ADR-0008's escalating delay. It is per-ACCOUNT and orthogonal to
+        // the IP-partitioned limit this group already carries — that one cannot see a thousand
+        // addresses guessing at one account, and this one cannot see one address guessing at a
+        // thousand accounts.
         group.MapPost("/login", async (
             LoginRequest request, IAuthService authService, HttpContext http, CancellationToken cancellationToken) =>
         {
             var result = await authService.LoginAsync(request, UserAgent(http), cancellationToken);
-            if (!result.Succeeded)
-            {
-                return Results.Unauthorized();
-            }
 
-            SessionCookies.Write(http, result.Tokens!);
-            return Results.Ok(result.Response);
+            switch (result.Outcome)
+            {
+                case AuthOutcome.Success:
+                    SessionCookies.Write(http, result.Tokens!);
+                    return Results.Ok(result.Response);
+
+                case AuthOutcome.ChallengeRequired:
+                    // No cookies. The password bought a challenge, not a session, and writing
+                    // anything to the cookie jar here would be the bug that makes the second
+                    // factor optional.
+                    return Results.Ok(result.Challenge);
+
+                case AuthOutcome.Throttled:
+                    return SecondFactorEndpoints.RetryLater(http, result.RetryAfter!.Value);
+
+                default:
+                    return Results.Unauthorized();
+            }
         });
 
         // ── Accounts (KAN-20): the session lifecycle ───────────────────────────────
@@ -196,9 +219,16 @@ public static class AuthEndpoints
             }
 
             // Same 410-vs-400 split as the verification confirm above, for the same reason.
+            //
+            // Accounts (KAN-21) added the middle case, and it is the one worth reading twice:
+            // an ENROLLED account is NOT signed in by a reset. The password changed, but a
+            // reset link arrives by email, and if answering one were enough to get in then the
+            // mailbox alone would open the account — the exact collapse the second factor
+            // exists to prevent. The caller answers a challenge instead, and no cookie is set.
             return result.Outcome switch
             {
                 PasswordResetOutcome.Reset => Results.Ok(result.Response),
+                PasswordResetOutcome.ChallengeRequired => Results.Ok(result.Challenge),
                 PasswordResetOutcome.Expired
                     => Results.Json(new { error = "expired" }, statusCode: StatusCodes.Status410Gone),
                 _ => Results.BadRequest(new { error = "invalid" }),
@@ -227,6 +257,7 @@ public static class AuthEndpoints
         });
 
         MapSessionEndpoints(app);
+        app.MapSecondFactorEndpoints();
     }
 
     // ── Accounts (KAN-20): the active-devices list ─────────────────────────────

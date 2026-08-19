@@ -94,6 +94,18 @@ builder.Services.AddHostedService<AccountTokenPruneWorker>();
 // UserSecurityStateService's does.
 builder.Services.AddScoped<IUserSessionService, UserSessionService>();
 builder.Services.AddHostedService<UserSessionPruneWorker>();
+
+// Accounts (KAN-21): the second factor, and the failure backoff behind ADR-0008.
+//
+// The backoff is a SINGLETON and it has to be. Its whole job is to remember failures ACROSS
+// requests, and a scoped instance would be a fresh empty dictionary on every attempt — a
+// throttle that never throttles, failing silently and passing every test that only makes one
+// call. ADR-0009 records that this memory is in-process and forgotten on restart: accepted
+// for a single Railway service, and one of the things that makes a second instance
+// non-trivial.
+builder.Services.AddSingleton<ISignInBackoff, SignInBackoff>();
+builder.Services.AddScoped<ISecondFactorService, SecondFactorService>();
+builder.Services.AddHostedService<SecondFactorWorker>();
 builder.Services.AddScoped<IRecipeService, RecipeService>();
 // The ingredient catalogue (stream G, slice G2 — D8/D9).
 builder.Services.AddScoped<IIngredientResolver, IngredientResolver>();

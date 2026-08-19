@@ -3,9 +3,9 @@ using RecipeApp.Application.Mail.Abstractions;
 
 namespace RecipeApp.Infrastructure.Mail;
 
-// The three messages this phase sends (Accounts, KAN-19). Composition lives apart from
-// sending so the wording is one readable file rather than string literals scattered through
-// a service.
+// The messages the Accounts phases send (KAN-19, extended by KAN-21). Composition lives apart
+// from sending so the wording is one readable file rather than string literals scattered
+// through a service.
 //
 // Every message follows the same three rules, and they are the rules that let a reader tell
 // a genuine message from a phishing attempt:
@@ -60,6 +60,76 @@ internal static class AccountMailMessages
             actionLabel: null,
             link: null,
             closing: "If this was you, there is nothing to do. If it was not, reset your password again straight away — that will sign out whoever did this.");
+
+    // ── Accounts (KAN-21): the second factor ────────────────────────────────────
+    //
+    // Three of the four below are sent AFTER the fact and carry no link at all. That is not
+    // an oversight: a message about someone else possibly taking your account is exactly the
+    // message an attacker would love to be able to imitate, and one that never asks the
+    // reader to click anything is one a reader can learn to trust.
+
+    public static OutboundEmail SecondFactorEnrolled(string toAddress) =>
+        Compose(
+            toAddress,
+            subject: $"Two-step sign-in is on for your {AppName} account",
+            heading: "Two-step sign-in is on",
+            lines:
+            [
+                $"An authenticator app was set up for your {AppName} account, and every other signed-in device has been signed out.",
+                "Keep the recovery codes you were shown somewhere safe. They are the fastest way back in if you lose your phone, and they are the only one that does not involve waiting.",
+            ],
+            actionLabel: null,
+            link: null,
+            closing: "If this was not you, whoever did it had your password — change it straight away, and use a recovery code to sign in if you need to.");
+
+    public static OutboundEmail SecondFactorRemoved(string toAddress) =>
+        Compose(
+            toAddress,
+            subject: $"Two-step sign-in is off for your {AppName} account",
+            heading: "Two-step sign-in is off",
+            lines:
+            [
+                $"The authenticator app on your {AppName} account has been removed. Your password is now the only thing standing in front of it.",
+                "You can set up a new authenticator at any time from Settings → Security.",
+            ],
+            actionLabel: null,
+            link: null,
+            closing: "If you did not do this, change your password now and set two-step sign-in back up.");
+
+    // The one link in this group. Clicking it does NOT remove anything — it starts a clock,
+    // which the message has to say plainly or the reader will assume they are done.
+    public static OutboundEmail SecondFactorResetLink(
+        string toAddress, string link, TimeSpan lifetime, TimeSpan coolingOff) =>
+        Compose(
+            toAddress,
+            subject: $"Turning off two-step sign-in for {AppName}",
+            heading: "Turn off two-step sign-in",
+            lines:
+            [
+                $"Someone asked to turn off two-step sign-in for the {AppName} account registered to this address, because they cannot use their authenticator.",
+                $"The link below works once and expires in {Describe(lifetime)}. It does not turn anything off by itself — it starts a {(int)coolingOff.TotalHours}-hour wait, and we will tell you when it does.",
+                "If you still have a recovery code, use that instead. It works immediately, and there is no wait.",
+            ],
+            actionLabel: "Start the wait",
+            link: link,
+            closing: "If you did not ask for this, no action is needed — this link will expire on its own and nothing will change.");
+
+    // The message the whole 48-hour design exists to make possible: it turns a silent takeover
+    // into two days of warning.
+    public static OutboundEmail SecondFactorResetScheduled(string toAddress, DateTime effectiveAtUtc) =>
+        Compose(
+            toAddress,
+            subject: $"Two-step sign-in will be turned off for your {AppName} account",
+            heading: "Two-step sign-in will be turned off",
+            lines:
+            [
+                $"Someone confirmed a request to turn off two-step sign-in for your {AppName} account. It stays on until {effectiveAtUtc:HH:mm} UTC on {effectiveAtUtc:d MMMM yyyy}.",
+                "If that was you, there is nothing to do — sign in with your password once the wait is over.",
+                "If it was NOT you, sign in now with your authenticator or a recovery code and cancel it from Settings → Security. Cancelling takes one click and there is no limit on how often you can do it.",
+            ],
+            actionLabel: null,
+            link: null,
+            closing: "We are deliberately slow about this, because anyone who can read your email should not be able to take your account in a single step.");
 
     private static OutboundEmail Compose(
         string toAddress,

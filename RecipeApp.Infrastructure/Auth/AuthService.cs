@@ -17,6 +17,8 @@ public class AuthService : IAuthService
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenService _jwtTokenService;
     private readonly IUserSessionService _sessions;
+    private readonly ISecondFactorService _secondFactor;
+    private readonly ISignInBackoff _backoff;
     private readonly IConfiguration _configuration;
     private readonly IAppEventLogger _events;
     private readonly ILogger<AuthService> _logger;
@@ -26,6 +28,8 @@ public class AuthService : IAuthService
         IPasswordHasher passwordHasher,
         IJwtTokenService jwtTokenService,
         IUserSessionService sessions,
+        ISecondFactorService secondFactor,
+        ISignInBackoff backoff,
         IConfiguration configuration,
         IAppEventLogger events,
         ILogger<AuthService> logger)
@@ -34,6 +38,8 @@ public class AuthService : IAuthService
         _passwordHasher = passwordHasher;
         _jwtTokenService = jwtTokenService;
         _sessions = sessions;
+        _secondFactor = secondFactor;
+        _backoff = backoff;
         _configuration = configuration;
         _events = events;
         _logger = logger;
@@ -77,15 +83,44 @@ public class AuthService : IAuthService
     public async Task<AuthResult> LoginAsync(
         LoginRequest request, string? userAgent = null, CancellationToken cancellationToken = default)
     {
+        // Accounts (KAN-21, ADR-0008): the per-account throttle. It is asked TWICE, under two
+        // different keys, and the split is deliberate.
+        //
+        // First by the submitted string, before anything is looked up. That is what makes an
+        // unknown identifier accrue failures like a real one — if only real accounts did, a
+        // 429 would mean "this account exists" and a 401 would mean "it does not", handing
+        // back exactly the answer the dummy-hash branch below spends work to withhold.
+        //
+        // Then, once the account is known, by its ID (see below). An account has two names
+        // that both sign in, and counting per string would give an attacker two free-failure
+        // allowances and two curves per victim for the cost of alternating between them.
+        var identifierKey = SignInBackoff.KeyForIdentifier(request.UsernameOrEmail);
+        if (_backoff.RetryAfter(identifierKey) is TimeSpan identifierWait)
+        {
+            _logger.LogWarning("Login attempt throttled.");
+            return AuthResult.Throttled(identifierWait);
+        }
+
         var user = await _db.Users.FirstOrDefaultAsync(
             u => u.Username == request.UsernameOrEmail || u.Email == request.UsernameOrEmail,
             cancellationToken);
+
+        // Known accounts are counted by id, unknown ones by the string that was typed. Both
+        // reach the same 429 after the same number of failures, so the two are still
+        // indistinguishable from outside.
+        var backoffKey = user is null ? identifierKey : SignInBackoff.KeyForPassword(user.Id);
+        if (user is not null && _backoff.RetryAfter(backoffKey) is TimeSpan accountWait)
+        {
+            _logger.LogWarning("Login attempt throttled.");
+            return AuthResult.Throttled(accountWait);
+        }
 
         if (user is null)
         {
             _dummyPasswordHash ??= _passwordHasher.HashPassword(DummyUser, Guid.NewGuid().ToString("N"));
             _passwordHasher.VerifyPassword(DummyUser, _dummyPasswordHash, request.Password);
             _logger.LogWarning("Failed login attempt.");
+            _backoff.RecordFailure(backoffKey);
             await _events.LogAsync(AppEventType.UserLoginFailed, detail: "unknown-account");
             return AuthResult.Failure("Invalid username/email or password.");
         }
@@ -93,6 +128,7 @@ public class AuthService : IAuthService
         if (!_passwordHasher.VerifyPassword(user, user.PasswordHash, request.Password))
         {
             _logger.LogWarning("Failed login attempt.");
+            _backoff.RecordFailure(backoffKey);
             await _events.LogAsync(AppEventType.UserLoginFailed, actorUserId: user.Id, detail: "bad-password");
             return AuthResult.Failure("Invalid username/email or password.");
         }
@@ -124,6 +160,21 @@ public class AuthService : IAuthService
             _logger.LogInformation("User {UserId} promoted to Admin via Admin:Emails.", user.Id);
         }
 
+        // The password was right, so the password curve has done its job and is forgotten.
+        // The CODE curve below is a separate memory: one person having one bad minute should
+        // not find their two mistakes compounding into one long wait.
+        _backoff.Clear(backoffKey);
+
+        // Accounts (KAN-21): the second call. An enrolled account gets a challenge and NO
+        // session — the password alone buys nothing from here on, and the client never has to
+        // hold the password across the code prompt because it does not need it again.
+        if (await _secondFactor.IsEnrolledAsync(user.Id, cancellationToken))
+        {
+            _logger.LogInformation("User {UserId} passed the password; a challenge was raised.", user.Id);
+            return AuthResult.ChallengeRequired(
+                await _secondFactor.RaiseChallengeAsync(user.Id, userAgent, cancellationToken));
+        }
+
         _logger.LogInformation("User {UserId} logged in.", user.Id);
         return await SignInAsync(user, userAgent, cancellationToken);
     }
@@ -140,9 +191,21 @@ public class AuthService : IAuthService
 
     public async Task<MeResponse?> GetMeAsync(Guid userId, CancellationToken cancellationToken = default)
     {
+        // Accounts (KAN-21): the pending-reset warning is a LEFT JOIN onto the identity read
+        // rather than a second round trip, because it rides on the one call every boot already
+        // makes and must not make that call twice as expensive. The subquery is a single
+        // indexed lookup on a table that is empty for essentially every account.
         return await _db.Users
             .Where(u => u.Id == userId)
-            .Select(u => new MeResponse(u.Id, u.Username, u.Role, u.OnboardingCompletedAt == null))
+            .Select(u => new MeResponse(
+                u.Id,
+                u.Username,
+                u.Role,
+                u.OnboardingCompletedAt == null,
+                _db.SecondFactorResetRequests
+                    .Where(r => r.UserId == u.Id && r.CancelledAt == null && r.CompletedAt == null)
+                    .Select(r => (DateTime?)r.EffectiveAtUtc)
+                    .FirstOrDefault()))
             .SingleOrDefaultAsync(cancellationToken);
     }
 
@@ -197,7 +260,11 @@ public class AuthService : IAuthService
         var tokens = new SessionTokens(
             accessToken, accessExpiresAtUtc, rotated.RefreshToken, rotated.ExpiresAtUtc);
 
-        var me = new MeResponse(user.Id, user.Username, user.Role, user.OnboardingCompletedAt == null);
+        // Read through GetMeAsync rather than composed here, so the pending-reset warning
+        // KAN-21 added cannot be present on one identity path and missing on the other — a
+        // refresh is how a long-open tab learns anything new about its own account.
+        var me = await GetMeAsync(user.Id, cancellationToken)
+            ?? new MeResponse(user.Id, user.Username, user.Role, user.OnboardingCompletedAt == null);
         return new SessionRenewal(tokens, me);
     }
 }

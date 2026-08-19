@@ -44,28 +44,52 @@ public class PasswordResetResult
     public AuthResponse? Response { get; }
 
     /// <summary>
+    /// Accounts (KAN-21): non-null exactly when the outcome is
+    /// <see cref="PasswordResetOutcome.ChallengeRequired"/> — an ENROLLED account, which a
+    /// password reset must not sign in on its own.
+    /// </summary>
+    public SecondFactorChallengeResponse? Challenge { get; }
+
+    /// <summary>
     /// Accounts (KAN-20): the session the reset opened for the resetting device, for the
     /// endpoint to set as cookies. Non-null exactly when the outcome is Reset.
     /// </summary>
     public SessionTokens? Tokens { get; }
 
-    private PasswordResetResult(PasswordResetOutcome outcome, AuthResponse? response, SessionTokens? tokens)
+    private PasswordResetResult(
+        PasswordResetOutcome outcome, AuthResponse? response, SessionTokens? tokens,
+        SecondFactorChallengeResponse? challenge)
     {
         Outcome = outcome;
         Response = response;
         Tokens = tokens;
+        Challenge = challenge;
     }
 
     public static PasswordResetResult Reset(AuthResponse response, SessionTokens tokens) =>
-        new(PasswordResetOutcome.Reset, response, tokens);
+        new(PasswordResetOutcome.Reset, response, tokens, null);
 
-    public static PasswordResetResult Expired() => new(PasswordResetOutcome.Expired, null, null);
-    public static PasswordResetResult Invalid() => new(PasswordResetOutcome.Invalid, null, null);
+    public static PasswordResetResult ChallengeRequired(SecondFactorChallengeResponse challenge) =>
+        new(PasswordResetOutcome.ChallengeRequired, null, null, challenge);
+
+    public static PasswordResetResult Expired() => new(PasswordResetOutcome.Expired, null, null, null);
+    public static PasswordResetResult Invalid() => new(PasswordResetOutcome.Invalid, null, null, null);
 }
 
 public enum PasswordResetOutcome
 {
+    /// <summary>The password changed and the resetting device is signed in.</summary>
     Reset,
+
+    /// <summary>
+    /// Accounts (KAN-21): the password changed, and the account is ENROLLED, so it is not
+    /// signed in. This is the case that keeps the second factor from collapsing into the
+    /// first — a reset link is delivered by email, and if answering one were enough to get in,
+    /// the mailbox would be the whole account again. The caller answers a challenge, exactly
+    /// as they would have after typing the new password on the sign-in screen.
+    /// </summary>
+    ChallengeRequired,
+
     Expired,
     Invalid,
 }

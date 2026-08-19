@@ -38,27 +38,18 @@ public class AccountRecoveryService : IAccountRecoveryService
 
     /// <summary>
     /// How soon after issuing a link this service will issue another of the same purpose to
-    /// the same account.
-    ///
-    /// This is a PER-ACCOUNT limit and it exists because the IP-partitioned /auth rate limit
-    /// cannot do this job. That limit bounds how often one CLIENT may call the endpoint; the
-    /// thing being protected here is one INBOX and one sending reputation, and neither of
-    /// those cares which address the requests came from. Without this, anyone willing to
-    /// change IP can send a person unlimited mail from us, and every message is one the
-    /// recipient did not ask for and we did ask them to trust.
-    ///
-    /// A minute is short enough that a user who genuinely did not receive the first message
-    /// is not made to wait, and long enough that a script cannot make a mailbox unusable.
-    /// Hitting it is silent — the endpoint answers exactly as it does on the sending path,
-    /// so this cannot be used to probe whether an address has an account either.
+    /// the same account. The rule and its reasoning moved to AccountTokenStore when KAN-21's
+    /// second-factor reset became a third caller; this alias stays because it is the name the
+    /// tests reach for and it reads better at the call sites here.
     /// </summary>
-    public static readonly TimeSpan ResendCooldown = TimeSpan.FromMinutes(1);
+    public static TimeSpan ResendCooldown => AccountTokenStore.ResendCooldown;
 
     private readonly ApplicationDbContext _db;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenService _jwtTokenService;
     private readonly IUserSecurityStateService _securityState;
     private readonly IUserSessionService _sessions;
+    private readonly ISecondFactorService _secondFactor;
     private readonly IMailSender _mail;
     private readonly MailOptions _mailOptions;
     private readonly IAppEventLogger _events;
@@ -70,6 +61,7 @@ public class AccountRecoveryService : IAccountRecoveryService
         IJwtTokenService jwtTokenService,
         IUserSecurityStateService securityState,
         IUserSessionService sessions,
+        ISecondFactorService secondFactor,
         IMailSender mail,
         MailOptions mailOptions,
         IAppEventLogger events,
@@ -80,6 +72,7 @@ public class AccountRecoveryService : IAccountRecoveryService
         _jwtTokenService = jwtTokenService;
         _securityState = securityState;
         _sessions = sessions;
+        _secondFactor = secondFactor;
         _mail = mail;
         _mailOptions = mailOptions;
         _events = events;
@@ -187,7 +180,7 @@ public class AccountRecoveryService : IAccountRecoveryService
             // makes that cost identical on a miss. That is deliberately not built here — the
             // responses are indistinguishable, and an attacker measuring provider latency
             // through the internet is measuring mostly noise.
-            GenerateToken();
+            SecretTokens.Generate();
             _logger.LogInformation("Password reset requested for an address with no account.");
             return;
         }
@@ -273,6 +266,24 @@ public class AccountRecoveryService : IAccountRecoveryService
             await _events.LogAsync(AppEventType.MailSendFailed, actorUserId: user.Id, detail: "password-changed");
         }
 
+        // Accounts (KAN-21): an ENROLLED account is NOT signed in by a reset. A reset link
+        // arrives by email, so treating one as proof of identity would mean the mailbox alone
+        // opens the account — which is exactly the collapse the second factor exists to
+        // prevent, and exactly why the emailed way to REMOVE the factor waits 48 hours. The
+        // password change stands (it is the thing that was asked for); the caller then answers
+        // a challenge, as they would have on the sign-in screen.
+        //
+        // Any pending second-factor reset is deliberately left where it is. Changing the
+        // password neither shortens nor cancels the countdown: both run through the same
+        // mailbox, so letting one touch the other would hand that mailbox the whole account
+        // in a single step.
+        if (await _secondFactor.IsEnrolledAsync(user.Id, cancellationToken))
+        {
+            _logger.LogInformation("User {UserId} reset their password; a challenge was raised.", user.Id);
+            return PasswordResetResult.ChallengeRequired(
+                await _secondFactor.RaiseChallengeAsync(user.Id, userAgent, cancellationToken));
+        }
+
         // The resetting device gets a session issued AFTER the bump and after the revoke
         // above, so the one thing the reset does not sign out is the person who performed it.
         var session = await _sessions.CreateAsync(user.Id, userAgent, cancellationToken);
@@ -285,53 +296,14 @@ public class AccountRecoveryService : IAccountRecoveryService
     // ── Token mechanics ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Issue a token of <paramref name="purpose"/> for a user, invalidating any outstanding
-    /// one of the same purpose. Returns the plaintext (for the message) and the persisted row.
+    /// Issue a token of <paramref name="purpose"/> for a user. The mechanics — the
+    /// invalidate-outstanding delete, the digest, the resend cooldown — live in
+    /// AccountTokenStore, so this service and the second-factor reset cannot drift apart on
+    /// them. Null means the cooldown suppressed it; see the store.
     /// </summary>
-    private async Task<(string Plaintext, AccountToken Token)?> IssueTokenAsync(
-        Guid userId, AccountTokenPurpose purpose, TimeSpan lifetime, CancellationToken cancellationToken)
-    {
-        // Only the newest link works. Deleted rather than marked spent: a spent row means
-        // "this link was used", and a superseded link was not — conflating them would make a
-        // superseded verification link answer "already verified" to someone who is not.
-        //
-        // A TRACKED delete, not ExecuteDelete, and that is the right call twice over: it
-        // shares one SaveChanges with the insert below, so there is no window in which the
-        // user has no live link at all, and it keeps the whole issue path runnable on the
-        // in-memory provider the service-level tests use. The set is at most one row.
-        var outstanding = await _db.AccountTokens
-            .Where(t => t.UserId == userId && t.Purpose == purpose && t.ConsumedAt == null)
-            .ToListAsync(cancellationToken);
-
-        // The per-account send limit (see ResendCooldown). If the live link is newer than the
-        // cooldown, nothing is issued and nothing is sent — the caller returns as if it had,
-        // because the endpoints must not answer differently for a throttled request than for
-        // a delivered one.
-        if (outstanding.Any(t => t.CreatedAt > DateTime.UtcNow - ResendCooldown))
-        {
-            _logger.LogInformation(
-                "Suppressed a {Purpose} link for user {UserId}: one was issued within the cooldown.",
-                purpose, userId);
-            return null;
-        }
-
-        _db.AccountTokens.RemoveRange(outstanding);
-
-        var plaintext = GenerateToken();
-        var token = new AccountToken
-        {
-            Id = Guid.NewGuid(),
-            UserId = userId,
-            Purpose = purpose,
-            TokenHash = HashToken(plaintext),
-            ExpiresAtUtc = DateTime.UtcNow.Add(lifetime),
-        };
-
-        _db.AccountTokens.Add(token);
-        await _db.SaveChangesAsync(cancellationToken);
-
-        return (plaintext, token);
-    }
+    private Task<(string Plaintext, AccountToken Token)?> IssueTokenAsync(
+        Guid userId, AccountTokenPurpose purpose, TimeSpan lifetime, CancellationToken cancellationToken) =>
+        AccountTokenStore.IssueAsync(_db, userId, purpose, lifetime, _logger, cancellationToken);
 
     /// <summary>
     /// A failed send must not leave the account in a state the user cannot repair, so the
@@ -353,29 +325,10 @@ public class AccountRecoveryService : IAccountRecoveryService
         await _db.SaveChangesAsync(cancellationToken);
     }
 
-    /// <summary>
-    /// Look a candidate up by DIGEST — the plaintext is never in the table, so this is the
-    /// only way to find a row, and a stolen table cannot be turned back into links.
-    /// </summary>
-    private async Task<AccountToken?> FindTokenAsync(
-        string plaintext, AccountTokenPurpose purpose, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(plaintext))
-        {
-            return null;
-        }
-
-        var hash = HashToken(plaintext);
-        return await _db.AccountTokens
-            .Include(t => t.User)
-            .FirstOrDefaultAsync(t => t.TokenHash == hash && t.Purpose == purpose, cancellationToken);
-    }
-
-    // Both moved to SecretTokens when KAN-20's refresh tokens became a second caller — same
-    // generation, same digest, one implementation.
-    private static string GenerateToken() => SecretTokens.Generate();
-
-    private static string HashToken(string plaintext) => SecretTokens.Hash(plaintext);
+    /// <summary>Find a token by digest — see AccountTokenStore, which is where that lives.</summary>
+    private Task<AccountToken?> FindTokenAsync(
+        string plaintext, AccountTokenPurpose purpose, CancellationToken cancellationToken) =>
+        AccountTokenStore.FindAsync(_db, plaintext, purpose, cancellationToken);
 
     private string BuildLink(string path, string token) =>
         $"{_mailOptions.AppBaseUrl.TrimEnd('/')}{path}?token={Uri.EscapeDataString(token)}";

@@ -58,6 +58,12 @@ public class ApplicationDbContext : DbContext
     // Accounts (KAN-20): one row per signed-in device. See UserSession.
     public DbSet<UserSession> UserSessions => Set<UserSession>();
 
+    // Accounts (KAN-21): the second factor and everything around it.
+    public DbSet<UserSecondFactor> UserSecondFactors => Set<UserSecondFactor>();
+    public DbSet<SecondFactorRecoveryCode> SecondFactorRecoveryCodes => Set<SecondFactorRecoveryCode>();
+    public DbSet<SignInChallenge> SignInChallenges => Set<SignInChallenge>();
+    public DbSet<SecondFactorResetRequest> SecondFactorResetRequests => Set<SecondFactorResetRequest>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         builder.Entity<Like>()
@@ -417,6 +423,91 @@ public class ApplicationDbContext : DbContext
             .HasOne(s => s.User)
             .WithMany()
             .HasForeignKey(s => s.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // ── Accounts (KAN-21): the second factor ───────────────────────────────
+        //
+        // ONE factor per account, enforced by the database rather than by the service that
+        // happens to write it. Two rows would make "is this account enrolled" ambiguous, and
+        // SingleOrDefaultAsync would start throwing at sign-in — the worst place to find out.
+        builder.Entity<UserSecondFactor>()
+            .HasIndex(f => f.UserId)
+            .IsUnique();
+
+        // Base32 over a 20-byte secret is 32 characters; the bound is generous rather than
+        // exact so a longer secret is a schema decision rather than a truncation.
+        builder.Entity<UserSecondFactor>()
+            .Property(f => f.Secret)
+            .HasMaxLength(64)
+            .IsRequired();
+
+        builder.Entity<UserSecondFactor>()
+            .HasOne(f => f.User)
+            .WithMany()
+            .HasForeignKey(f => f.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Same digest-is-the-lookup-key shape as AccountToken and UserSession. UNIQUE for the
+        // same reason theirs are: two rows sharing a digest would make "which code is this"
+        // ambiguous, and a collision is far likelier to be a bug than a SHA-256 collision.
+        builder.Entity<SecondFactorRecoveryCode>()
+            .Property(c => c.CodeHash)
+            .HasMaxLength(64)
+            .IsRequired();
+
+        builder.Entity<SecondFactorRecoveryCode>()
+            .HasIndex(c => c.CodeHash)
+            .IsUnique();
+
+        // Backs both reads: redeeming one (user + digest) and counting what is left.
+        builder.Entity<SecondFactorRecoveryCode>()
+            .HasIndex(c => c.UserId);
+
+        builder.Entity<SecondFactorRecoveryCode>()
+            .HasOne(c => c.User)
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        builder.Entity<SignInChallenge>()
+            .Property(c => c.TokenHash)
+            .HasMaxLength(64)
+            .IsRequired();
+
+        builder.Entity<SignInChallenge>()
+            .HasIndex(c => c.TokenHash)
+            .IsUnique();
+
+        // Backs the supersede-the-outstanding-one delete that every raise performs.
+        builder.Entity<SignInChallenge>()
+            .HasIndex(c => c.UserId);
+
+        // Backs the retention sweep, a range scan on this column.
+        builder.Entity<SignInChallenge>()
+            .HasIndex(c => c.ExpiresAtUtc);
+
+        builder.Entity<SignInChallenge>()
+            .Property(c => c.UserAgent)
+            .HasMaxLength(256);
+
+        builder.Entity<SignInChallenge>()
+            .HasOne(c => c.User)
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Backs the sweeper's due-and-still-live query, and the per-user read every identity
+        // call makes to decide whether to warn.
+        builder.Entity<SecondFactorResetRequest>()
+            .HasIndex(r => r.UserId);
+
+        builder.Entity<SecondFactorResetRequest>()
+            .HasIndex(r => r.EffectiveAtUtc);
+
+        builder.Entity<SecondFactorResetRequest>()
+            .HasOne(r => r.User)
+            .WithMany()
+            .HasForeignKey(r => r.UserId)
             .OnDelete(DeleteBehavior.Cascade);
 
         builder.Entity<Recipe>()

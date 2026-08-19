@@ -42,6 +42,14 @@ public interface IAdminService
 
     Task<ModerationResult<bool>> UnbanUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Accounts (KAN-21): take a stuck user's second factor off. The SECOND rung of the
+    /// recovery ladder — instant, unlike the emailed reset, and safe only because it is
+    /// audited and requires a human. Conflict when the account has no factor to remove.
+    /// </summary>
+    Task<ModerationResult<bool>> ResetSecondFactorAsync(
+        Guid userId, Guid adminUserId, string? reason, CancellationToken cancellationToken = default);
+
     /// <summary>Promote to Admin. Forbidden on self, Conflict when already Admin or banned.</summary>
     Task<ModerationResult<bool>> PromoteUserAsync(Guid userId, Guid adminUserId, CancellationToken cancellationToken = default);
 
